@@ -1,0 +1,50 @@
+# Quartus compilation databases
+db/
+incremental_db/
+greybox_tmp/
+.qsys_edit/
+
+# Generated output files
+output_files/
+
+# Quartus cache and temporary files
+*.qws
+*.smsg
+*.ddb
+*.rpt
+*.summary
+*.jdi
+
+# Programming files (optional)
+*.sof
+*.pof
+*.jam
+*.jbc
+*.rbf
+
+# Backup files
+*.bak
+*.vhd.bak
+*.v.bak
+*.sv.bak
+
+# Autosave / editor files
+*~
+*.swp
+*.swo
+
+# Simulation outputs
+transcript
+work/
+vsim.wlf
+modelsim.ini
+
+# Generated IP outputs
+ip/**/*.cmp
+ip/**/*.bsf
+ip/**/*.sip
+ip/**/*.spd
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,100 @@
+/*
+WARNING: Do NOT edit the input and output ports in this file in a text
+editor if you plan to continue editing the block that represents it in
+the Block Editor! File corruption is VERY likely to occur.
+*/
+/*
+Copyright (C) 2019  Intel Corporation. All rights reserved.
+Your use of Intel Corporation's design tools, logic functions 
+and other software and tools, and any partner logic 
+functions, and any output files from any of the foregoing 
+(including device programming or simulation files), and any 
+associated documentation or information are expressly subject 
+to the terms and conditions of the Intel Program License 
+Subscription Agreement, the Intel Quartus Prime License Agreement,
+the Intel FPGA IP License Agreement, or other applicable license
+agreement, including, without limitation, that your use is for
+the sole purpose of programming logic devices manufactured by
+Intel and sold by Intel or its authorized distributors.  Please
+refer to the applicable agreement for further details, at
+https://fpgasoftware.intel.com/eula.
+*/
+(header "symbol" (version "1.1"))
+(symbol
+	(rect 16 16 248 160)
+	(text "flash" (rect 5 0 23 12)(font "Arial" ))
+	(text "inst" (rect 8 128 20 140)(font "Arial" ))
+	(port
+		(pt 0 32)
+		(input)
+		(text "CLK" (rect 0 0 20 12)(font "Arial" ))
+		(text "CLK" (rect 21 27 41 39)(font "Arial" ))
+		(line (pt 0 32)(pt 16 32)(line_width 1))
+	)
+	(port
+		(pt 0 48)
+		(input)
+		(text "DATAIN[7..0]" (rect 0 0 59 12)(font "Arial" ))
+		(text "DATAIN[7..0]" (rect 21 43 80 55)(font "Arial" ))
+		(line (pt 0 48)(pt 16 48)(line_width 3))
+	)
+	(port
+		(pt 0 64)
+		(input)
+		(text "ADDR[15..0]" (rect 0 0 54 12)(font "Arial" ))
+		(text "ADDR[15..0]" (rect 21 59 75 71)(font "Arial" ))
+		(line (pt 0 64)(pt 16 64)(line_width 3))
+	)
+	(port
+		(pt 0 80)
+		(input)
+		(text "RD" (rect 0 0 15 12)(font "Arial" ))
+		(text "RD" (rect 21 75 36 87)(font "Arial" ))
+		(line (pt 0 80)(pt 16 80)(line_width 1))
+	)
+	(port
+		(pt 0 96)
+		(input)
+		(text "WR" (rect 0 0 18 12)(font "Arial" ))
+		(text "WR" (rect 21 91 39 103)(font "Arial" ))
+		(line (pt 0 96)(pt 16 96)(line_width 1))
+	)
+	(port
+		(pt 0 112)
+		(input)
+		(text "FL_DI" (rect 0 0 27 12)(font "Arial" ))
+		(text "FL_DI" (rect 21 107 48 119)(font "Arial" ))
+		(line (pt 0 112)(pt 16 112)(line_width 1))
+	)
+	(port
+		(pt 232 32)
+		(output)
+		(text "DATAOUT[7..0]" (rect 0 0 69 12)(font "Arial" ))
+		(text "DATAOUT[7..0]" (rect 142 27 211 39)(font "Arial" ))
+		(line (pt 232 32)(pt 216 32)(line_width 3))
+	)
+	(port
+		(pt 232 48)
+		(output)
+		(text "FL_SCK" (rect 0 0 37 12)(font "Arial" ))
+		(text "FL_SCK" (rect 174 43 211 55)(font "Arial" ))
+		(line (pt 232 48)(pt 216 48)(line_width 1))
+	)
+	(port
+		(pt 232 64)
+		(output)
+		(text "FL_CS" (rect 0 0 30 12)(font "Arial" ))
+		(text "FL_CS" (rect 181 59 211 71)(font "Arial" ))
+		(line (pt 232 64)(pt 216 64)(line_width 1))
+	)
+	(port
+		(pt 232 80)
+		(output)
+		(text "FL_DO" (rect 0 0 31 12)(font "Arial" ))
+		(text "FL_DO" (rect 180 75 211 87)(font "Arial" ))
+		(line (pt 232 80)(pt 216 80)(line_width 1))
+	)
+	(drawing
+		(rectangle (rect 16 16 216 128)(line_width 1))
+	)
+)
