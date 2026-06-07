@@ -25,12 +25,14 @@ ARCHITECTURE behavior OF flash IS
 BEGIN
 
 
-PROCESS (WR,ADDR)
+PROCESS (CLK)
 BEGIN
-	IF (rising_edge(WR) AND ADDR = x"0098") THEN
-		FL_SCK <= DATAIN(0);
-		FL_CS <= DATAIN(1);
-		FL_DO <= DATAIN(2);
+    IF rising_edge(CLK) THEN
+        IF (WR = '0' AND ADDR = x"0098") THEN
+			FL_SCK <= DATAIN(0);
+			FL_CS <= DATAIN(1);
+			FL_DO <= DATAIN(2);
+		END IF;
 	END IF;
 END PROCESS;
 

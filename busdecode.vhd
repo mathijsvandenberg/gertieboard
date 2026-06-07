@@ -68,12 +68,7 @@ BEGIN
 	
 	MEM_RD <= NOT(NOT RD AND NOT IOM);
 	MEM_WR <= NOT(NOT WR AND NOT IOM);
-	
---	READY <=  '1' WHEN (T=100 AND MEMADDR AND IOM = '0') 
---				ELSE '1' WHEN (T=3 AND (NOT MEMADDR OR IOM = '1')) 
---				ELSE '1' WHEN RAM_READY = '1'
---				ELSE '0';
-				
+					
 	READY <=  '1' WHEN (T >= 10 AND MEMADDR AND IOM = '0')
       ELSE '1' WHEN (MEMADDR AND IOM = '0' AND RAM_READY = '1')
       ELSE '1' WHEN (T >= 3 AND (NOT MEMADDR OR IOM = '1'))

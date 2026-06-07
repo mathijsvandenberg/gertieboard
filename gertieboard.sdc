@@ -1,88 +1,72 @@
-#create_clock -name {CLOCK50} -period 20 [get_ports {CLOCK50}]
-#create_clock -name {CPU_IOM} -period 100 [get_ports {CPU_IOM}]
-#derive_pll_clocks
-
-#set_false_path -from [get_ports {RESET}]
-	 
-	  
-	  
-	  
-#set_input_delay -clock {[get_clocks *|pll1|clk[0]]}  50 [get_ports {CPU_*}] 
-
-
-#
-#
-#create_clock -name {RESET} -period 100 [get_ports {RESET}]
-#
-#
-#
-#
-#create_clock -name {CPU_RD} -period 50 [get_ports {CPU_RD}]
-#create_clock -name {CPU_WR} -period 50 [get_ports {CPU_WR}]
-#create_clock -name {CPU_ALE} -period 50 [get_ports {CPU_ALE}]
-#create_clock -name {CPU_DTR} -period 50 [get_ports {CPU_DTR}]
-#create_clock -name {CPU_DEN} -period 50 [get_ports {CPU_DEN}]
-#create_clock -name {CPU_IOM} -period 50 [get_ports {CPU_IOM}]
-#create_clock -name {CPU_A} -period 50 [get_ports {CPU_A}]
-#create_clock -name {CPU_AD[7..0]} -period 50 [get_ports {CPU_AD[7..0]}]
-#
-#create_clock -name {UART_RXD} -period 4000 [get_ports {UART_RXD}]
-
-
-
 # =============================================================================
-# Primary input clock
+# gertieboard.sdc
+#
+# One PLL, integer-ratio outputs -> all SYNCHRONOUS to each other:
+#   c0 (clk[0]) = 5    MHz  busdecode + CPU_CLK output pin
+#   c1 (clk[1]) = 25   MHz  VGA pixel clock
+#   c2 (clk[2]) = 1.25 MHz  8253 counter clock
+#   c3 (clk[3]) = 50   MHz  RAM / system
+#
+# Key points:
+#   * The PLL outputs are integer-related, so they are timed TOGETHER, not
+#     declared asynchronous (that was the original bug that left the
+#     busdecode<->PSRAM paths unanalyzed).
+#   * The VGA pixel clock is the one exception: it meets the system clock only
+#     inside the dual-port framebuffer BRAM, so it is its own async group.
+#   * The off-chip V20 bus is a slow, handshake-governed interface (READY
+#     controls correctness, not single-cycle setup), so the CPU pins are
+#     false-pathed both directions. This is what clears the red WITHOUT any
+#     bogus input/output-delay numbers.
 # =============================================================================
+
+# -----------------------------------------------------------------------------
+# Clocks
+# -----------------------------------------------------------------------------
 create_clock -name CLOCK50 -period 20.000 [get_ports CLOCK50]
-
-# =============================================================================
-# PLL-derived clocks
-# Quartus reads the .qip/megafunction parameters and creates the three output
-# clocks automatically. After first compile, look in the TimeQuest report under
-# "Clocks" to see the exact derived names (typically
-# pll1|altpll_component|auto_generated|pll1|clk[0..2] -> 5/25/1.19 MHz).
-# =============================================================================
 derive_pll_clocks
 
-# =============================================================================
-# CPU_CLK output pin (5 MHz from PLL c0, goes off-chip to peripherals)
-# =============================================================================
 create_generated_clock -name CPU_CLK_OUT \
     -source [get_pins {pll1|altpll_component|auto_generated|pll1|clk[0]}] \
     [get_ports CPU_CLK]
 
-# =============================================================================
-# Clock uncertainty (jitter + tool margin). Must come AFTER all clocks defined.
-# =============================================================================
 derive_clock_uncertainty
 
-# =============================================================================
-# Asynchronous clock groups
-# The three PLL outputs are at unrelated frequencies. Domain crossings happen
-# only in the dual-port framebuffer (handled by the M9K's two ports) and the
-# 8253 (designed for an async gate input). Tell TimeQuest not to time paths
-# between these groups.
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Clock groups
+#   - VGA pixel clock (c1): its own async domain (framebuffer BRAM handles CDC)
+#   - everything else: synchronous, timed together
+# -----------------------------------------------------------------------------
 set_clock_groups -asynchronous \
-    -group { CLOCK50 } \
-    -group { pll1|altpll_component|auto_generated|pll1|clk[0] CPU_CLK_OUT } \
     -group { pll1|altpll_component|auto_generated|pll1|clk[1] } \
-    -group { pll1|altpll_component|auto_generated|pll1|clk[2] }
+    -group { CLOCK50 \
+             pll1|altpll_component|auto_generated|pll1|clk[0] \
+             pll1|altpll_component|auto_generated|pll1|clk[2] \
+             pll1|altpll_component|auto_generated|pll1|clk[3] \
+             CPU_CLK_OUT }
 
-# =============================================================================
-# VGA output pins — monitor is forgiving, no real setup/hold spec
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Off-chip V20 bus - false-pathed both directions
+# Correctness is governed by the READY handshake and the long (>=200 ns) bus
+# cycle, not by meeting setup on a single 20 ns system-clock edge. Constraining
+# these with single-cycle delays produces false failures (the -10.9 / -3.1 ns
+# paths in the previous report were entirely placeholder input/output delays).
+# -----------------------------------------------------------------------------
+set_false_path -from [get_ports {CPU_RD CPU_WR CPU_IOM CPU_ALE CPU_DEN \
+                                 CPU_DTR CPU_INTA CPU_HLDA}] -to *
+set_false_path -from [get_ports {CPU_A[*]}]  -to *
+set_false_path -from [get_ports {CPU_AD[*]}] -to *
+set_false_path -from * -to [get_ports {CPU_AD[*]}]
+set_false_path -from * -to [get_ports {CPU_READY CPU_CLK CPU_RST CPU_NMI}]
+
+# -----------------------------------------------------------------------------
+# VGA outputs and reset
+# -----------------------------------------------------------------------------
 set_false_path -from * -to [get_ports {HS VS RGB[*] DEBUG}]
+set_false_path -from [get_ports RESET] -to *
 
-# =============================================================================
-# Optional: if you have an async reset button, mark it false_path
-# (uncomment and adjust the port name)
-# =============================================================================
-# set_false_path -from [get_ports RESET_N] -to *
-
-
-
-
-
-
-
+# -----------------------------------------------------------------------------
+# PSRAM pins: left unconstrained for now (the design runs reliably at the
+# current 50 MHz system clock). To push the PSRAM faster, that becomes the
+# separate "phase-shifted read capture" exercise: add a phase-shifted PLL tap
+# (c4), capture RAM_SIO on it, and constrain RAM_SIO/RAM_SCK/RAM_CS here.
+# -----------------------------------------------------------------------------

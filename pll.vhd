@@ -158,22 +158,22 @@ BEGIN
 	altpll_component : altpll
 	GENERIC MAP (
 		bandwidth_type => "AUTO",
-		clk0_divide_by => 20,
+		clk0_divide_by => 10,
 		clk0_duty_cycle => 50,
-		clk0_multiply_by => 1,
-		clk0_phase_shift => "0",
+		clk0_multiply_by => 1, 
+		clk0_phase_shift => "0",-- CPU CLOCK 5MHZ
 		clk1_divide_by => 2,
 		clk1_duty_cycle => 50,
 		clk1_multiply_by => 1,
-		clk1_phase_shift => "0",
-		clk2_divide_by => 42,
+		clk1_phase_shift => "0",-- VGA CLOCK 25MHZ
+		clk2_divide_by => 40,
 		clk2_duty_cycle => 50,
 		clk2_multiply_by => 1,
-		clk2_phase_shift => "0",
+		clk2_phase_shift => "0",-- TIMER CLOCK 1.25MHZ
 		clk3_divide_by => 1,
 		clk3_duty_cycle => 50,
-		clk3_multiply_by => 2,
-		clk3_phase_shift => "0",
+		clk3_multiply_by => 1,
+		clk3_phase_shift => "0",-- RAM CLOCK 50MHZ
 		compensate_clock => "CLK0",
 		inclk0_input_frequency => 20000,
 		intended_device_family => "Cyclone IV E",

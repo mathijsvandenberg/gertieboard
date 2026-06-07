@@ -16,8 +16,8 @@ ENTITY serial IS
         INT		           : OUT std_logic;
 		  DATAOUT           : OUT std_logic_vector(7 DOWNTO 0);
 	  	  DBG		           : OUT std_logic_vector(7 DOWNTO 0);
-		  UARTTX				  : OUT std_logic;
-		  UARTCTS			  : OUT std_logic);  	
+		  UARTTX				  : OUT std_logic);
+	
    END serial;
 	
 ARCHITECTURE behavior OF serial IS

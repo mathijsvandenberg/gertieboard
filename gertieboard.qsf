@@ -46,6 +46,7 @@ set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
 set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
 set_global_assignment -name MAX_CORE_JUNCTION_TEMP 85
 set_global_assignment -name ERROR_CHECK_FREQUENCY_DIVISOR 1
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 16
 set_location_assignment PIN_E11 -to SEG_D
 set_location_assignment PIN_E10 -to SEG_G
 set_location_assignment PIN_D9 -to SEG_F
@@ -237,4 +238,5 @@ set_global_assignment -name VHDL_FILE timer8253.vhd
 set_global_assignment -name VHDL_FILE int8259.vhd
 set_global_assignment -name VHDL_FILE ppi8255.vhd
 set_global_assignment -name VHDL_FILE dma8237.vhd
+set_global_assignment -name VHDL_FILE fdc8272.vhd
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top

@@ -168,7 +168,7 @@ BEGIN
   -- HSYNC and VSYNC generation
   HS    <= '0' WHEN X < 96 ELSE '1';
   VS    <= '0' WHEN Y < 2  ELSE '1';
-  VALID <= '1' WHEN (X > 144 AND X < 784 AND Y > 34 AND Y < 515) ELSE '0';
+  VALID <= '1' WHEN (X > 144 AND X < 784 AND Y > 34 AND Y < (515-80)) ELSE '0';
 
   -- ---------------- Color decode -------------------------------------
   -- Attribute byte layout (CGA, 16/16 mode):
