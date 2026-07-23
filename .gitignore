@@ -48,3 +48,28 @@ ip/**/*.spd
 # OS files
 .DS_Store
 Thumbs.db
+# --- project-specific additions ---
+
+# Quartus synthesis report dumped to the repo root
+/report.txt
+
+# Floppy / disk images (large; contain third-party DOS & games)
+*.img
+*.IMA
+*.ima
+
+# Third-party tool executables (nasm/ndisasm etc. — not our source)
+*.exe
+
+# tools/ build outputs (regenerable from the .s / .asm sources)
+tools/*.bin
+tools/*.BIN
+tools/*.64k
+tools/*.com
+tools/*.o
+tools/*.mif
+tools/*.crc
+tools/*.EXE
+# ...but keep the generated 8x8 font: it's a tiny build input for the BIOS
+!tools/font8x8.bin
+tools/philips.asm

@@ -1,38 +1,24 @@
 --------------------------------------------------------------------------------
--- dma8237.vhd  --  Minimal 8237A DMA Controller
+-- dma8237.vhd  --  8237A DMA Controller, register model + bus-master engine
 --
--- Behavioural model of the 8237A as used in the IBM PC/XT, with the
--- assumption that no real DMA-using cards (FDC, HDC, SDLC, sound) are
--- installed.  All four channels remain idle; no bus mastering ever
--- happens.  What this module DOES implement, completely, is the
--- programmer's-view register set:
+-- The complete programmer's-view register set is unchanged from the original
+-- stub (address/count pairs with byte-pointer FF, command/status/request/mode/
+-- mask, master clear, etc.).  Added on top is a real single-transfer bus master
+-- so the floppy controller can move bytes into/out of PSRAM by itself:
 --
---   I/O range 0x00 - 0x0F (lower 4 bits select the register)
+--   DREQ(n) (or a software request) raises HRQ -> V20 HOLD.  When the V20 grants
+--   the bus (HLDA), the engine drives DMA_ADDR + DACK(n) and the memory strobe
+--   for one byte, waits for RAM_READY, advances the address, decrements the
+--   count, and releases HRQ (single mode).  TC is asserted on the final byte.
 --
---   0x0 : Ch0 current/base address  (16-bit via byte-pointer FF)
---   0x1 : Ch0 current/base word cnt (16-bit via byte-pointer FF)
---   0x2 : Ch1 current/base address
---   0x3 : Ch1 current/base word cnt
---   0x4 : Ch2 current/base address
---   0x5 : Ch2 current/base word cnt
---   0x6 : Ch3 current/base address
---   0x7 : Ch3 current/base word cnt
---   0x8 : R = Status, W = Command
---   0x9 : W = Request (software DREQ)
---   0xA : W = Single Mask bit
---   0xB : W = Mode
---   0xC : W = Clear Byte Pointer FF
---   0xD : R = Temp,   W = Master Clear
---   0xE : W = Clear Mask register
---   0xF : W = Write Mask register (all 4 bits)
+--   Data does NOT pass through this module: the byte moves FDC<->PSRAM through
+--   busdecode's HLDA mux.  This engine only sequences the transfer.
 --
--- The byte-pointer flip-flop toggles on every read or write of an
--- address/count register, and resets to 0 on master clear, hard reset,
--- and writes to 0x0C.  All channels are masked at reset (mask reg = 0xF).
+--   Transfer type from mode_reg(ch)(3:2):  "01" = write-to-memory (floppy READ)
+--   -> IOR+MEMW ; otherwise read-from-memory (floppy WRITE) -> MEMR+IOW.
+--   Direction from mode_reg(ch)(5) (0=inc), autoinit from mode_reg(ch)(4).
 --
--- Page registers (0x81/0x82/0x83/0x87) are NOT in this module - they
--- were a separate latch chip on the real XT.  Add them as a tiny
--- companion module if Ruud's tests ever check them.
+-- DREQ/DACK/TC are active HIGH here (both ends of the handshake are ours).
 --------------------------------------------------------------------------------
 
 LIBRARY IEEE;
@@ -51,7 +37,20 @@ ENTITY dma8237 IS
         IO_RD       : IN    std_logic;                       -- active LOW
         IO_WR       : IN    std_logic;                       -- active LOW
         DATAIN      : IN    std_logic_vector(7 DOWNTO 0);
-        DATAOUT     : INOUT std_logic_vector(7 DOWNTO 0));   -- 'Z' when not addressed
+        DATAOUT     : INOUT std_logic_vector(7 DOWNTO 0);    -- 'Z' when not addressed
+
+        -- DMA bus-master interface (single floppy channel = ch2)
+        DREQ        : IN    std_logic;                       -- FDC request (active high) -> ch2
+        DACK        : OUT   std_logic;                       -- ack to FDC (active high)  <- ch2
+        HRQ         : OUT   std_logic;                       -- -> V20 HOLD
+        HLDA        : IN    std_logic;                       -- <- V20 HLDA
+        DMA_ADDR    : OUT   std_logic_vector(15 DOWNTO 0);   -- -> busdecode
+        DMA_MEMR    : OUT   std_logic;                       -- active LOW -> busdecode
+        DMA_MEMW    : OUT   std_logic;                       -- active LOW -> busdecode
+        DMA_IOR     : OUT   std_logic;                       -- active LOW (optional)
+        DMA_IOW     : OUT   std_logic;                       -- active LOW (optional)
+        TC          : OUT   std_logic;                       -- terminal count -> FDC
+        RAM_READY   : IN    std_logic);                      -- <- ram1 READY
 END dma8237;
 
 
@@ -75,9 +74,9 @@ ARCHITECTURE behavior OF dma8237 IS
   SIGNAL request_reg : std_logic_vector(3 DOWNTO 0) := (OTHERS => '0');
   SIGNAL temp_reg    : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
 
-  -- Status is combinational: never any TCs (we don't run transfers), and
-  -- the software request bits feed the upper nibble.
+  -- Status: upper nibble = software-request bits, lower nibble = TC latches.
   SIGNAL status_reg : std_logic_vector(7 DOWNTO 0);
+  SIGNAL tc_status  : std_logic_vector(3 DOWNTO 0) := (OTHERS => '0');
 
   -- Internal byte-pointer flip-flop (for the 16-bit register pairs)
   SIGNAL bp_ff : std_logic := '0';   -- 0 -> next access is LSB, 1 -> MSB
@@ -89,15 +88,25 @@ ARCHITECTURE behavior OF dma8237 IS
   -- Combinational read mux
   SIGNAL read_data : std_logic_vector(7 DOWNTO 0);
 
+  -- ---------------- Bus-master engine -------------------------------------
+  TYPE dst_t IS (D_IDLE, D_HOLD, D_MEM, D_FIN);
+  SIGNAL dst     : dst_t := D_IDLE;
+  SIGNAL ach     : integer RANGE 0 TO 3 := 0;
+  SIGNAL last_b  : std_logic := '0';
+  SIGNAL req_eff : std_logic_vector(3 DOWNTO 0);
+  SIGNAL hw_dreq : std_logic_vector(3 DOWNTO 0);   -- single DREQ mapped to ch2
+
 BEGIN
 
   -- ---------------- Address decode ----------------------------------------
   cs <= '1' WHEN IO_ADDR(15 DOWNTO 4) = X"000" ELSE '0';
 
   -- ---------------- Status register (combinational) -----------------------
-  -- Bits 7..4 : channel software-request status
-  -- Bits 3..0 : channel terminal-count status (never set in this stub)
-  status_reg <= request_reg & "0000";
+  status_reg <= request_reg & tc_status;
+
+  -- effective requests: hardware DREQ (ch2 only) or software request, unmasked
+  hw_dreq <= (2 => DREQ, OTHERS => '0');
+  req_eff <= (hw_dreq OR request_reg) AND NOT mask_reg;
 
   -- ---------------- Read data mux -----------------------------------------
   read_mux : PROCESS (IO_ADDR, bp_ff,
@@ -128,7 +137,7 @@ BEGIN
 
   DATAOUT <= read_data WHEN (cs = '1' AND IO_RD = '0') ELSE "ZZZZZZZZ";
 
-  -- ---------------- Register writes + BP toggle on reads ------------------
+  -- ---------------- Register writes + BP toggle + DMA engine --------------
   main : PROCESS (CLK)
     VARIABLE ch : integer RANGE 0 TO 3;
   BEGIN
@@ -143,9 +152,21 @@ BEGIN
         mask_reg    <= (OTHERS => '1');
         request_reg <= (OTHERS => '0');
         temp_reg    <= (OTHERS => '0');
+        tc_status   <= (OTHERS => '0');
         bp_ff       <= '0';
         io_rd_prev  <= '1';
         io_wr_prev  <= '1';
+        dst         <= D_IDLE;
+        HRQ         <= '0';
+        DACK        <= '0';
+        TC          <= '0';
+        DMA_MEMR    <= '1';
+        DMA_MEMW    <= '1';
+        DMA_IOR     <= '1';
+        DMA_IOW     <= '1';
+        DMA_ADDR    <= (OTHERS => '0');
+        last_b      <= '0';
+        ach         <= 0;
 
       ELSE
         io_rd_prev <= IO_RD;
@@ -189,14 +210,10 @@ BEGIN
               command_reg <= DATAIN;
 
             -- ---------------- 0x9 Request register --------------------
-            --   DATAIN(2)   : 1 = set, 0 = clear
-            --   DATAIN(1:0) : channel
             WHEN X"9" =>
               request_reg(conv_integer(DATAIN(1 DOWNTO 0))) <= DATAIN(2);
 
             -- ---------------- 0xA Single mask bit ---------------------
-            --   DATAIN(2)   : 1 = mask, 0 = unmask
-            --   DATAIN(1:0) : channel
             WHEN X"A" =>
               mask_reg(conv_integer(DATAIN(1 DOWNTO 0))) <= DATAIN(2);
 
@@ -215,6 +232,7 @@ BEGIN
               temp_reg    <= (OTHERS => '0');
               bp_ff       <= '0';
               mask_reg    <= (OTHERS => '1');
+              tc_status   <= (OTHERS => '0');
 
             -- ---------------- 0xE Clear mask register ----------------
             WHEN X"E" =>
@@ -229,18 +247,90 @@ BEGIN
         END IF;
 
         -- =============================================================
-        -- Reads of address/count registers toggle the byte-pointer FF
-        -- (latched on rising edge of /IOR).  Reads of any other
-        -- register do not touch it.
+        -- Reads of address/count registers toggle the byte-pointer FF.
+        -- Reading the status register (0x8) clears the TC latches.
         -- =============================================================
         IF (io_rd_prev = '0' AND IO_RD = '1' AND cs = '1') THEN
           CASE IO_ADDR(3 DOWNTO 0) IS
             WHEN X"0" | X"1" | X"2" | X"3"
                | X"4" | X"5" | X"6" | X"7" =>
               bp_ff <= NOT bp_ff;
+            WHEN X"8" =>
+              tc_status <= (OTHERS => '0');
             WHEN OTHERS => NULL;
           END CASE;
         END IF;
+
+        -- =============================================================
+        -- Bus-master engine (single transfer mode). CPU register writes
+        -- above and this engine never run in the same cycle: while a
+        -- transfer is in progress the V20 is held off the bus.
+        -- =============================================================
+        CASE dst IS
+
+          WHEN D_IDLE =>
+            HRQ      <= '0';
+            DACK     <= '0';
+            TC       <= '0';
+            DMA_MEMR <= '1'; DMA_MEMW <= '1';
+            DMA_IOR  <= '1'; DMA_IOW  <= '1';
+            -- command_reg(2) = 1 disables the whole controller
+            IF (command_reg(2) = '0' AND req_eff /= "0000") THEN
+              IF    req_eff(0) = '1' THEN ach <= 0;
+              ELSIF req_eff(1) = '1' THEN ach <= 1;
+              ELSIF req_eff(2) = '1' THEN ach <= 2;
+              ELSE                        ach <= 3; END IF;
+              HRQ <= '1';
+              dst <= D_HOLD;
+            END IF;
+
+          WHEN D_HOLD =>
+            HRQ <= '1';
+            IF HLDA = '1' THEN
+              DMA_ADDR  <= cur_addr(ach);
+              IF ach = 2 THEN DACK <= '1'; END IF;   -- only the floppy has a device
+              IF cur_cnt(ach) = x"0000" THEN last_b <= '1'; ELSE last_b <= '0'; END IF;
+              IF mode_reg(ach)(3 DOWNTO 2) = "01" THEN   -- device -> memory (floppy read)
+                DMA_IOR <= '0'; DMA_MEMW <= '0';
+              ELSE                                        -- memory -> device (floppy write)
+                DMA_MEMR <= '0'; DMA_IOW <= '0';
+              END IF;
+              dst <= D_MEM;
+            END IF;
+
+          WHEN D_MEM =>
+            IF last_b = '1' THEN TC <= '1'; END IF;   -- assert with DACK on final byte
+            IF RAM_READY = '1' THEN                   -- memory cycle complete
+              DMA_MEMR <= '1'; DMA_MEMW <= '1';
+              DMA_IOR  <= '1'; DMA_IOW  <= '1';
+              -- advance address
+              IF mode_reg(ach)(5) = '0' THEN
+                cur_addr(ach) <= cur_addr(ach) + 1;
+              ELSE
+                cur_addr(ach) <= cur_addr(ach) - 1;
+              END IF;
+              -- decrement / terminal count
+              IF cur_cnt(ach) = x"0000" THEN
+                tc_status(ach)   <= '1';
+                request_reg(ach) <= '0';
+                IF mode_reg(ach)(4) = '1' THEN          -- autoinit: reload
+                  cur_addr(ach) <= base_addr(ach);
+                  cur_cnt(ach)  <= base_cnt(ach);
+                ELSE
+                  mask_reg(ach) <= '1';                 -- else self-mask
+                END IF;
+              ELSE
+                cur_cnt(ach) <= cur_cnt(ach) - 1;
+              END IF;
+              dst <= D_FIN;
+            END IF;
+
+          WHEN D_FIN =>
+            DACK <= '0';
+            HRQ  <= '0';            -- release the bus (single mode); TC held until idle
+            dst  <= D_IDLE;
+
+        END CASE;
 
       END IF;
     END IF;

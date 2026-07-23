@@ -128,9 +128,15 @@ BEGIN
           CE0 <= CE0 - 1;
         END IF;
 
-        -- Mode 3: square wave (high first half, low second half)
-        IF (MODE0 = "011" OR MODE0 = "111") AND CR0 /= x"0000" THEN
-          IF CE0 > ("0" & CR0(15 DOWNTO 1)) THEN
+        -- Mode 3: square wave (high first half, low second half).
+        -- CR0 = 0x0000 is the 8253's 65536 divisor -- exactly what the XT BIOS
+        -- loads for the 18.2 Hz tick. Its half-period is 32768, i.e. O0 = the
+        -- count MSB. This case MUST be handled here, not excluded, or OUT0 never
+        -- toggles, no edge reaches IR0, and INTERRUPT LEVEL 0 fails.
+        IF (MODE0 = "011" OR MODE0 = "111") THEN
+          IF CR0 = x"0000" THEN
+            O0 <= CE0(15);
+          ELSIF CE0 > ("0" & CR0(15 DOWNTO 1)) THEN
             O0 <= '1';
           ELSE
             O0 <= '0';
@@ -140,6 +146,14 @@ BEGIN
           IF CE0 = x"0001" THEN
             O0 <= '0';
           ELSE
+            O0 <= '1';
+          END IF;
+        -- Mode 0: interrupt on terminal count. OUT starts low (set on the count
+        -- load above), latches HIGH the moment the count reaches zero, and holds
+        -- there until a new count is written. A diagnostic's interrupt-level test
+        -- uses exactly this: the single low->high edge at TC is the interrupt.
+        ELSIF (MODE0 = "000") THEN
+          IF CE0 = x"0000" THEN
             O0 <= '1';
           END IF;
         END IF;
@@ -158,10 +172,13 @@ BEGIN
         ELSE
           CE1 <= CE1 - 1;
         END IF;
-        IF (MODE1 = "011" OR MODE1 = "111") AND CR1 /= x"0000" THEN
-          IF CE1 > ("0" & CR1(15 DOWNTO 1)) THEN O1 <= '1'; ELSE O1 <= '0'; END IF;
+        IF (MODE1 = "011" OR MODE1 = "111") THEN
+          IF CR1 = x"0000" THEN O1 <= CE1(15);
+          ELSIF CE1 > ("0" & CR1(15 DOWNTO 1)) THEN O1 <= '1'; ELSE O1 <= '0'; END IF;
         ELSIF (MODE1 = "010" OR MODE1 = "110") THEN
           IF CE1 = x"0001" THEN O1 <= '0'; ELSE O1 <= '1'; END IF;
+        ELSIF (MODE1 = "000") THEN
+          IF CE1 = x"0000" THEN O1 <= '1'; END IF;
         END IF;
       END IF;
 
@@ -178,10 +195,13 @@ BEGIN
         ELSE
           CE2 <= CE2 - 1;
         END IF;
-        IF (MODE2 = "011" OR MODE2 = "111") AND CR2 /= x"0000" THEN
-          IF CE2 > ("0" & CR2(15 DOWNTO 1)) THEN O2 <= '1'; ELSE O2 <= '0'; END IF;
+        IF (MODE2 = "011" OR MODE2 = "111") THEN
+          IF CR2 = x"0000" THEN O2 <= CE2(15);
+          ELSIF CE2 > ("0" & CR2(15 DOWNTO 1)) THEN O2 <= '1'; ELSE O2 <= '0'; END IF;
         ELSIF (MODE2 = "010" OR MODE2 = "110") THEN
           IF CE2 = x"0001" THEN O2 <= '0'; ELSE O2 <= '1'; END IF;
+        ELSIF (MODE2 = "000") THEN
+          IF CE2 = x"0000" THEN O2 <= '1'; END IF;
         END IF;
       END IF;
 

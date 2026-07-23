@@ -1,33 +1,23 @@
 --------------------------------------------------------------------------------
--- fdc8272.vhd  --  uPD765 / 8272A-compatible floppy controller (NON-DMA)
+-- fdc8272.vhd  --  uPD765 / 8272A-compatible floppy controller
 --                   backed by a UART link to a host PC serving a floppy.img
 --
--- I/O map (IBM PC/XT primary FDC):
---   0x3F2  DOR  (write)  Digital Output Register: motor/drive/reset/IRQ-enable
---   0x3F4  MSR  (read)   Main Status Register
---   0x3F5  DATA (r/w)    command / parameter / data / result FIFO
---   0x3F7  DIR  (read)   Digital Input Register  (disk-change = bit7, we say 0)
---   0x3F7  CCR  (write)  data-rate select        (accepted and ignored)
+-- Supports BOTH transfer modes, selected by the ND bit of the Specify command
+-- (param 2, bit 0):
+--   ND = 0  -> DMA mode  : execution-phase bytes move FDC<->memory via the 8237
+--                          (DREQ/DACK/TC). Works with a STOCK DMA BIOS.
+--   ND = 1  -> non-DMA   : bytes move through the 0x3F5 FIFO with MSR.RQM
+--                          handshaking (needs a PIO INT 13h).
+-- Default after reset is DMA (ND=0) so a stock BIOS works out of the box.
 --
--- Operates in NON-DMA mode: the execution-phase data bytes move through the
--- DATA register (0x3F5) with MSR.RQM handshaking and an IRQ per command, so no
--- 8237 transfer is required. (DRQ/TC are exposed but unused.)  This needs a
--- BIOS whose INT 13h does PIO floppy (e.g. a non-DMA-capable / patched BIOS);
--- a stock IBM DMA-only BIOS will not drive it.
+-- In both modes the disk side is identical: per 512-byte sector the controller
+-- fetches/stores over the UART:
+--   READ :  FPGA -> host : 0x33 0x01 C H R          ; host -> FPGA : 512 bytes
+--   WRITE:  FPGA -> host : 0x33 0x02 C H R <512>     ; host -> FPGA : 0x06
 --
--- Disk side is a UART. Per 512-byte sector the controller speaks:
---   READ :  FPGA -> host : 0x33 0x01 C H R          (5 bytes)
---           host -> FPGA : <512 data bytes>          (PRESENT DATA)
---   WRITE:  FPGA -> host : 0x33 0x02 C H R <512 bytes>
---           host -> FPGA : 0x06                       (WRITE OK / ACK)
---
--- Geometry (CHS) is interpreted by the host from the .img size; the FPGA just
--- forwards C/H/R. Sector size is fixed at 512 (N=2). Multi-sector transfers
--- within a track (R..EOT) are looped one UART sector at a time.
---
--- Commands implemented: Specify(03), SenseDrive(04), Write(05), Read(06),
---   Recalibrate(07), SenseInterrupt(08), ReadID(0A), Seek(0F). Anything else
---   returns the invalid-command status (ST0=0x80).
+-- I/O map: 0x3F2 DOR(w) 0x3F4 MSR(r) 0x3F5 DATA(rw) 0x3F7 DIR(r)/CCR(w).
+-- Commands: Specify(03) SenseDrive(04) Write(05) Read(06) Recalibrate(07)
+--           SenseInterrupt(08) ReadID(0A) Seek(0F); others -> ST0=0x80.
 --------------------------------------------------------------------------------
 
 LIBRARY IEEE;
@@ -52,8 +42,13 @@ ENTITY fdc8272 IS
         DATAOUT  : OUT   std_logic_vector(7 DOWNTO 0);  -- 'Z' when not addressed
 
         IRQ      : OUT   std_logic;                     -- -> 8259 IR6 (active high)
-        DRQ      : OUT   std_logic;                     -- unused (non-DMA); tied '0'
-        TC       : IN    std_logic;                     -- unused
+
+        -- DMA handshake (active HIGH, to/from 8237)
+        DRQ      : OUT   std_logic;                     -- -> 8237 DREQ2
+        DACK     : IN    std_logic;                     -- <- 8237 DACK2
+        TC       : IN    std_logic;                     -- <- 8237 terminal count
+        DMA_DOUT : OUT   std_logic_vector(7 DOWNTO 0);  -- byte -> memory (floppy read)
+        DMA_DIN  : IN    std_logic_vector(7 DOWNTO 0);  -- byte <- memory (floppy write)
 
         -- UART to host
         UART_TX  : OUT   std_logic;
@@ -112,8 +107,8 @@ ARCHITECTURE behavior OF fdc8272 IS
   ----------------------------------------------------------------------------
   TYPE st_t IS (
     ST_IDLE, ST_PARAMS, ST_DISPATCH,
-    ST_RD_REQ, ST_RD_RX, ST_RD_XFER,
-    ST_WR_XFER, ST_WR_REQ, ST_WR_DATA, ST_WR_ACK,
+    ST_RD_REQ, ST_RD_RX, ST_RD_XFER, ST_RD_DMA,
+    ST_WR_XFER, ST_WR_DMA, ST_WR_REQ, ST_WR_DATA, ST_WR_ACK,
     ST_NEXT, ST_RESULT, ST_SEEKDONE );
   SIGNAL st : st_t := ST_IDLE;
 
@@ -139,6 +134,12 @@ ARCHITECTURE behavior OF fdc8272 IS
   SIGNAL seek_flag : std_logic := '0';   -- last int was a seek/recal/reset
   SIGNAL rst_poll  : integer RANGE 0 TO 4 := 0;
   SIGNAL dor_rst_prev : std_logic := '0';
+
+  -- DMA control
+  SIGNAL nodma     : std_logic := '0';   -- ND bit from Specify (0 = DMA)
+  SIGNAL dack_prev : std_logic := '0';
+  SIGNAL dma_tc    : std_logic := '0';
+  SIGNAL dreq_r    : std_logic := '0';
 
   ----------------------------------------------------------------------------
   -- MSR fields
@@ -171,7 +172,7 @@ BEGIN
       WHEN ST_RD_XFER  => msr <= "11110000";  -- RQM, DIO->CPU, NDM, CB
       WHEN ST_WR_XFER  => msr <= "10110000";  -- RQM, NDM, CB
       WHEN ST_RESULT   => msr <= "11010000";  -- RQM, DIO->CPU, CB
-      WHEN OTHERS      => msr <= "00010000";  -- CB only (busy on UART etc.)
+      WHEN OTHERS      => msr <= "00010000";  -- CB only (busy / DMA exec / UART)
     END CASE;
   END PROCESS;
 
@@ -186,7 +187,7 @@ BEGIN
       IF st = ST_RESULT THEN
         DATAOUT <= res(ridx);
       ELSE
-        DATAOUT <= buf_dout;          -- read execution phase
+        DATAOUT <= buf_dout;          -- read execution phase (non-DMA)
       END IF;
     ELSIF (RD = '0' AND sel_dir = '1') THEN
       DATAOUT <= x"00";               -- no disk-change
@@ -195,8 +196,9 @@ BEGIN
     END IF;
   END PROCESS;
 
-  DRQ <= '0';
-  IRQ <= irq_int AND dor(3);          -- DOR bit3 enables IRQ/DMA gate
+  DRQ      <= dreq_r;
+  DMA_DOUT <= buf_dout;               -- byte presented to memory during DMA read
+  IRQ      <= irq_int AND dor(3);     -- DOR bit3 enables IRQ/DMA gate
 
   ----------------------------------------------------------------------------
   -- UART transmitter
@@ -285,11 +287,14 @@ BEGIN
         irq_int <= '0'; seek_flag <= '0'; rst_poll <= 0; dor_rst_prev <= '0';
         pcn <= (OTHERS => '0'); buf_idx <= 0; u_cnt <= 0;
         tx_start <= '0';
+        nodma <= '0'; dack_prev <= '0'; dma_tc <= '0'; dreq_r <= '0';
       ELSE
-        rd_prev  <= RD;
-        wr_prev  <= WR;
-        tx_start <= '0';
-        buf_dout <= sbuf(buf_idx MOD 512);   -- registered buffer read
+        rd_prev   <= RD;
+        wr_prev   <= WR;
+        dack_prev <= DACK;
+        tx_start  <= '0';
+        dreq_r    <= '0';                     -- default: no DMA request
+        buf_dout  <= sbuf(buf_idx MOD 512);   -- registered buffer read
 
         --------------------------------------------------------------------
         -- DOR writes: motor/drive/reset/irq-enable. Reset edge -> poll ints.
@@ -356,6 +361,7 @@ BEGIN
             CASE op IS
 
               WHEN "00011" =>                      -- Specify: no result, no int
+                nodma <= params(1)(0);             -- capture ND bit (0=DMA)
                 st <= ST_IDLE;
 
               WHEN "00100" =>                      -- Sense Drive Status -> ST3
@@ -408,14 +414,20 @@ BEGIN
                 cur_c <= params(1); cur_h <= params(2);
                 cur_r <= params(3); eot <= params(5);
                 drive_sel <= params(0)(1 DOWNTO 0);
-                st <= ST_RD_REQ;
+                dma_tc <= '0';
+                st <= ST_RD_REQ;                   -- fetch sector via UART first
 
               WHEN "00101" =>                      -- Write Data
                 cur_c <= params(1); cur_h <= params(2);
                 cur_r <= params(3); eot <= params(5);
                 drive_sel <= params(0)(1 DOWNTO 0);
+                dma_tc <= '0';
                 buf_idx <= 0;
-                st <= ST_WR_XFER;
+                IF nodma = '1' THEN
+                  st <= ST_WR_XFER;                -- collect from CPU (PIO)
+                ELSE
+                  st <= ST_WR_DMA;                 -- collect from memory (DMA)
+                END IF;
 
               WHEN OTHERS =>                       -- invalid command
                 res(0) <= x"80";
@@ -449,7 +461,11 @@ BEGIN
               sbuf(buf_idx) <= rx_data;
               IF buf_idx = 511 THEN
                 buf_idx <= 0;
-                st <= ST_RD_XFER;
+                IF nodma = '1' THEN
+                  st <= ST_RD_XFER;               -- present via 0x3F5 (PIO)
+                ELSE
+                  st <= ST_RD_DMA;                -- push to memory (DMA)
+                END IF;
               ELSE
                 buf_idx <= buf_idx + 1;
               END IF;
@@ -465,8 +481,32 @@ BEGIN
               END IF;
             END IF;
 
+          WHEN ST_RD_DMA =>
+            -- 8237 pulls each byte (DMA_DOUT) into memory; one per DACK pulse
+            dreq_r <= '1';
+            IF (dack_prev = '1' AND DACK = '0') THEN
+              IF TC = '1' THEN                    -- DMA ended the command
+                dreq_r <= '0';
+                res(0) <= "00000" & cur_h(0) & drive_sel;
+                res(1) <= (OTHERS => '0');
+                res(2) <= (OTHERS => '0');
+                res(3) <= cur_c; res(4) <= cur_h;
+                res(5) <= cur_r + 1; res(6) <= x"02";
+                nresults <= 7; ridx <= 0;
+                irq_int <= '1';
+                st <= ST_RESULT;
+              ELSIF buf_idx = 511 THEN            -- sector done, fetch next
+                dreq_r <= '0';
+                cur_r  <= cur_r + 1;
+                u_cnt  <= 0; buf_idx <= 0;
+                st <= ST_RD_REQ;
+              ELSE
+                buf_idx <= buf_idx + 1;
+              END IF;
+            END IF;
+
           ----------------------------------------------------------------
-          -- WRITE: collect 512 from CPU, then ship over UART
+          -- WRITE (PIO): collect 512 from CPU, then ship over UART
           ----------------------------------------------------------------
           WHEN ST_WR_XFER =>
             IF (wr_done = '1' AND sel_data = '1') THEN
@@ -474,6 +514,27 @@ BEGIN
               IF buf_idx = 511 THEN
                 buf_idx <= 0; u_cnt <= 0;
                 st <= ST_WR_REQ;
+              ELSE
+                buf_idx <= buf_idx + 1;
+              END IF;
+            END IF;
+
+          ----------------------------------------------------------------
+          -- WRITE (DMA): collect 512 from memory, then ship over UART
+          ----------------------------------------------------------------
+          WHEN ST_WR_DMA =>
+            dreq_r <= '1';
+            IF (dack_prev = '1' AND DACK = '0') THEN
+              sbuf(buf_idx) <= DMA_DIN;           -- latch byte read from memory
+              IF TC = '1' THEN
+                dma_tc <= '1';
+                dreq_r <= '0';
+                buf_idx <= 0; u_cnt <= 0;
+                st <= ST_WR_REQ;                  -- ship final sector
+              ELSIF buf_idx = 511 THEN
+                dreq_r <= '0';
+                buf_idx <= 0; u_cnt <= 0;
+                st <= ST_WR_REQ;                  -- ship full sector, more to come
               ELSE
                 buf_idx <= buf_idx + 1;
               END IF;
@@ -504,11 +565,28 @@ BEGIN
 
           WHEN ST_WR_ACK =>
             IF rx_valid = '1' THEN     -- WRITE OK
-              st <= ST_NEXT;
+              IF nodma = '1' THEN
+                st <= ST_NEXT;                     -- PIO: walk R..EOT
+              ELSE
+                IF dma_tc = '1' THEN               -- DMA ended -> result
+                  res(0) <= "00000" & cur_h(0) & drive_sel;
+                  res(1) <= (OTHERS => '0');
+                  res(2) <= (OTHERS => '0');
+                  res(3) <= cur_c; res(4) <= cur_h;
+                  res(5) <= cur_r + 1; res(6) <= x"02";
+                  nresults <= 7; ridx <= 0;
+                  irq_int <= '1';
+                  st <= ST_RESULT;
+                ELSE                               -- next sector via DMA
+                  cur_r  <= cur_r + 1;
+                  buf_idx <= 0;
+                  st <= ST_WR_DMA;
+                END IF;
+              END IF;
             END IF;
 
           ----------------------------------------------------------------
-          -- advance within track (R..EOT) or finish into result phase
+          -- advance within track (R..EOT) or finish into result phase (PIO)
           ----------------------------------------------------------------
           WHEN ST_NEXT =>
             IF cur_r >= eot THEN

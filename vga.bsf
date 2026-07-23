@@ -20,9 +20,9 @@ refer to the applicable agreement for further details.
 */
 (header "symbol" (version "1.1"))
 (symbol
-	(rect 16 16 248 192)
+	(rect 16 16 248 224)
 	(text "vga" (rect 5 0 20 12)(font "Arial" ))
-	(text "inst" (rect 8 160 20 172)(font "Arial" ))
+	(text "inst" (rect 8 192 20 204)(font "Arial" ))
 	(port
 		(pt 0 32)
 		(input)
@@ -73,6 +73,20 @@ refer to the applicable agreement for further details.
 		(line (pt 0 128)(pt 16 128)(line_width 3))
 	)
 	(port
+		(pt 0 144)
+		(input)
+		(text "IOWR" (rect 0 0 28 12)(font "Arial" ))
+		(text "IOWR" (rect 21 139 49 151)(font "Arial" ))
+		(line (pt 0 144)(pt 16 144)(line_width 1))
+	)
+	(port
+		(pt 0 160)
+		(input)
+		(text "IOADDR[15..0]" (rect 0 0 66 12)(font "Arial" ))
+		(text "IOADDR[15..0]" (rect 21 155 87 167)(font "Arial" ))
+		(line (pt 0 160)(pt 16 160)(line_width 3))
+	)
+	(port
 		(pt 232 32)
 		(output)
 		(text "HS" (rect 0 0 12 12)(font "Arial" ))
@@ -108,6 +122,6 @@ refer to the applicable agreement for further details.
 		(line (pt 232 80)(pt 216 80)(line_width 3))
 	)
 	(drawing
-		(rectangle (rect 16 16 216 160)(line_width 1))
+		(rectangle (rect 16 16 216 192)(line_width 1))
 	)
 )

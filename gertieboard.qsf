@@ -61,9 +61,6 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to SEG_D
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to SEG_E
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to SEG_F
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to SEG_G
-set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
-set_global_assignment -name PARTITION_FITTER_PRESERVATION_LEVEL PLACEMENT_AND_ROUTING -section_id Top
-set_global_assignment -name PARTITION_COLOR 16764057 -section_id Top
 set_location_assignment PIN_T9 -to CPU_A[14]
 set_location_assignment PIN_R9 -to CPU_A[15]
 set_location_assignment PIN_T14 -to CPU_A[16]
@@ -220,23 +217,30 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DBG4
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DBG6
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DBG7
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DBG5
-set_global_assignment -name VHDL_FILE UART_TX.vhd
-set_global_assignment -name VHDL_FILE UART_RX.vhd
+set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
+set_global_assignment -name PARTITION_FITTER_PRESERVATION_LEVEL PLACEMENT_AND_ROUTING -section_id Top
+set_global_assignment -name PARTITION_COLOR 16764057 -section_id Top
+set_global_assignment -name VHDL_FILE ps2_kbd_ppi.vhd
+set_global_assignment -name VHDL_FILE cga_status.vhd
+set_global_assignment -name VHDL_FILE ctrl_reg.vhd
+set_global_assignment -name VHDL_FILE psram_ctrl.vhd
+set_global_assignment -name VHDL_FILE m9k_mem.vhd
+set_global_assignment -name MIF_FILE bootldr.mif
 set_global_assignment -name VHDL_FILE font.vhd
 set_global_assignment -name BDF_FILE gertieboard.bdf
 set_global_assignment -name VHDL_FILE clkgen.vhd
 set_global_assignment -name VHDL_FILE sevenseg.vhd
 set_global_assignment -name VHDL_FILE busdecode.vhd
-set_global_assignment -name VHDL_FILE bios.vhd
-set_global_assignment -name VHDL_FILE ram.vhd
 set_global_assignment -name VHDL_FILE vga.vhd
 set_global_assignment -name QIP_FILE pll.qip
 set_global_assignment -name SDC_FILE gertieboard.sdc
-set_global_assignment -name VHDL_FILE serial.vhd
 set_global_assignment -name VHDL_FILE flash.vhd
 set_global_assignment -name VHDL_FILE timer8253.vhd
 set_global_assignment -name VHDL_FILE int8259.vhd
 set_global_assignment -name VHDL_FILE ppi8255.vhd
 set_global_assignment -name VHDL_FILE dma8237.vhd
 set_global_assignment -name VHDL_FILE fdc8272.vhd
+set_global_assignment -name VHDL_FILE bootrom.vhd
+set_global_assignment -name VHDL_FILE mem_hybrid.vhd
+set_global_assignment -name VHDL_FILE com1_stub.vhd
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top

@@ -4,6 +4,28 @@ USE  IEEE.STD_LOGIC_ARITH.all;
 USE  IEEE.STD_LOGIC_UNSIGNED.all;
 USE  work.FONT.all;
 
+--------------------------------------------------------------------------------
+-- vga.vhd  --  CGA-compatible display adapter
+--
+-- Text mode (80x25, 16/16 colors) as before, plus CGA graphics modes:
+--     mode 4/5 : 320x200, 4 colors, 2 bpp   (each CGA pixel doubled 2x2)
+--     mode 6   : 640x200, 2 colors, 1 bpp   (doubled vertically only)
+-- The 640x400 active area is exactly 2x 320x200, so no timing changes.
+--
+-- Video RAM is now the full CGA 16 KB at 0xB8000-0xBBFFF with the classic
+-- interleave: even scanlines at +0x0000, odd scanlines at +0x2000, 80 bytes
+-- per scanline. Text mode still uses the first 4 KB as before.
+--
+-- Mode selection is via the standard CGA I/O registers, latched from the I/O
+-- bus (new IOWR / IOADDR ports -- wire to the same IO_WR / IO_ADDR nets that
+-- feed sevenseg and ctrl_reg):
+--     0x3D8  mode control : bit 1 = graphics, bit 2 = b/w (mode-5 palette),
+--                           bit 3 = video enable, bit 4 = 640x200 1 bpp
+--     0x3D9  color select : bits 3:0 = background/border color (fg in mode 6),
+--                           bit 4 = intensity, bit 5 = palette
+--                           (0 = green/red/brown, 1 = cyan/magenta/white)
+-- 6845 CRTC accesses (0x3D4/5) are ignored -- timing is fixed in hardware.
+--------------------------------------------------------------------------------
 
 ENTITY vga IS
   PORT(
@@ -15,14 +37,16 @@ ENTITY vga IS
 		  RD						  : IN std_logic;
 		  ADDR					  : IN std_logic_vector(19 DOWNTO 0);
 		  DATAIN					  : IN std_logic_vector(7 DOWNTO 0);
+		  IOWR					  : IN std_logic;                       -- I/O write strobe (active low)
+		  IOADDR				  : IN std_logic_vector(15 DOWNTO 0);  -- latched I/O address
  		  HS                 	  : OUT std_logic;
  		  VS                 	  : OUT std_logic;
  		  RGB               	  : OUT std_logic_vector(5 DOWNTO 0);
 		  DATAOUT				  : INOUT std_logic_vector(7 DOWNTO 0);
 		  DEBUG 					  : OUT std_logic);
-		  	
+
    END vga;
-	
+
 ARCHITECTURE behavior OF vga IS
 
   --------------------------------------------------------------------------
@@ -62,8 +86,8 @@ ARCHITECTURE behavior OF vga IS
   SIGNAL RGBCHR   : std_logic_vector(5 DOWNTO 0);
 
   -- VGA-side scan-out registers (one BRAM read each).
-  SIGNAL MEMCHR   : std_logic_vector(7 DOWNTO 0);   -- char code for current cell
-  SIGNAL MEMATT   : std_logic_vector(7 DOWNTO 0);   -- attribute for current cell
+  SIGNAL MEMCHR   : std_logic_vector(7 DOWNTO 0);   -- char code / even VRAM byte
+  SIGNAL MEMATT   : std_logic_vector(7 DOWNTO 0);   -- attribute / odd VRAM byte
   -- Extra pipeline stage so the attribute lines up in time with CHAR.
   SIGNAL ATTR_REG : std_logic_vector(7 DOWNTO 0);
 
@@ -74,10 +98,10 @@ ARCHITECTURE behavior OF vga IS
   SIGNAL MEM_DOUT_CPU  : std_logic_vector(7 DOWNTO 0);
   SIGNAL ADDR0_REG     : std_logic;
 
-  -- Split the 4 KB B800 page into two 2 K halves:
-  --   MEMC : characters  (even byte offsets, ADDR(0) = '0')
-  --   MEMA : attributes  (odd  byte offsets, ADDR(0) = '1')
-  TYPE MEMHALF IS ARRAY (0 TO 2047) OF STD_LOGIC_VECTOR(7 DOWNTO 0);
+  -- Split the 16 KB VRAM (0xB8000-0xBBFFF) into two 8 K halves:
+  --   MEMC : even byte offsets (ADDR(0) = '0') -- text: characters
+  --   MEMA : odd  byte offsets (ADDR(0) = '1') -- text: attributes
+  TYPE MEMHALF IS ARRAY (0 TO 8191) OF STD_LOGIC_VECTOR(7 DOWNTO 0);
   SIGNAL MEMC : MEMHALF;
   SIGNAL MEMA : MEMHALF;
 
@@ -85,47 +109,89 @@ ARCHITECTURE behavior OF vga IS
   ATTRIBUTE ramstyle OF MEMC : SIGNAL IS "M9K";
   ATTRIBUTE ramstyle OF MEMA : SIGNAL IS "M9K";
 
-  -- Decoded foreground / background colors.
+  -- Decoded foreground / background colors (text mode).
   SIGNAL fg_color, bg_color : std_logic_vector(3 DOWNTO 0);
   SIGNAL fg_rgb,   bg_rgb   : std_logic_vector(5 DOWNTO 0);
+
+  -- CGA control registers.
+  SIGNAL mode_q : std_logic_vector(7 DOWNTO 0) := x"29";  -- 0x3D8: text, enabled
+  SIGNAL pal_q  : std_logic_vector(7 DOWNTO 0) := x"20";  -- 0x3D9: palette 1
+  SIGNAL gfx_on : std_logic;                              -- graphics mode
+  SIGNAL hires  : std_logic;                              -- 640x200 1 bpp
+  SIGNAL bw     : std_logic;                              -- mode-5 palette
+
+  -- Graphics scan-out.
+  -- Byte offset within a bank: 80 * (cga_y / 2) + cga_x / 4, where
+  -- cga_x = XX/2 (or XX in hires) and cga_y = YY/2.  Both modes fetch a new
+  -- byte every 8 VGA clocks, so the fetch address is the same expression.
+  SIGNAL goff    : std_logic_vector(12 DOWNTO 0);  -- offset within bank
+  SIGNAL txt_idx : std_logic_vector(12 DOWNTO 0);  -- text cell index
+  SIGNAL vga_idx : std_logic_vector(12 DOWNTO 0);  -- muxed scan read index
+  SIGNAL GSEL    : std_logic;                      -- even/odd byte select
+  SIGNAL GPIX2   : std_logic_vector(1 DOWNTO 0);   -- 2-bpp pixel (mode 4/5)
+  SIGNAL GPIX1   : std_logic;                      -- 1-bpp pixel (mode 6)
+  SIGNAL gcol4   : std_logic_vector(3 DOWNTO 0);   -- graphics color index
+  SIGNAL RGBGFX  : std_logic_vector(5 DOWNTO 0);
+  SIGNAL PIXRGB  : std_logic_vector(5 DOWNTO 0);
 
 BEGIN
 
   -- ---------------- CPU side -----------------------------------------
   -- Writes go to MEMC or MEMA depending on the low address bit.
-  -- The CPU sees a flat 4 KB page from 0xB8000-0xB8FFF where even
-  -- addresses are characters and odd addresses are attributes - exactly
-  -- the layout DOS/BIOS expects for color text mode.
+  -- The CPU sees a flat 16 KB page from 0xB8000-0xBBFFF.  For text mode
+  -- even addresses are characters and odd addresses are attributes -
+  -- exactly the layout DOS/BIOS expects for color text mode.
   CPU_PORT : PROCESS (CLK_CPU)
   BEGIN
     IF rising_edge(CLK_CPU) THEN
-      IF (WR = '0' AND ADDR(19 DOWNTO 12) = x"B8" AND ADDR(0) = '0') THEN
-        MEMC(conv_integer(ADDR(11 DOWNTO 1))) <= DATAIN;
+      IF (WR = '0' AND ADDR(19 DOWNTO 14) = "101110" AND ADDR(0) = '0') THEN
+        MEMC(conv_integer(ADDR(13 DOWNTO 1))) <= DATAIN;
       END IF;
-      IF (WR = '0' AND ADDR(19 DOWNTO 12) = x"B8" AND ADDR(0) = '1') THEN
-        MEMA(conv_integer(ADDR(11 DOWNTO 1))) <= DATAIN;
+      IF (WR = '0' AND ADDR(19 DOWNTO 14) = "101110" AND ADDR(0) = '1') THEN
+        MEMA(conv_integer(ADDR(13 DOWNTO 1))) <= DATAIN;
       END IF;
 
       -- Registered read of both halves; mux on registered ADDR(0).
-      MEMC_DOUT_CPU <= MEMC(conv_integer(ADDR(11 DOWNTO 1)));
-      MEMA_DOUT_CPU <= MEMA(conv_integer(ADDR(11 DOWNTO 1)));
+      MEMC_DOUT_CPU <= MEMC(conv_integer(ADDR(13 DOWNTO 1)));
+      MEMA_DOUT_CPU <= MEMA(conv_integer(ADDR(13 DOWNTO 1)));
       ADDR0_REG     <= ADDR(0);
+
+      -- CGA mode / color-select registers (same latch style as ctrl_reg).
+      IF (IOWR = '0' AND IOADDR = x"03D8") THEN
+        mode_q <= DATAIN;
+      END IF;
+      IF (IOWR = '0' AND IOADDR = x"03D9") THEN
+        pal_q <= DATAIN;
+      END IF;
     END IF;
   END PROCESS;
 
   MEM_DOUT_CPU <= MEMA_DOUT_CPU WHEN ADDR0_REG = '1' ELSE MEMC_DOUT_CPU;
 
+  gfx_on <= mode_q(1);
+  hires  <= mode_q(4);
+  bw     <= mode_q(2);
+
   -- ---------------- VGA side -----------------------------------------
-  -- One cell index = 80 * text_row + text_col.  Both BRAMs are read at
-  -- the same index; we no longer need the "* 2" stride because the
-  -- attribute lives in a parallel array, not at the next byte offset.
+  -- Text: one cell index = 80 * text_row + text_col; both BRAMs are read
+  -- at the same index (char + attribute in parallel arrays).
+  -- Graphics: CGA interleave -- bank = cga_y(0) (bit 13 of the byte
+  -- address = YY(1)), byte offset = 80 * (cga_y/2) + cga_x/4.  The byte
+  -- address' bit 0 picks MEMC/MEMA; the rest is the array index.  The
+  -- scan side performs ONE read per array per clock in either mode, so
+  -- the read address is muxed by the mode bit.
+  goff    <= conv_std_logic_vector(80 * conv_integer(YY(10 DOWNTO 2))
+                                      + conv_integer(XX(10 DOWNTO 3)), 13);
+  txt_idx <= conv_std_logic_vector(80 * conv_integer(YY(10 DOWNTO 4))
+                                      + conv_integer(XX(10 DOWNTO 3)), 13);
+  vga_idx <= YY(1) & goff(12 DOWNTO 1) WHEN gfx_on = '1' ELSE txt_idx;
+
   VGA_PORT : PROCESS (CLK_VGA)
   BEGIN
     IF rising_edge(CLK_VGA) THEN
-      MEMCHR <= MEMC(80 * conv_integer(YY(10 DOWNTO 4))
-                       + conv_integer(XX(10 DOWNTO 3)));
-      MEMATT <= MEMA(80 * conv_integer(YY(10 DOWNTO 4))
-                       + conv_integer(XX(10 DOWNTO 3)));
+      MEMCHR <= MEMC(conv_integer(vga_idx));
+      MEMATT <= MEMA(conv_integer(vga_idx));
+      GSEL   <= goff(0);
     END IF;
   END PROCESS;
 
@@ -157,11 +223,32 @@ BEGIN
   -- Glyph lookup + attribute pipeline align.
   -- CHAR is registered out of GetChar (1-cycle delay from MEMCHR).
   -- ATTR_REG is delayed one extra cycle from MEMATT so it tracks CHAR.
+  -- The graphics pixel select uses the same "-1" fudge as the font column
+  -- so the pixel lines up with the byte fetched two clocks earlier.
   PROCESS (CLK_VGA)
+    VARIABLE psel  : std_logic_vector(10 DOWNTO 0);
+    VARIABLE gbyte : std_logic_vector(7 DOWNTO 0);
   BEGIN
     IF (rising_edge(CLK_VGA)) THEN
       CHAR     <= GetChar(XX(2 DOWNTO 0) - 1, YY(3 DOWNTO 0), MEMCHR(7 DOWNTO 0));
       ATTR_REG <= MEMATT;
+
+      psel := XX - 1;
+      IF (GSEL = '1') THEN
+        gbyte := MEMATT;
+      ELSE
+        gbyte := MEMCHR;
+      END IF;
+      -- mode 4/5: 4 pixels per byte, 2 bpp, leftmost pixel in bits 7:6;
+      -- each CGA pixel spans 2 VGA clocks -> select on psel(2:1).
+      CASE psel(2 DOWNTO 1) IS
+        WHEN "00"   => GPIX2 <= gbyte(7 DOWNTO 6);
+        WHEN "01"   => GPIX2 <= gbyte(5 DOWNTO 4);
+        WHEN "10"   => GPIX2 <= gbyte(3 DOWNTO 2);
+        WHEN OTHERS => GPIX2 <= gbyte(1 DOWNTO 0);
+      END CASE;
+      -- mode 6: 8 pixels per byte, 1 bpp, MSB first.
+      GPIX1 <= gbyte(7 - conv_integer(psel(2 DOWNTO 0)));
     END IF;
   END PROCESS;
 
@@ -171,7 +258,7 @@ BEGIN
   VALID <= '1' WHEN (X > 144 AND X < 784 AND Y > 34 AND Y < (515-80)) ELSE '0';
 
   -- ---------------- Color decode -------------------------------------
-  -- Attribute byte layout (CGA, 16/16 mode):
+  -- Text attribute byte layout (CGA, 16/16 mode):
   --   bit 7   : background intensity     (bit 7 is BLINK in real CGA's
   --             default mode; we treat it as bg intensity to give a
   --             full 16/16 palette.  Mask to '0' if blink is preferred.)
@@ -184,11 +271,29 @@ BEGIN
   bg_rgb   <= cga_to_rgb(bg_color);
 
   RGBCHR <= fg_rgb WHEN (CHAR = '1') ELSE bg_rgb;
-  RGB    <= RGBCHR WHEN (VALID = '1') ELSE "000000";
 
-  -- CPU read-back of the text page
+  -- Graphics color index:
+  --   mode 4  pixel 00       -> background color (0x3D9 bits 3:0)
+  --   mode 4  pixel 01/10/11 -> intensity & pixel & palette-bit
+  --           (palette 0: green/red/brown, palette 1: cyan/magenta/white)
+  --   mode 5  (b/w bit set)  -> cyan/red/white
+  --   mode 6  pixel 1        -> 0x3D9 bits 3:0, pixel 0 -> black
+  gcol4 <= pal_q(3 DOWNTO 0)  WHEN hires = '0' AND GPIX2 = "00"             ELSE
+           pal_q(4) & "011"   WHEN hires = '0' AND bw = '1' AND GPIX2 = "01" ELSE
+           pal_q(4) & "100"   WHEN hires = '0' AND bw = '1' AND GPIX2 = "10" ELSE
+           pal_q(4) & "111"   WHEN hires = '0' AND bw = '1'                  ELSE
+           pal_q(4) & GPIX2 & pal_q(5) WHEN hires = '0'                      ELSE
+           pal_q(3 DOWNTO 0)  WHEN GPIX1 = '1'                               ELSE
+           "0000";
+
+  RGBGFX <= cga_to_rgb(gcol4);
+
+  PIXRGB <= RGBGFX WHEN gfx_on = '1' ELSE RGBCHR;
+  RGB    <= PIXRGB WHEN (VALID = '1' AND mode_q(3) = '1') ELSE "000000";
+
+  -- CPU read-back of the video page
   DATAOUT <= MEM_DOUT_CPU
-             WHEN (RD = '0' AND ADDR(19 DOWNTO 12) = x"B8")
+             WHEN (RD = '0' AND ADDR(19 DOWNTO 14) = "101110")
              ELSE "ZZZZZZZZ";
 
   DEBUG <= Y(5);
