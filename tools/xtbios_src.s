@@ -111,7 +111,12 @@ _post:
     # 632 KB, not 640: the top 8 KB (0x9E000+) is the fixed-disk block buffer.
     # If this ever goes back to 640, move HDBUF_SEG first.
     mov word ptr es:[0x13], 632      # base memory size in KB
-    mov byte ptr es:[0x75], 1        # one fixed disk installed
+    # Fixed-disk count deliberately 0 for now. INT 13h AH>=0x80 works and
+    # HDTEST.COM exercises it, but the flash holds no partition table yet, so
+    # advertising a disk only makes DOS probe an empty device during startup --
+    # which is what broke booting. Set this to 1 once the disk is partitioned
+    # and HDTEST passes.
+    mov byte ptr es:[0x75], 0        # fixed disks visible to DOS
     mov word ptr es:[0x1A], KBBUF    # kbd buffer head
     mov word ptr es:[0x1C], KBBUF    # kbd buffer tail
     mov word ptr es:[0x80], KBBUF    # buffer start
@@ -1988,13 +1993,22 @@ spi_cs_hi:
 ## spi_xfer: AL = byte to send -> AL = byte received simultaneously.
 ## An exchange is 8 SCK periods at 2.5 MHz = 3.2 us, i.e. ~16 CPU clocks, so
 ## the poll below spins only a handful of times.
+## An exchange is 8 SCK periods at 2.5 MHz = 3.2 us, so BUSY should clear within
+## a couple of I/O cycles. The count is a safety net only: a BIOS that spins on a
+## peripheral forever turns any wiring or logic fault into a dead machine with no
+## clue as to where, which is exactly what makes this class of bug expensive.
 spi_xfer:
+    push cx
     out SPI_DATA, al
+    mov cx, 1000
 .sx_wait:
     in  al, SPI_STAT
     test al, 0x80
-    jnz .sx_wait
+    jz  .sx_ready
+    loop .sx_wait
+.sx_ready:
     in  al, SPI_DATA
+    pop cx
     ret
 
 ## =====================================================================
@@ -2149,8 +2163,15 @@ spi_wren:                    # write enable
     call spi_cs_hi
     ret
 
-spi_wait_wip:                # spin until the status register's WIP clears
+## spi_wait_wip: spin until the status register's WIP clears.
+## A 4 KB erase takes ~100 ms and a page program ~1 ms, and each poll here costs
+## roughly 15 us, so 0xFFFF iterations is about a second -- ample headroom, while
+## still guaranteeing we come back if the chip never answers. Without the bound a
+## stuck WIP bit (or a floating MISO reading as 0xFF) hangs the machine dead.
+spi_wait_wip:
     push ax
+    push cx
+    mov cx, 0xFFFF
 .ww_l:
     call spi_cs_lo
     mov al, 0x05             # RDSR
@@ -2159,7 +2180,10 @@ spi_wait_wip:                # spin until the status register's WIP clears
     call spi_xfer
     call spi_cs_hi
     test al, 0x01            # WIP
-    jnz .ww_l
+    jz  .ww_done
+    loop .ww_l
+.ww_done:
+    pop cx
     pop ax
     ret
 
@@ -2392,10 +2416,14 @@ hd_int13:
     retf 2
 
 .h_params:                   # AH=08 -> geometry
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov dl, [0x75]           # drive count from the BDA, so a caller that probes
+    pop ds                   # AH=08 agrees with what POST advertised
     mov ch, HD_CYLS - 1      # max cylinder (low 8 bits)
     mov cl, HD_SPT           # sectors/track, cylinder high bits are 0
     mov dh, HD_HEADS - 1     # max head
-    mov dl, 1                # one fixed disk installed
     xor ah, ah
     clc
     retf 2
