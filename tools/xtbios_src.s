@@ -156,6 +156,11 @@ _post:
     mov word ptr es:[bx],   offset _floppy_dpt
     mov word ptr es:[bx+2], 0xF000
 
+## ---- fixed disk: identify the SPI flash and report its size ---------
+    mov ax, BDA
+    mov ds, ax
+    call hd_detect
+
 ## ---- boot (disk read is polled, so interrupts stay off for now) -----
     mov ax, BDA
     mov ds, ax
@@ -1918,6 +1923,204 @@ dbg_nib:
     ret
 
 ## =====================================================================
+##  dbg_dec: AX = value -> decimal digits at ES:DI (attr 0x0E), DI advances
+## =====================================================================
+dbg_dec:
+    push ax
+    push bx
+    push cx
+    push dx
+    xor cx, cx
+    mov bx, 10
+.ddc_div:
+    xor dx, dx
+    div bx                       # AX = AX/10, DX = remainder
+    push dx
+    inc cx
+    test ax, ax
+    jnz .ddc_div
+.ddc_out:
+    pop ax
+    add al, '0'
+    mov ah, 0x0E
+    mov es:[di], ax
+    add di, 2
+    loop .ddc_out
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## =====================================================================
+##  Fixed disk (SPI flash) -- low-level SPI byte transport
+##
+##  flash.vhd register map:
+##     0x98 W = transmit byte (starts the exchange), R = byte received
+##     0x99 R = status, bit 7 = BUSY
+##     0x9A W = bit 0 is /CS (0 = assert, 1 = release)
+## =====================================================================
+.equ SPI_DATA, 0x98
+.equ SPI_STAT, 0x99
+.equ SPI_CTRL, 0x9A
+
+spi_cs_lo:
+    push ax
+    xor al, al
+    out SPI_CTRL, al
+    pop ax
+    ret
+
+spi_cs_hi:
+    push ax
+    mov al, 1
+    out SPI_CTRL, al
+    pop ax
+    ret
+
+## spi_xfer: AL = byte to send -> AL = byte received simultaneously.
+## An exchange is 8 SCK periods at 2.5 MHz = 3.2 us, i.e. ~16 CPU clocks, so
+## the poll below spins only a handful of times.
+spi_xfer:
+    out SPI_DATA, al
+.sx_wait:
+    in  al, SPI_STAT
+    test al, 0x80
+    jnz .sx_wait
+    in  al, SPI_DATA
+    ret
+
+## =====================================================================
+##  hd_detect -- read the JEDEC ID (0x9F) and work out the flash size
+##
+##  The board carries an ISSI IS25LP016D, which should answer 9D 60 15:
+##      0x9D = ISSI, 0x60 = IS25LP family, 0x15 = capacity code
+##  The capacity code is a power of two in BYTES, so size = 1 << code, and
+##  in KB that is 1 << (code-10). 0x15 -> 2^21 = 2 MB = 2048 KB.
+##
+##  Whatever comes back is displayed raw next to the decoded size, so a wrong
+##  or absent chip is obvious rather than silently mis-decoded. All three bytes
+##  reading 0x00 or 0xFF means "no answer" -- MISO stuck low or high.
+##
+##  Results are kept in the BDA for the INT 13h fixed-disk support to come:
+##      0x40:00E0 = manufacturer   0x40:00E1 = type
+##      0x40:00E2 = capacity code  0x40:00E4 = size in KB (word)
+##  Entered with DS = BDA.
+## =====================================================================
+hd_detect:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+    push es
+
+    # ---- read the JEDEC ID (DS = BDA on entry) ----
+    call spi_cs_hi               # start from a released chip
+    call spi_cs_lo
+    mov al, 0x9F                 # RDJDID
+    call spi_xfer
+    mov al, 0xFF
+    call spi_xfer
+    mov bl, al                   # BL = manufacturer
+    mov al, 0xFF
+    call spi_xfer
+    mov bh, al                   # BH = memory type
+    mov al, 0xFF
+    call spi_xfer
+    mov cl, al                   # CL = capacity code
+    call spi_cs_hi
+
+    mov [0xE0], bl
+    mov [0xE1], bh
+    mov [0xE2], cl
+
+    # ---- size in KB = 1 << (capacity-10), sane capacity codes only ----
+    xor dx, dx                   # DX = size in KB, 0 = unknown
+    cmp cl, 0x10                 # below 64 KB -> not a real code
+    jb .hd_sz_done
+    cmp cl, 0x1F                 # above 2 GB -> not a real code
+    ja .hd_sz_done
+    mov al, cl
+    sub al, 10
+    mov dx, 1
+    push cx
+    mov cl, al
+    shl dx, cl
+    pop cx
+.hd_sz_done:
+    mov [0xE4], dx
+
+    # ---- report on POST row 9 ----
+    # NB: the strings live in the ROM segment, so DS must point at CS here --
+    # on entry DS is the BDA, which would print garbage.
+    mov ax, VID
+    mov es, ax
+    mov di, 9*160
+    push cs
+    pop ds
+    mov si, offset b_hd
+    call dbg_str
+    mov al, bl                   # ID bytes, raw, so a wrong chip is visible
+    call dbg_byte
+    call dbg_spc
+    mov al, bh
+    call dbg_byte
+    call dbg_spc
+    mov al, cl
+    call dbg_byte
+    test dx, dx
+    jz .hd_none
+    call dbg_spc
+    call dbg_spc
+    mov ax, dx                   # decoded size
+    call dbg_dec
+    mov si, offset b_hd_kb
+    call dbg_str
+    jmp short .hd_out
+.hd_none:
+    mov si, offset b_hd_no
+    call dbg_str
+.hd_out:
+    pop es
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## dbg_spc: one space at ES:DI (attr 0x0E), DI += 2
+dbg_spc:
+    push ax
+    mov ax, 0x0E20
+    mov es:[di], ax
+    add di, 2
+    pop ax
+    ret
+
+## dbg_str: DS:SI = ASCIZ -> written at ES:DI (attr 0x0E), DI advances
+dbg_str:
+    push ax
+    push si
+.dst_l:
+    lodsb
+    test al, al
+    jz .dst_d
+    mov ah, 0x0E
+    mov es:[di], ax
+    add di, 2
+    jmp .dst_l
+.dst_d:
+    pop si
+    pop ax
+    ret
+
+## =====================================================================
 ##  Reboot
 ## =====================================================================
 _reboot:
@@ -1974,6 +2177,9 @@ b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
 b_drv:    .asciz "Using Diskette Drive A:"
 b_boot:   .asciz "Booting..."
+b_hd:     .asciz "Fixed Disk: ID "
+b_hd_kb:  .asciz " KB SPI flash"
+b_hd_no:  .asciz "  no response"
 
 msg_ver:      .asciz "Philips ROM BIOS Version 1.00\r\n"
 msg_model:    .asciz "Gertieboard BIOS Pensioen Edition\r\n"
