@@ -6,7 +6,6 @@
 -- (no bit-ripping in the original); bit splitting happens inside modules.
 --
 -- Faithful to the schematic, including its quirks:
---   * the speaker AND-gate output and BUZ were never wired -> BUZ = '0'
 --   * DBG(7..2), USB0_DP/DM are undriven (were 'stuck at GND'/high-Z)
 --   * a second PLL (pll2) is instantiated but its outputs are unused
 ------------------------------------------------------------------------------
@@ -62,6 +61,11 @@ ENTITY gertieboard IS
 END gertieboard;
 
 ARCHITECTURE structural OF gertieboard IS
+
+  -- Set to '1' to silence the PC speaker without changing anything else -- handy
+  -- when working at night. '0' = normal working buzzer.
+  CONSTANT SPEAKER_MUTE : std_logic := '0';
+
   SIGNAL n_c0                   : std_logic;
   SIGNAL n_c1                   : std_logic;
   SIGNAL n_c2                   : std_logic;
@@ -457,7 +461,12 @@ BEGIN
   DBG(1) <= n_ps2dat;
 
   -- undriven outputs (matches the schematic's stuck-at-GND / high-Z pins)
-  BUZ <= '0';
+  -- PC speaker: 8255 port B bit 1 (SPEAKER_DATA, I/O 61h.1) gated with 8253
+  -- counter-2 OUT. This is the AND2 the schematic drew as "and_speaker" and left
+  -- with its output dangling, which is why BUZ used to sit at GND.
+  -- Software drives it the standard XT way: program counter 2 for the tone, then
+  -- set 61h bits 0+1 to open the gate and let it through.
+  BUZ <= '0' WHEN SPEAKER_MUTE = '1' ELSE (n_speaker_data AND n_out2);
   DBG(2) <= '0';
   DBG(3) <= '0';
   DBG(6) <= '0';
