@@ -4,7 +4,7 @@
 # One PLL, integer-ratio outputs -> all SYNCHRONOUS to each other:
 #   c0 (clk[0]) = 5    MHz  busdecode + CPU_CLK output pin
 #   c1 (clk[1]) = 25   MHz  VGA pixel clock
-#   c2 (clk[2]) = 1.25 MHz  8253 counter clock
+#   c2 (clk[2]) = 1.19 MHz  8253 counter clock (50/42, ~XT's 1.193182)
 #   c3 (clk[3]) = 50   MHz  RAM / system
 #
 # Key points:
@@ -56,12 +56,16 @@ set_false_path -from [get_ports {CPU_RD CPU_WR CPU_IOM CPU_ALE CPU_DEN \
 set_false_path -from [get_ports {CPU_A[*]}]  -to *
 set_false_path -from [get_ports {CPU_AD[*]}] -to *
 set_false_path -from * -to [get_ports {CPU_AD[*]}]
-set_false_path -from * -to [get_ports {CPU_READY CPU_CLK CPU_RST CPU_NMI}]
+set_false_path -from * -to [get_ports {CPU_RDY CPU_CLK CPU_RST CPU_NMI \
+                                       CPU_INTR CPU_HLD}]
 
 # -----------------------------------------------------------------------------
-# VGA outputs and reset
+# VGA outputs, debug header and reset
+#
+# The monitor re-syncs on every frame and the DBG pins only feed a logic
+# analyser, so neither has a meaningful setup/hold requirement on-chip.
 # -----------------------------------------------------------------------------
-set_false_path -from * -to [get_ports {HS VS RGB[*] DEBUG}]
+set_false_path -from * -to [get_ports {VGA_HS VGA_VS VGA_RGB[*] DBG[*]}]
 set_false_path -from [get_ports RESET] -to *
 
 # -----------------------------------------------------------------------------
