@@ -2218,10 +2218,13 @@ hd_read_one:
 ##  Write support: one 4 KB block held in RAM, written back lazily
 ##
 ##  The flash erases 4 KB at a time, so changing a 512-byte sector means
-##  erase + reprogram of the whole block. Doing that per sector would cost 8
-##  erases for 8 consecutive sectors, so the block is cached and only written
-##  back when a different block is needed, or on AH=00/0D (which DOS issues,
-##  making it our commit point). 8 sequential writes then cost ONE erase.
+##  erase + reprogram of the whole block. The block is buffered so that a
+##  read-modify-write keeps the other 7 sectors, and so that a multi-sector
+##  write inside ONE INT 13h call costs a single erase.
+##
+##  The buffer is flushed before any write call returns, NOT lazily across calls:
+##  INT 13h AH=03 is expected to have committed when it returns, and anything
+##  still dirty is lost on reboot.
 ##
 ##  The buffer sits just above the 632 KB reported to DOS. Do not raise the
 ##  reported size back to 640 without moving HDBUF_SEG first.
@@ -2468,6 +2471,10 @@ hd_int13:
     je .h_ok
     cmp ah, 0x11             # recalibrate
     je .h_ok
+    cmp ah, 0x09             # initialise drive-pair characteristics
+    je .h_ok
+    cmp ah, 0x14             # controller internal diagnostic
+    je .h_ok
     cmp ah, 0x04             # verify -- data is checked by reading it
     je .h_ok
     cmp ah, 0x01             # last status
@@ -2662,6 +2669,23 @@ hd_transfer:
     out 0x80, al
     pop ax
 .endif
+    # Commit before returning if this was a write.
+    #
+    # INT 13h AH=03 is expected to have COMMITTED by the time it returns -- real
+    # hardware writes immediately, so deferring across calls is invisible to DOS
+    # right up until the power goes. FDISK showed this perfectly: it wrote the
+    # partition table, never issued AH=00, and the block was still dirty in RAM
+    # at reboot, so the partition vanished.
+    #
+    # The 4 KB buffer still earns its keep: it is what makes read-modify-write
+    # correct (the other 7 sectors of the block must be preserved), and a
+    # multi-sector write in ONE call is still a single erase. Only batching
+    # across separate calls is given up, which is the right trade -- a disk that
+    # loses data on reboot is worthless however fast it is.
+    cmp byte ptr [0xEC], 0
+    je .ht_nocommit
+    call hd_flush
+.ht_nocommit:
     pop ax
     pop bx
     pop dx

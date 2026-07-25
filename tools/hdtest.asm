@@ -103,8 +103,12 @@ start:
         mov  di, BUF1
         mov  cx, 4096
         call clearbuf
+        ; Read from cylinder 30, which the write tests never touch. The old
+        ; version read C0/H3/S25 -- the very block tests 5-7 write to -- so it
+        ; started failing the moment writes were enabled. That was the test
+        ; being stale, not the disk.
         mov  ax, 0x0208         ; read 8 sectors
-        mov  cx, 0x0019         ; C=0, S=25
+        mov  cx, 0x1E19         ; C=30, S=25
         mov  dx, 0x0380         ; H=3, drive 80
         mov  bx, BUF1
         int  0x13
@@ -204,16 +208,44 @@ start:
         call cmp_buf
         jc   .t6_bad
         call pass
-        jmp  short .fin
+        jmp  short .t7
 .t6_bad:
         call fail
 
-.fin:
-        push ds                  ; hide the disk from DOS again
+        ; ---------------- 7: a write must be COMMITTED on return ------------
+        ; This is what FDISK tripped over: it wrote the partition table, never
+        ; issued AH=00, and the block was still dirty in RAM at reboot, so the
+        ; partition was gone. Tests 5 and 6 both passed anyway because they force
+        ; an eviction themselves. So assert the contract directly: after AH=03
+        ; returns, the BIOS's dirty flag (BDA 40:E8) must already be clear.
+.t7:
+        mov  dx, msg_t7
+        call puts
+        mov  di, BUF1
+        mov  al, 0x77
+        call fill8
+        mov  ax, 0x0301         ; a single-sector write, no eviction anywhere
+        mov  cx, 0x0019
+        mov  dx, 0x0380
+        mov  bx, BUF1
+        int  0x13
+        jc   .t7_bad
+        push ds
         mov  ax, 0x0040
         mov  ds, ax
-        mov  byte [0x75], 0
+        mov  al, [0xE8]         ; dirty flag
         pop  ds
+        test al, al
+        jnz  .t7_bad            ; still dirty -> it would be lost on reboot
+        call pass
+        jmp  short .fin
+.t7_bad:
+        call fail
+
+.fin:
+        ; NB: deliberately leave BDA 40:75 alone. POST advertises the disk now,
+        ; and clearing it here hid the drive again for anything run afterwards --
+        ; which is why FDISK reported "no fixed disks present" after a test run.
         mov  dx, msg_done
         call puts
         mov  ax, 0x4C00
@@ -317,10 +349,11 @@ msg_geo:  db 'geometry C x H x S             : $'
 msg_x:    db ' x $'
 msg_t1:   db '1 read LBA 0                   : $'
 msg_t2:   db '2 erased flash reads 0xFF      : $'
-msg_t3:   db '3 multi-sector read (8)        : $'
+msg_t3:   db '3 multi-sector read, erased C30: $'
 msg_t4:   db '4 same sector twice matches    : $'
 msg_t5:   db '5 write 8 sectors + read back  : $'
 msg_t6:   db '6 survives eviction (flushed)  : $'
+msg_t7:   db '7 write committed on return    : $'
 msg_pass: db 'PASS',13,10,'$'
 msg_fail: db 'FAIL',13,10,'$'
 msg_done: db 'done.',13,10,'$'
