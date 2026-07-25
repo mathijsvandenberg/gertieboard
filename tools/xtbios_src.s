@@ -20,6 +20,12 @@
 ## =====================================================================
 
 .code16
+## Target a real 8088, so the assembler REFUSES anything newer instead of
+## silently upgrading. This matters: a conditional jump whose target is out of
+## short range was quietly emitted as the 386 form 0F 84 (JZ rel16), and on an
+## 8088 opcode 0F is POP CS -- it popped garbage into CS and execution vanished,
+## unconditionally, on every call. Days of "impossible" behaviour came from that.
+.arch i8086
 .intel_syntax noprefix
 .text
 
@@ -108,9 +114,7 @@ _post:
     xor ax, ax
     rep stosw
     mov word ptr es:[0x10], 0x0021   # equipment: 1 floppy, 80x25 colour
-    # 632 KB, not 640: the top 8 KB (0x9E000+) is the fixed-disk block buffer.
-    # If this ever goes back to 640, move HDBUF_SEG first.
-    mov word ptr es:[0x13], 632      # base memory size in KB
+    mov word ptr es:[0x13], 640      # base memory size in KB
     # Fixed-disk count deliberately 0 for now. INT 13h AH>=0x80 works and
     # HDTEST.COM exercises it, but the flash holds no partition table yet, so
     # advertising a disk only makes DOS probe an empty device during startup --
@@ -801,7 +805,10 @@ g_render:
     je .r_one
     mov ah, al                   # 2bpp: expand 8 px -> 16 bits, fg colour 3
     mov bx, offset spread16
-    shr al, 4
+    shr al, 1                    # four single-bit shifts: `shr al,4` is 80186+,
+    shr al, 1                    # and CL is already the glyph-row counter here
+    shr al, 1
+    shr al, 1
     xlatb                        # AL = spread16[high nibble]
     mov es:[di], al
     mov al, ah
@@ -1395,12 +1402,30 @@ _int16:
 ## =====================================================================
 ##  INT 13h - diskette services (uPD765 + 8237 DMA)
 ## =====================================================================
+## HD_ENABLE routes DL >= 0x80 to the SPI fixed disk.
+##
+## Set to 0 while bisecting a boot failure. Before the fixed disk existed, this
+## handler ignored DL completely and every call went to the floppy, so ANY DL
+## worked. With the hook in, DL suddenly matters: if the boot sector or IBMBIO
+## ever calls INT 13h with the top bit set -- deliberately, or because DL simply
+## was not initialised -- the request is now diverted to a blank flash instead of
+## the floppy, which is exactly the kind of thing that stops a boot part way.
+## Flipping this to 0 removes that possibility without removing the disk code.
+.equ HD_ENABLE, 1
+## HD_DEBUG: report fixed-disk activity on the port-0x80 7-segment display, so a
+## hang shows WHICH INT 13h function DOS asked for. 0xAn = function n entered,
+## 0xBn = it returned. If the display stops on 0xAn we hung inside that call; if
+## it reaches 0xBn the call completed and the trouble is after it.
+.equ HD_DEBUG, 0
+
 _int13:
     sti
+.if HD_ENABLE
     test dl, 0x80                # 0x80+ = fixed disk -> SPI flash
     jz .i13_floppy
     jmp hd_int13
 .i13_floppy:
+.endif
     cmp ah, 0x02                 # read (most common) first
     jne .i13_n02
     jmp d_read
@@ -2128,183 +2153,63 @@ dbg_spc:
     ret
 
 ## =====================================================================
-##  FIXED DISK (INT 13h, DL >= 0x80) backed by the SPI flash
+##  FIXED DISK (INT 13h, DL >= 0x80) backed by the SPI flash -- READ ONLY
 ##
-##  The flash cannot be overwritten in place: a 512-byte disk sector lives
-##  inside a 4 KB erase block, so changing it means erase-then-reprogram of the
-##  whole block. Doing that per sector would cost 8 erases (and ~0.6 s) for 8
-##  consecutive sectors, so instead ONE 4 KB block is held in RAM:
+##  Staged deliberately. The write path needs a 4 KB read-modify-write buffer
+##  (the flash erases 4 KB at a time), and the first attempt put that buffer in
+##  reserved conventional RAM, dropping the reported memory from 640 KB to
+##  632 KB. That coincided with the boot breaking, so both the buffer and the
+##  memory-size change are gone until READS are proven on hardware.
 ##
-##    * read  -> make sure the block is resident, copy 512 bytes out of it
-##    * write -> make sure the block is resident, copy 512 bytes in, mark dirty
-##    * the erase + reprogram happens only when a DIFFERENT block is needed,
-##      or on an explicit flush (AH=00 reset, which DOS issues, and AH=0C/0D)
-##
-##  So 8 sequential sector writes cost a single erase. The trade-off is a
-##  power-loss window: data written but not yet flushed is lost. DOS calls
-##  AH=00 often enough that this stays small, and hd_flush is cheap when clean.
-##
-##  The buffer sits at 0x9E000, just above the 632 KB reported to DOS -- the
-##  classic way for a BIOS to keep private RAM. Do not raise the reported memory
-##  size back to 640 KB without moving the buffer.
+##  Reads need no buffer at all: a sector is just 512 bytes at flash address
+##  LBA*512, streamed straight into the caller's buffer. Writes report
+##  write-protect for now; they come back once reads pass, with the buffer in
+##  M9K where it costs no DOS memory.
 ##
 ##  Geometry: 2 MB / 512 = 4096 sectors, presented as 32 cyl x 4 heads x 32 spt.
 ## =====================================================================
-.equ HDBUF_SEG, 0x9E00       # 4 KB block buffer (linear 0x9E000)
 .equ HD_SPT,    32
 .equ HD_HEADS,  4
 .equ HD_CYLS,   32
 
 ## ---- SPI helpers on top of spi_xfer --------------------------------
-spi_wren:                    # write enable
-    call spi_cs_lo
-    mov al, 0x06
-    call spi_xfer
-    call spi_cs_hi
-    ret
-
-## spi_wait_wip: spin until the status register's WIP clears.
-## A 4 KB erase takes ~100 ms and a page program ~1 ms, and each poll here costs
-## roughly 15 us, so 0xFFFF iterations is about a second -- ample headroom, while
-## still guaranteeing we come back if the chip never answers. Without the bound a
-## stuck WIP bit (or a floating MISO reading as 0xFF) hangs the machine dead.
-spi_wait_wip:
+## hd_send_lba: BX = LBA -> the 3 flash address bytes for LBA*512
+hd_send_lba:
     push ax
     push cx
-    mov cx, 0xFFFF
-.ww_l:
-    call spi_cs_lo
-    mov al, 0x05             # RDSR
-    call spi_xfer
-    mov al, 0xFF
-    call spi_xfer
-    call spi_cs_hi
-    test al, 0x01            # WIP
-    jz  .ww_done
-    loop .ww_l
-.ww_done:
-    pop cx
-    pop ax
-    ret
-
-## hd_send_addr: BX = block index, SI = byte offset in block -> 3 address bytes
-## flash address = block*4096 + offset
-hd_send_addr:
-    push ax
-    push cx
-    push dx
-    mov dx, bx
-    mov ax, dx
-    mov cl, 4
-    shr ax, cl               # block >> 4
+    mov ax, bx
+    mov cl, 7
+    shr ax, cl               # LBA >> 7
     call spi_xfer            # addr[23:16]
-    mov ax, dx
-    and al, 0x0F
-    mov cl, 4
-    shl al, cl               # (block & 0x0F) << 4
-    mov dl, al
-    mov ax, si
-    mov cl, 8
-    shr ax, cl               # offset >> 8
-    or  al, dl
+    mov ax, bx
+    and al, 0x7F
+    shl al, 1                # (LBA & 0x7F) << 1
     call spi_xfer            # addr[15:8]
-    mov ax, si
-    call spi_xfer            # addr[7:0]
-    pop dx
+    xor al, al
+    call spi_xfer            # addr[7:0]  (sectors are 512-byte aligned)
     pop cx
     pop ax
     ret
 
-## ---- hd_flush: write the cached block back if it is dirty (DS = BDA) ----
-hd_flush:
+## ---- hd_read_one: BX = LBA, ES:DI = destination (512 bytes) ----
+hd_read_one:
     push ax
-    push bx
     push cx
-    push si
-    push ds
-    push es
-    cmp byte ptr [0xE8], 0
-    je .hf_done
-    mov bx, [0xE6]
-    cmp bx, 0xFFFF
-    je .hf_clean
-
-    call spi_wren            # erase the 4 KB block
-    call spi_cs_lo
-    mov al, 0x20             # SER4K
-    call spi_xfer
-    xor si, si
-    call hd_send_addr
-    call spi_cs_hi
-    call spi_wait_wip
-
-    xor si, si               # program 16 pages of 256 bytes
-.hf_page:
-    call spi_wren
-    call spi_cs_lo
-    mov al, 0x02             # PP
-    call spi_xfer
-    call hd_send_addr
-    push ds
-    mov ax, HDBUF_SEG
-    mov ds, ax
-    mov cx, 256
-.hf_byte:
-    mov al, [si]
-    call spi_xfer
-    inc si
-    loop .hf_byte
-    pop ds
-    call spi_cs_hi
-    call spi_wait_wip
-    cmp si, 4096
-    jb .hf_page
-.hf_clean:
-    mov byte ptr [0xE8], 0
-.hf_done:
-    pop es
-    pop ds
-    pop si
-    pop cx
-    pop bx
-    pop ax
-    ret
-
-## ---- hd_load_block: make block AX resident (DS = BDA) ----
-hd_load_block:
-    push ax
-    push bx
-    push cx
-    push si
     push di
-    push es
-    cmp ax, [0xE6]
-    je .hl_done              # already here
-    call hd_flush            # evict the old one first
-    mov [0xE6], ax
-    mov bx, ax
     call spi_cs_lo
     mov al, 0x03             # READ
     call spi_xfer
-    xor si, si
-    call hd_send_addr
-    mov ax, HDBUF_SEG
-    mov es, ax
-    xor di, di
-    mov cx, 4096
+    call hd_send_lba
+    mov cx, 512
     cld
-.hl_byte:
+.hr_byte:
     mov al, 0xFF
     call spi_xfer
     stosb
-    loop .hl_byte
+    loop .hr_byte
     call spi_cs_hi
-.hl_done:
-    pop es
     pop di
-    pop si
     pop cx
-    pop bx
     pop ax
     ret
 
@@ -2344,6 +2249,42 @@ hd_chs2lba:
 ##  hd_int13 -- INT 13h for DL >= 0x80
 ## =====================================================================
 hd_int13:
+.if HD_DEBUG
+    push ax
+    mov al, ah               # show the FULL function code, not just its low
+    out 0x80, al             # nibble: "A8" only told us (AH & 0x0F) == 8, which
+    pop ax                   # 0x18/0x88/... also satisfy, and those fall through
+.endif                       # to the unsupported path and write no marker at all
+    # If POST did not advertise a fixed disk, behave exactly like a machine that
+    # has none: EVERY function reports "invalid drive". This is what was breaking
+    # the boot -- AH=08 answered CF=0 (success) while also reporting DL=0 drives,
+    # which is self-contradictory, and DOS took the success at face value and went
+    # on to act on a device that is not really there. A real machine with no hard
+    # disk fails the call, and DOS then simply skips the drive.
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    cmp byte ptr [0x75], 0
+    pop ax                       # pop does not disturb the flags from cmp
+    pop ds
+    jne .hd_present
+.if HD_DEBUG
+    push ax
+    mov al, 0xC1                 # C1 = refused (disk not advertised)
+    out 0x80, al
+    pop ax
+.endif
+    mov ah, 0x01                 # invalid drive / bad command
+    stc
+    retf 2
+.hd_present:
+.if HD_DEBUG
+    push ax                  # D1 = presence gate passed
+    mov al, 0xD1
+    out 0x80, al
+    pop ax
+.endif
     cmp ah, 0x02
     je .h_read
     cmp ah, 0x03
@@ -2372,6 +2313,12 @@ hd_int13:
     mov ds, ax
     mov byte ptr [0x74], 0x01
     pop ds
+.if HD_DEBUG
+    push ax                  # C9 = function not supported. Previously this path
+    mov al, 0xC9             # returned silently, so a caller retrying it forever
+    out 0x80, al             # looked identical to a hang inside the handler.
+    pop ax
+.endif
     mov ah, 0x01
     stc
     retf 2                   # replace the caller's flags (CF set)
@@ -2391,8 +2338,7 @@ hd_int13:
     push ax
     mov ax, BDA
     mov ds, ax
-    call hd_flush
-    mov byte ptr [0x74], 0
+    mov byte ptr [0x74], 0   # nothing is buffered, so reset has nothing to commit
     pop ax
     pop ds
     xor ah, ah
@@ -2416,6 +2362,12 @@ hd_int13:
     retf 2
 
 .h_params:                   # AH=08 -> geometry
+.if HD_DEBUG
+    push ax                  # D8 = dispatch landed in .h_params
+    mov al, 0xD8
+    out 0x80, al
+    pop ax
+.endif
     push ds
     mov ax, BDA
     mov ds, ax
@@ -2426,6 +2378,12 @@ hd_int13:
     mov dh, HD_HEADS - 1     # max head
     xor ah, ah
     clc
+.if HD_DEBUG
+    push ax                  # B8 = AH=08 returned normally. If the display shows
+    mov al, 0xB8             # B8 and the machine is still stuck, the fault is in
+    out 0x80, al             # the CALLER, not in this handler.
+    pop ax
+.endif
     retf 2
 
 .h_read:
@@ -2471,46 +2429,31 @@ hd_transfer:
     cmp ax, HD_CYLS * HD_HEADS * HD_SPT
     jae .ht_err              # past the end of the disk
 
-    mov bx, ax               # block = LBA >> 3   (8 sectors per 4 KB block)
-    mov cl, 3
-    shr bx, cl
-    and ax, 7                # offset = (LBA & 7) * 512
-    mov cl, 9
-    shl ax, cl
-    mov [0xF5], ax           # keep it: DS changes during the copy
-    mov ax, bx
-    call hd_load_block
+    mov bx, ax               # BX = LBA of this sector
 
     cmp byte ptr [0xEC], 0
     jne .ht_wr
 
-    # ---- read: buffer -> caller ----
-    mov si, [0xF5]
+    # ---- read straight from flash into the caller's buffer ----
     mov es, [0xED]
     mov di, [0xEF]
-    mov ax, HDBUF_SEG
-    push ds
-    mov ds, ax
-    mov cx, 512
-    cld
-    rep movsb
-    pop ds
+    call hd_read_one
     jmp short .ht_next
 
-    # ---- write: caller -> buffer, block becomes dirty ----
+    # ---- write: not supported yet, report write-protected ----
 .ht_wr:
-    mov di, [0xF5]
-    mov si, [0xEF]
-    mov ax, [0xED]
-    push ds
-    mov ds, ax               # DS = caller segment
-    mov ax, HDBUF_SEG
-    mov es, ax
-    mov cx, 512
-    cld
-    rep movsb
-    pop ds                   # DS = BDA again
-    mov byte ptr [0xE8], 1
+    mov byte ptr [0x74], 0x03
+    pop ax
+    pop bx
+    pop dx
+    pop cx
+    pop di
+    pop si
+    pop es
+    pop ds
+    mov ah, 0x03             # write protected
+    stc
+    retf 2
 
 .ht_next:
     add word ptr [0xEF], 512
@@ -2519,6 +2462,12 @@ hd_transfer:
     jmp .ht_loop
 
 .ht_done:
+.if HD_DEBUG
+    push ax
+    mov al, 0xB2
+    out 0x80, al
+    pop ax
+.endif
     pop ax
     pop bx
     pop dx
@@ -2616,7 +2565,7 @@ b_ver:    .asciz "Philips ROM BIOS Version 1.00"
 b_model:  .asciz "Gertieboard BIOS Pensioen Edition"
 b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"
 b_hdr:    .asciz "                     Total  Base Extra"
-b_mem:    .asciz "System Memory Found:   632   632     0 Kbytes"
+b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
 b_drv:    .asciz "Using Diskette Drive A:"
 b_boot:   .asciz "Booting..."

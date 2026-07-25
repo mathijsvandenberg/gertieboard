@@ -1,20 +1,13 @@
 ; ============================================================================
 ;  hdtest.asm  --  exercise the INT 13h fixed disk (SPI flash) from DOS
 ;
-;  The disk uses a single 4 KB write-back block buffer, because the flash can
-;  only be erased 4 KB at a time. The interesting failure modes are therefore
-;  NOT "does one sector round-trip" but:
+;  The disk is READ ONLY for now, so this checks the read path properly rather
+;  than just the handshake. The key trick: an erased flash reads 0xFF in every
+;  byte, so "all 512 bytes are 0xFF" is a real data-path check on a blank chip.
+;  A broken read (dropped SPI byte, wrong address, stuck MISO low) shows up as
+;  something other than 0xFF.
 ;
-;    * do 8 sectors in the SAME 4 KB block survive one erase cycle, and
-;    * does touching a DIFFERENT block actually flush the dirty one to flash
-;      (if the flush is broken, data appears fine until it is evicted, then
-;       silently reverts -- the nastiest possible bug)
-;
-;  Test 4 is the one that catches that: write a block, force an eviction by
-;  reading elsewhere, then read the first block back FROM FLASH and compare.
-;
-;  It works on cylinder 31 / head 3 (the last 4 KB block of the 2 MB device),
-;  well away from anything a boot sector or file system would use.
+;  Writes are expected to REPORT write-protect, not to hang or silently succeed.
 ;
 ;  Build:  nasm -f bin hdtest.asm -o hdtest.com
 ; ============================================================================
@@ -22,182 +15,165 @@
         org  0x100
         bits 16
 
-HDD     equ 0x80                ; first fixed disk
-TCYL    equ 31                  ; test block: last cylinder
-THEAD   equ 3
-TSEC    equ 25                  ; sectors 25..32 = one aligned 4 KB block
-BUF1    equ 0x4000              ; 4 KB scratch (write pattern)
-BUF2    equ 0x5000              ; 4 KB scratch (read back)
+HDD     equ 0x80
+BUF1    equ 0x4000              ; 4 KB
+BUF2    equ 0x5000              ; 4 KB
 
 start:
         mov  dx, msg_hdr
         call puts
 
+        ; POST deliberately leaves the fixed disk hidden from DOS (BDA 40:75 = 0)
+        ; so that a blank, unpartitioned flash cannot interfere with booting. The
+        ; BIOS refuses every fixed-disk call while that byte is zero, so enable it
+        ; here for the duration of the test and put it back on the way out.
+        push ds
+        mov  ax, 0x0040
+        mov  ds, ax
+        mov  byte [0x75], 1
+        pop  ds
+
         ; ---------------- geometry (AH=08) ----------------
+        mov  dx, msg_geo
+        call puts
         mov  ah, 0x08
         mov  dl, HDD
         int  0x13
-        jc   .geo_fail
+        jc   .geo_bad
         push cx
-        push dx
-        mov  dx, msg_geo
-        call puts
-        pop  dx
-        pop  cx
-        push cx
-        push dx
-        mov  al, ch             ; max cylinder (low 8 bits)
+        mov  al, ch
         inc  al
-        mov  ah, 0
+        xor  ah, ah
         call putdec
         mov  dx, msg_x
         call puts
-        pop  dx
-        push dx
-        mov  al, dh             ; max head
+        mov  al, dh
         inc  al
-        mov  ah, 0
+        xor  ah, ah
         call putdec
         mov  dx, msg_x
         call puts
-        pop  dx
         pop  cx
         mov  al, cl
-        and  al, 0x3F           ; sectors per track
-        mov  ah, 0
+        and  al, 0x3F
+        xor  ah, ah
         call putdec
         mov  dx, msg_crlf
         call puts
         jmp  short .t1
-.geo_fail:
-        mov  dx, msg_geoerr
+.geo_bad:
+        mov  dx, msg_fail
         call puts
 
-        ; ---------------- 1: single sector round-trip ----------------
+        ; ---------------- 1: read LBA 0 ----------------
 .t1:
         mov  dx, msg_t1
         call puts
         mov  di, BUF1
-        mov  al, 0x5A
-        call fill1              ; one sector of a walking pattern
-        mov  al, 1
-        mov  bx, BUF1
-        call wr_sectors
-        jc   .t1_bad
-        mov  di, BUF2
-        call clear1
-        mov  al, 1
-        mov  bx, BUF2
-        call rd_sectors
-        jc   .t1_bad
         mov  cx, 512
-        call cmp_buf
+        call clearbuf
+        mov  ax, 0x0201         ; AH=02 read, AL=1 sector
+        mov  cx, 0x0001         ; C=0, S=1
+        mov  dx, 0x0080         ; H=0, drive 80
+        mov  bx, BUF1
+        int  0x13
         jc   .t1_bad
         call pass
         jmp  short .t2
 .t1_bad:
         call fail
 
-        ; ---------------- 2: 8 sectors, one erase block ----------------
+        ; ---------------- 2: erased flash must read 0xFF ----------------
 .t2:
         mov  dx, msg_t2
         call puts
-        mov  di, BUF1
-        mov  al, 0xC3
-        call fill8
-        mov  al, 8
-        mov  bx, BUF1
-        call wr_sectors
-        jc   .t2_bad
-        mov  di, BUF2
-        call clear8
-        mov  al, 8
-        mov  bx, BUF2
-        call rd_sectors
-        jc   .t2_bad
-        mov  cx, 4096
-        call cmp_buf
+        mov  si, BUF1
+        mov  cx, 512
+        call all_ff
         jc   .t2_bad
         call pass
         jmp  short .t3
 .t2_bad:
         call fail
 
-        ; ---------------- 3: read a different block (forces eviction) ------
+        ; ---------------- 3: multi-sector read (8 sectors) ----------------
 .t3:
         mov  dx, msg_t3
         call puts
-        mov  ax, 0x0201         ; read 1 sector, LBA 0 = C0 H0 S1
-        mov  cx, 0x0001
-        mov  dx, 0x0080
-        mov  bx, BUF2
+        mov  di, BUF1
+        mov  cx, 4096
+        call clearbuf
+        mov  ax, 0x0208         ; read 8 sectors
+        mov  cx, 0x0019         ; C=0, S=25
+        mov  dx, 0x0380         ; H=3, drive 80
+        mov  bx, BUF1
         int  0x13
+        jc   .t3_bad
+        mov  si, BUF1
+        mov  cx, 4096
+        call all_ff
         jc   .t3_bad
         call pass
         jmp  short .t4
 .t3_bad:
         call fail
 
-        ; ---------------- 4: did the dirty block reach the flash? ---------
+        ; ---------------- 4: repeatability ----------------
+        ; the same sector read twice must give identical bytes; a dropped SPI
+        ; byte would desynchronise one of the two reads
 .t4:
         mov  dx, msg_t4
         call puts
-        mov  di, BUF2
-        call clear8
-        mov  al, 8
-        mov  bx, BUF2
-        call rd_sectors         ; must come back from FLASH now, not RAM
+        mov  ax, 0x0201
+        mov  cx, 0x0002         ; C=0, S=2
+        mov  dx, 0x0080
+        mov  bx, BUF1
+        int  0x13
         jc   .t4_bad
-        mov  cx, 4096
+        mov  ax, 0x0201
+        mov  cx, 0x0002
+        mov  dx, 0x0080
+        mov  bx, BUF2
+        int  0x13
+        jc   .t4_bad
+        mov  cx, 512
         call cmp_buf
         jc   .t4_bad
         call pass
-        jmp  short .fin
+        jmp  short .t5
 .t4_bad:
         call fail
 
-.fin:
-        mov  ah, 0x00           ; reset = commit anything still dirty
-        mov  dl, HDD
+        ; ---------------- 5: write must report write-protect ----------------
+.t5:
+        mov  dx, msg_t5
+        call puts
+        mov  ax, 0x0301         ; AH=03 write, 1 sector
+        mov  cx, 0x0019
+        mov  dx, 0x0380
+        mov  bx, BUF1
         int  0x13
+        jnc  .t5_bad            ; success would be wrong -- writes are disabled
+        cmp  ah, 0x03           ; expect "write protected"
+        jne  .t5_bad
+        call pass
+        jmp  short .fin
+.t5_bad:
+        call fail
+
+.fin:
+        push ds                  ; hide the disk from DOS again
+        mov  ax, 0x0040
+        mov  ds, ax
+        mov  byte [0x75], 0
+        pop  ds
         mov  dx, msg_done
         call puts
         mov  ax, 0x4C00
         int  0x21
 
 ; ---------------------------------------------------------------------------
-; wr_sectors / rd_sectors: AL = count, BX = offset in our segment
-; ---------------------------------------------------------------------------
-wr_sectors:
-        mov  ah, 0x03
-        jmp  short do_int13
-rd_sectors:
-        mov  ah, 0x02
-do_int13:
-        mov  ch, TCYL
-        mov  cl, TSEC
-        mov  dh, THEAD
-        mov  dl, HDD
-        int  0x13
-        ret
-
-; fill1/fill8: walking pattern seeded from AL into ES:DI
-fill1:  mov  cx, 512
-        jmp  short fill_do
-fill8:  mov  cx, 4096
-fill_do:
-        push di
-.f:     mov  [di], al
-        inc  di
-        add  al, 0x1B
-        loop .f
-        pop  di
-        ret
-
-clear1: mov  cx, 512
-        jmp  short clr_do
-clear8: mov  cx, 4096
-clr_do:
+clearbuf:                        ; DI = start, CX = count
         push di
         xor  al, al
 .c:     mov  [di], al
@@ -206,8 +182,19 @@ clr_do:
         pop  di
         ret
 
-; cmp_buf: CX bytes, BUF1 vs BUF2 -> CF set on mismatch
-cmp_buf:
+all_ff:                          ; SI = start, CX = count -> CF set if any != FF
+        push si
+.a:     cmp  byte [si], 0xFF
+        jne  .bad
+        inc  si
+        loop .a
+        clc
+        jmp  short .out
+.bad:   stc
+.out:   pop  si
+        ret
+
+cmp_buf:                         ; CX bytes, BUF1 vs BUF2 -> CF set on mismatch
         push si
         push di
         mov  si, BUF1
@@ -242,7 +229,7 @@ puts:   push ax
         pop  ax
         ret
 
-putdec:                          ; AX unsigned -> decimal
+putdec:
         push ax
         push bx
         push cx
@@ -266,16 +253,15 @@ putdec:                          ; AX unsigned -> decimal
         pop  ax
         ret
 
-msg_hdr:    db 'gertieboard fixed-disk (SPI flash) test',13,10
-            db 'testing C',13,10,'$'
-msg_geo:    db 'geometry (C x H x S): $'
-msg_geoerr: db 'AH=08 failed',13,10,'$'
-msg_x:      db ' x $'
-msg_t1:     db '1 single sector round-trip     : $'
-msg_t2:     db '2 eight sectors, one 4K block  : $'
-msg_t3:     db '3 read other block (evict)     : $'
-msg_t4:     db '4 re-read after eviction       : $'
-msg_pass:   db 'PASS',13,10,'$'
-msg_fail:   db 'FAIL',13,10,'$'
-msg_done:   db 'done.',13,10,'$'
-msg_crlf:   db 13,10,'$'
+msg_hdr:  db 'gertieboard fixed disk (SPI flash) -- read-only stage',13,10,'$'
+msg_geo:  db 'geometry C x H x S             : $'
+msg_x:    db ' x $'
+msg_t1:   db '1 read LBA 0                   : $'
+msg_t2:   db '2 erased flash reads 0xFF      : $'
+msg_t3:   db '3 multi-sector read (8)        : $'
+msg_t4:   db '4 same sector twice matches    : $'
+msg_t5:   db '5 write reports write-protect  : $'
+msg_pass: db 'PASS',13,10,'$'
+msg_fail: db 'FAIL',13,10,'$'
+msg_done: db 'done.',13,10,'$'
+msg_crlf: db 13,10,'$'
