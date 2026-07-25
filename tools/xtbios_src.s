@@ -108,7 +108,10 @@ _post:
     xor ax, ax
     rep stosw
     mov word ptr es:[0x10], 0x0021   # equipment: 1 floppy, 80x25 colour
-    mov word ptr es:[0x13], 640      # base memory size in KB
+    # 632 KB, not 640: the top 8 KB (0x9E000+) is the fixed-disk block buffer.
+    # If this ever goes back to 640, move HDBUF_SEG first.
+    mov word ptr es:[0x13], 632      # base memory size in KB
+    mov byte ptr es:[0x75], 1        # one fixed disk installed
     mov word ptr es:[0x1A], KBBUF    # kbd buffer head
     mov word ptr es:[0x1C], KBBUF    # kbd buffer tail
     mov word ptr es:[0x80], KBBUF    # buffer start
@@ -1389,6 +1392,10 @@ _int16:
 ## =====================================================================
 _int13:
     sti
+    test dl, 0x80                # 0x80+ = fixed disk -> SPI flash
+    jz .i13_floppy
+    jmp hd_int13
+.i13_floppy:
     cmp ah, 0x02                 # read (most common) first
     jne .i13_n02
     jmp d_read
@@ -2036,6 +2043,9 @@ hd_detect:
     mov [0xE0], bl
     mov [0xE1], bh
     mov [0xE2], cl
+    mov word ptr [0xE6], 0xFFFF  # no block cached yet
+    mov byte ptr [0xE8], 0       # and nothing dirty
+    mov byte ptr [0x74], 0       # fixed-disk status = OK
 
     # ---- size in KB = 1 << (capacity-10), sane capacity codes only ----
     xor dx, dx                   # DX = size in KB, 0 = unknown
@@ -2102,6 +2112,411 @@ dbg_spc:
     add di, 2
     pop ax
     ret
+
+## =====================================================================
+##  FIXED DISK (INT 13h, DL >= 0x80) backed by the SPI flash
+##
+##  The flash cannot be overwritten in place: a 512-byte disk sector lives
+##  inside a 4 KB erase block, so changing it means erase-then-reprogram of the
+##  whole block. Doing that per sector would cost 8 erases (and ~0.6 s) for 8
+##  consecutive sectors, so instead ONE 4 KB block is held in RAM:
+##
+##    * read  -> make sure the block is resident, copy 512 bytes out of it
+##    * write -> make sure the block is resident, copy 512 bytes in, mark dirty
+##    * the erase + reprogram happens only when a DIFFERENT block is needed,
+##      or on an explicit flush (AH=00 reset, which DOS issues, and AH=0C/0D)
+##
+##  So 8 sequential sector writes cost a single erase. The trade-off is a
+##  power-loss window: data written but not yet flushed is lost. DOS calls
+##  AH=00 often enough that this stays small, and hd_flush is cheap when clean.
+##
+##  The buffer sits at 0x9E000, just above the 632 KB reported to DOS -- the
+##  classic way for a BIOS to keep private RAM. Do not raise the reported memory
+##  size back to 640 KB without moving the buffer.
+##
+##  Geometry: 2 MB / 512 = 4096 sectors, presented as 32 cyl x 4 heads x 32 spt.
+## =====================================================================
+.equ HDBUF_SEG, 0x9E00       # 4 KB block buffer (linear 0x9E000)
+.equ HD_SPT,    32
+.equ HD_HEADS,  4
+.equ HD_CYLS,   32
+
+## ---- SPI helpers on top of spi_xfer --------------------------------
+spi_wren:                    # write enable
+    call spi_cs_lo
+    mov al, 0x06
+    call spi_xfer
+    call spi_cs_hi
+    ret
+
+spi_wait_wip:                # spin until the status register's WIP clears
+    push ax
+.ww_l:
+    call spi_cs_lo
+    mov al, 0x05             # RDSR
+    call spi_xfer
+    mov al, 0xFF
+    call spi_xfer
+    call spi_cs_hi
+    test al, 0x01            # WIP
+    jnz .ww_l
+    pop ax
+    ret
+
+## hd_send_addr: BX = block index, SI = byte offset in block -> 3 address bytes
+## flash address = block*4096 + offset
+hd_send_addr:
+    push ax
+    push cx
+    push dx
+    mov dx, bx
+    mov ax, dx
+    mov cl, 4
+    shr ax, cl               # block >> 4
+    call spi_xfer            # addr[23:16]
+    mov ax, dx
+    and al, 0x0F
+    mov cl, 4
+    shl al, cl               # (block & 0x0F) << 4
+    mov dl, al
+    mov ax, si
+    mov cl, 8
+    shr ax, cl               # offset >> 8
+    or  al, dl
+    call spi_xfer            # addr[15:8]
+    mov ax, si
+    call spi_xfer            # addr[7:0]
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+## ---- hd_flush: write the cached block back if it is dirty (DS = BDA) ----
+hd_flush:
+    push ax
+    push bx
+    push cx
+    push si
+    push ds
+    push es
+    cmp byte ptr [0xE8], 0
+    je .hf_done
+    mov bx, [0xE6]
+    cmp bx, 0xFFFF
+    je .hf_clean
+
+    call spi_wren            # erase the 4 KB block
+    call spi_cs_lo
+    mov al, 0x20             # SER4K
+    call spi_xfer
+    xor si, si
+    call hd_send_addr
+    call spi_cs_hi
+    call spi_wait_wip
+
+    xor si, si               # program 16 pages of 256 bytes
+.hf_page:
+    call spi_wren
+    call spi_cs_lo
+    mov al, 0x02             # PP
+    call spi_xfer
+    call hd_send_addr
+    push ds
+    mov ax, HDBUF_SEG
+    mov ds, ax
+    mov cx, 256
+.hf_byte:
+    mov al, [si]
+    call spi_xfer
+    inc si
+    loop .hf_byte
+    pop ds
+    call spi_cs_hi
+    call spi_wait_wip
+    cmp si, 4096
+    jb .hf_page
+.hf_clean:
+    mov byte ptr [0xE8], 0
+.hf_done:
+    pop es
+    pop ds
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---- hd_load_block: make block AX resident (DS = BDA) ----
+hd_load_block:
+    push ax
+    push bx
+    push cx
+    push si
+    push di
+    push es
+    cmp ax, [0xE6]
+    je .hl_done              # already here
+    call hd_flush            # evict the old one first
+    mov [0xE6], ax
+    mov bx, ax
+    call spi_cs_lo
+    mov al, 0x03             # READ
+    call spi_xfer
+    xor si, si
+    call hd_send_addr
+    mov ax, HDBUF_SEG
+    mov es, ax
+    xor di, di
+    mov cx, 4096
+    cld
+.hl_byte:
+    mov al, 0xFF
+    call spi_xfer
+    stosb
+    loop .hl_byte
+    call spi_cs_hi
+.hl_done:
+    pop es
+    pop di
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---- hd_chs2lba: CH/CL/DH -> AX = LBA  (DS = BDA; CX,DX preserved) ----
+hd_chs2lba:
+    push bx
+    push cx
+    push dx
+    mov al, cl
+    and al, 0x3F
+    mov [0xEA], al           # sector, 1-based
+    mov [0xEB], dh           # head
+    mov al, cl               # cylinder high bits live in CL(7:6)
+    and al, 0xC0
+    mov ah, 0
+    mov cl, 6
+    shr ax, cl
+    mov ah, al
+    mov al, ch               # AX = cylinder
+    mov bx, HD_HEADS
+    mul bx                   # cyl * heads   (DX:AX, high word unused here)
+    mov bl, [0xEB]
+    mov bh, 0
+    add ax, bx               # + head
+    mov bx, HD_SPT
+    mul bx                   # * sectors-per-track
+    mov bl, [0xEA]
+    mov bh, 0
+    dec bx
+    add ax, bx               # + (sector-1)
+    pop dx
+    pop cx
+    pop bx
+    ret
+
+## =====================================================================
+##  hd_int13 -- INT 13h for DL >= 0x80
+## =====================================================================
+hd_int13:
+    cmp ah, 0x02
+    je .h_read
+    cmp ah, 0x03
+    je .h_write
+    cmp ah, 0x08
+    je .h_params
+    cmp ah, 0x15
+    je .h_dtype
+    cmp ah, 0x00             # reset -> flush, so DOS's reset is our commit point
+    je .h_flushok
+    cmp ah, 0x0C             # seek
+    je .h_ok
+    cmp ah, 0x0D             # alternate reset
+    je .h_flushok
+    cmp ah, 0x10             # test drive ready
+    je .h_ok
+    cmp ah, 0x11             # recalibrate
+    je .h_ok
+    cmp ah, 0x04             # verify -- data is checked by reading it
+    je .h_ok
+    cmp ah, 0x01             # last status
+    je .h_status
+    # unsupported
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0x74], 0x01
+    pop ds
+    mov ah, 0x01
+    stc
+    retf 2                   # replace the caller's flags (CF set)
+
+.h_ok:
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0x74], 0
+    pop ds
+    xor ah, ah
+    clc
+    retf 2
+
+.h_flushok:
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    call hd_flush
+    mov byte ptr [0x74], 0
+    pop ax
+    pop ds
+    xor ah, ah
+    clc
+    retf 2
+
+.h_status:
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov ah, [0x74]
+    pop ds
+    clc
+    retf 2
+
+.h_dtype:                    # AH=03 -> fixed disk, CX:DX = total sectors
+    mov ah, 0x03
+    mov cx, 0
+    mov dx, HD_CYLS * HD_HEADS * HD_SPT
+    clc
+    retf 2
+
+.h_params:                   # AH=08 -> geometry
+    mov ch, HD_CYLS - 1      # max cylinder (low 8 bits)
+    mov cl, HD_SPT           # sectors/track, cylinder high bits are 0
+    mov dh, HD_HEADS - 1     # max head
+    mov dl, 1                # one fixed disk installed
+    xor ah, ah
+    clc
+    retf 2
+
+.h_read:
+.h_write:
+    jmp short hd_transfer        # AH (02 vs 03) already says which
+
+## ---- the shared sector loop -----------------------------------------
+## AL = sector count, ES:BX = caller buffer, CH/CL/DH = CHS of the first sector
+## Everything below works in LBA space: the CHS triple is converted once and
+## then simply incremented, which avoids re-deriving CHS for each sector.
+## BDA scratch: EC=dir ED=caller seg EF=caller off F1=LBA F3=count F5=offset
+hd_transfer:
+    push ds
+    push es
+    push si
+    push di
+    push cx
+    push dx
+    push bx
+    push ax
+
+    mov di, ax               # DI = AH:function, AL:sector count
+    mov ax, BDA
+    mov ds, ax
+    mov [0xED], es           # caller buffer segment
+    mov [0xEF], bx           # caller buffer offset
+    mov byte ptr [0x74], 0
+    mov ax, di               # recover AH = function, AL = count
+    mov [0xF3], al           # sectors remaining
+    xor al, al               # direction straight from the function code:
+    cmp ah, 0x03             #   AH=03 is write, anything else here is read
+    jne .ht_dirset
+    mov al, 1
+.ht_dirset:
+    mov [0xEC], al
+    call hd_chs2lba          # start LBA from CH/CL/DH
+    mov [0xF1], ax
+
+.ht_loop:
+    cmp byte ptr [0xF3], 0
+    je .ht_done
+    mov ax, [0xF1]
+    cmp ax, HD_CYLS * HD_HEADS * HD_SPT
+    jae .ht_err              # past the end of the disk
+
+    mov bx, ax               # block = LBA >> 3   (8 sectors per 4 KB block)
+    mov cl, 3
+    shr bx, cl
+    and ax, 7                # offset = (LBA & 7) * 512
+    mov cl, 9
+    shl ax, cl
+    mov [0xF5], ax           # keep it: DS changes during the copy
+    mov ax, bx
+    call hd_load_block
+
+    cmp byte ptr [0xEC], 0
+    jne .ht_wr
+
+    # ---- read: buffer -> caller ----
+    mov si, [0xF5]
+    mov es, [0xED]
+    mov di, [0xEF]
+    mov ax, HDBUF_SEG
+    push ds
+    mov ds, ax
+    mov cx, 512
+    cld
+    rep movsb
+    pop ds
+    jmp short .ht_next
+
+    # ---- write: caller -> buffer, block becomes dirty ----
+.ht_wr:
+    mov di, [0xF5]
+    mov si, [0xEF]
+    mov ax, [0xED]
+    push ds
+    mov ds, ax               # DS = caller segment
+    mov ax, HDBUF_SEG
+    mov es, ax
+    mov cx, 512
+    cld
+    rep movsb
+    pop ds                   # DS = BDA again
+    mov byte ptr [0xE8], 1
+
+.ht_next:
+    add word ptr [0xEF], 512
+    inc word ptr [0xF1]
+    dec byte ptr [0xF3]
+    jmp .ht_loop
+
+.ht_done:
+    pop ax
+    pop bx
+    pop dx
+    pop cx
+    pop di
+    pop si
+    pop es
+    pop ds
+    xor ah, ah
+    clc
+    retf 2
+
+.ht_err:
+    mov byte ptr [0x74], 0x04    # sector not found
+    pop ax
+    pop bx
+    pop dx
+    pop cx
+    pop di
+    pop si
+    pop es
+    pop ds
+    mov ah, 0x04
+    stc
+    retf 2
+
 
 ## dbg_str: DS:SI = ASCIZ -> written at ES:DI (attr 0x0E), DI advances
 dbg_str:
@@ -2173,7 +2588,7 @@ b_ver:    .asciz "Philips ROM BIOS Version 1.00"
 b_model:  .asciz "Gertieboard BIOS Pensioen Edition"
 b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"
 b_hdr:    .asciz "                     Total  Base Extra"
-b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
+b_mem:    .asciz "System Memory Found:   632   632     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
 b_drv:    .asciz "Using Diskette Drive A:"
 b_boot:   .asciz "Booting..."
