@@ -22,20 +22,32 @@ USE  IEEE.STD_LOGIC_UNSIGNED.all;
 
 ENTITY ctrl_reg IS
   PORT(
-        CLK  : IN  std_logic;
-        DATA : IN  std_logic_vector(7 DOWNTO 0);
-        ADDR : IN  std_logic_vector(15 DOWNTO 0);
-        WR   : IN  std_logic;                       -- active-low I/O write strobe
-        CTRL : OUT std_logic_vector(7 DOWNTO 0));
+        CLK   : IN  std_logic;
+        RESET : IN  std_logic;                      -- sync, active high
+        DATA  : IN  std_logic_vector(7 DOWNTO 0);
+        ADDR  : IN  std_logic_vector(15 DOWNTO 0);
+        WR    : IN  std_logic;                      -- active-low I/O write strobe
+        CTRL  : OUT std_logic_vector(7 DOWNTO 0));
 END ctrl_reg;
 
 ARCHITECTURE behavior OF ctrl_reg IS
-  SIGNAL ctrl_q : std_logic_vector(7 DOWNTO 0) := x"02";
+  -- SCK_DIV=2, RD_LAT=0.  RD_LAT is a capture-ALIGNMENT parameter, not a margin
+  -- knob: a non-zero value shifts the read window by whole nibbles, so every
+  -- byte comes back scrambled and the machine wedges instantly (all code is
+  -- fetched from PSRAM).  0 is the only correct value on this board.
+  CONSTANT DEFAULT_CTRL : std_logic_vector(7 DOWNTO 0) := x"02";
+  SIGNAL ctrl_q : std_logic_vector(7 DOWNTO 0) := DEFAULT_CTRL;
 BEGIN
   PROCESS (CLK)
   BEGIN
     IF rising_edge(CLK) THEN
-      IF (WR = '0' AND ADDR = x"00E4") THEN
+      -- RESET restores the safe default.  Without this the register survived a
+      -- CPU reset, so trying a bad CTRL left the board dead until the bitstream
+      -- was reloaded -- the reset button could not help, because the code that
+      -- would have rewritten CTRL was itself unfetchable.
+      IF RESET = '1' THEN
+        ctrl_q <= DEFAULT_CTRL;
+      ELSIF (WR = '0' AND ADDR = x"00E4") THEN
         ctrl_q <= DATA;
       END IF;
     END IF;

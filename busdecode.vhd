@@ -138,7 +138,15 @@ BEGIN
 	 ELSE DATA_IN  WHEN (HLDA = '0' AND DTR = '0' AND DEN = '0')
 	 ELSE "ZZZZZZZZ";
 
-	READY <=  '1' WHEN (T >= 10 AND MEMADDR AND IOM = '0')
+	-- Memory cycles are governed by RAM_READY. The T-based clause is only a
+	-- backstop against a wedged memory controller, so it must be LONGER than the
+	-- slowest legitimate access -- otherwise it releases the CPU early and the
+	-- data bus is sampled before the PSRAM has driven it (silent corruption).
+	-- It used to be T >= 10, which a 16-byte PSRAM cache-line fill (~18 CPU
+	-- clocks at SCK_DIV=2) would trip on every miss. 64 clocks = 12.8 us at
+	-- 5 MHz, comfortably past the worst case (61 SCK cycles at SCK_DIV=2,
+	-- RD_LAT=15 ~= 24 clocks) while still recovering from a real fault.
+	READY <=  '1' WHEN (T >= 64 AND MEMADDR AND IOM = '0')
       ELSE '1' WHEN (MEMADDR AND IOM = '0' AND RAM_READY = '1')
       ELSE '1' WHEN (T >= 3 AND (NOT MEMADDR OR IOM = '1'))
       ELSE '0';

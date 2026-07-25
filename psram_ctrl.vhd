@@ -20,6 +20,16 @@
 -- get reliable reads independent of PLL phase; RD_LAT then fixes byte alignment.
 -- Recommended bring-up: SCK_DIV=4, sweep RD_LAT 0..4 until a memory test passes,
 -- then reduce SCK_DIV as far as it stays reliable.
+--
+-- READS ARE CACHED: a miss burst-fills a 16-byte aligned line and later
+-- accesses to that line complete with no wait states at all (see the cache
+-- notes further down). Writes are unchanged -- write-through, plus an
+-- invalidate of any cached copy. Because a line fill takes far longer than a
+-- single-byte read, busdecode's READY backstop had to be raised from 10 to 64
+-- CPU clocks; do not put it back.
+--
+-- tCEM WARNING: the burst holds CS low for ~46 SCK cycles, so SCK_DIV must stay
+-- <= 2 (3.7 us) to remain inside the PSRAM's ~8 us max CS-low refresh limit.
 --------------------------------------------------------------------------------
 
 LIBRARY IEEE;
@@ -71,7 +81,8 @@ ARCHITECTURE behavior OF psram_ctrl IS
   SIGNAL out_sr    : std_logic_vector(39 DOWNTO 0) := (OTHERS => '0');
   SIGNAL in_sr     : std_logic_vector(7  DOWNTO 0) := (OTHERS => '0');
   SIGNAL bit_cnt   : integer range 0 TO 15 := 0;
-  SIGNAL cycle_cnt : integer range 0 TO 31 := 0;
+  -- widened for burst fills: 14 dummy/overhead + 2*LINE_BYTES + RD_LAT
+  SIGNAL cycle_cnt : integer range 0 TO 127 := 0;
   SIGNAL delay_cnt : integer range 0 TO 65535 := 0;
   SIGNAL is_read_op: std_logic := '0';
   SIGNAL read_data : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
@@ -80,7 +91,114 @@ ARCHITECTURE behavior OF psram_ctrl IS
   SIGNAL sio_oe  : std_logic_vector(3 DOWNTO 0);
   SIGNAL sio_out : std_logic_vector(3 DOWNTO 0);
 
+  ----------------------------------------------------------------------------
+  -- Read cache with burst fill
+  --
+  -- A single-byte 0xEB read costs 16 SCK cycles, almost all of it command +
+  -- address + dummy overhead; once the chip is streaming, each FURTHER
+  -- sequential byte costs only 2 more. So on a miss we keep clocking and fill a
+  -- whole aligned line, then serve the next accesses to that line with zero
+  -- wait states. 8088 instruction fetch is overwhelmingly sequential, so this
+  -- turns ~16 SCK/byte into (16+2*15)/16 = 2.9 SCK/byte.
+  --
+  -- 4 lines, fully associative, round-robin replacement. Four lines matter: the
+  -- CPU interleaves code fetch with data access, and a single line would be
+  -- evicted by every operand read, making things WORSE than no cache.
+  --
+  -- Lines are 16-byte ALIGNED, so a burst can never cross the PSRAM's 1024-byte
+  -- page boundary. Note tCEM (max CS-low time, ~8 us) bounds the burst: 46 SCK
+  -- cycles is 3.7 us at SCK_DIV=2 and 1.8 us at SCK_DIV=1, both fine, but do
+  -- NOT combine this line length with SCK_DIV >= 4.
+  --
+  -- Coherency: writes stay write-through and simply invalidate any cached copy
+  -- of the affected line. DMA writes arrive on the same port, so they are
+  -- covered too.
+  ----------------------------------------------------------------------------
+  CONSTANT LINE_BYTES : integer := 16;
+  CONSTANT NLINES     : integer := 4;
+
+  TYPE line_t  IS ARRAY(0 TO LINE_BYTES-1) OF std_logic_vector(7 DOWNTO 0);
+  TYPE lines_t IS ARRAY(0 TO NLINES-1)     OF line_t;
+  TYPE tags_t  IS ARRAY(0 TO NLINES-1)     OF std_logic_vector(15 DOWNTO 0);
+
+  SIGNAL cache  : lines_t;
+  SIGNAL tag    : tags_t;
+  SIGNAL valid  : std_logic_vector(NLINES-1 DOWNTO 0) := (OTHERS => '0');
+
+  SIGNAL victim   : integer RANGE 0 TO NLINES-1 := 0;   -- round-robin pointer
+  SIGNAL fill_sel : integer RANGE 0 TO NLINES-1 := 0;   -- line being filled
+  SIGNAL fill_idx : integer RANGE 0 TO LINE_BYTES := 0; -- bytes captured
+  SIGNAL nib_hi   : std_logic := '0';                   -- high nibble pending
+  SIGNAL nib_tmp  : std_logic_vector(3 DOWNTO 0) := (OTHERS => '0');
+  -- byte offset the CPU actually asked for, latched when the fill starts, so
+  -- read_data can present it the moment the fill ends (the lookup pipeline may
+  -- not have caught up yet on that exact cycle)
+  SIGNAL req_off  : integer RANGE 0 TO LINE_BYTES-1 := 0;
+
+  SIGNAL cur_tag    : std_logic_vector(15 DOWNTO 0);
+  SIGNAL hit_vec    : std_logic_vector(NLINES-1 DOWNTO 0);
+  SIGNAL hit        : std_logic;
+  SIGNAL hit_sel    : integer RANGE 0 TO NLINES-1;
+  SIGNAL cache_byte : std_logic_vector(7 DOWNTO 0);
+  SIGNAL rd_hit     : std_logic;
+
+  -- Lookup pipeline.
+  --
+  -- Driving DATAOUT straight out of the tag compare + 64:1 byte mux put a long
+  -- combinational chain onto the shared peripheral data bus (it showed up as the
+  -- worst-case path, tag -> fdc sector-buffer datain, and cost ~3 ns of slack).
+  -- So the lookup is registered instead. That is free in CPU terms: the address
+  -- is stable from T1 and the 8088 does not latch data until T3/T4, hundreds of
+  -- ns later, whereas this pipeline is one 50 MHz cycle (20 ns).
+  --
+  -- lu_addr records which address the registered result belongs to, and the
+  -- result is only ever used when it still matches the address on the bus. That
+  -- makes a stale pipeline entry impossible to serve -- worst case the guard
+  -- fails, the access is treated as a miss for one cycle, and READY simply stays
+  -- low a little longer.
+  SIGNAL lu_addr : std_logic_vector(19 DOWNTO 0) := (OTHERS => '1');
+  SIGNAL lu_data : std_logic_vector(7  DOWNTO 0) := (OTHERS => '0');
+  SIGNAL lu_hit  : std_logic := '0';
+  SIGNAL lu_ok   : std_logic;
+
 BEGIN
+
+  ----------------------------------------------------------------------------
+  -- Cache lookup (combinational)
+  ----------------------------------------------------------------------------
+  cur_tag <= ADDR(19 DOWNTO 4);
+
+  tag_cmp : FOR i IN 0 TO NLINES-1 GENERATE
+    hit_vec(i) <= valid(i) WHEN tag(i) = cur_tag ELSE '0';
+  END GENERATE;
+
+  -- Tags are unique, so at most one bit of hit_vec is set.
+  hit_enc : PROCESS (hit_vec)
+    VARIABLE h : std_logic;
+    VARIABLE s : integer RANGE 0 TO NLINES-1;
+  BEGIN
+    h := '0'; s := 0;
+    FOR i IN 0 TO NLINES-1 LOOP
+      IF hit_vec(i) = '1' THEN h := '1'; s := i; END IF;
+    END LOOP;
+    hit     <= h;
+    hit_sel <= s;
+  END PROCESS;
+
+  cache_byte <= cache(hit_sel)(conv_integer(ADDR(3 DOWNTO 0)));
+
+  -- registered lookup + "belongs to the current address" guard
+  lookup : PROCESS (CLK_RAM)
+  BEGIN
+    IF falling_edge(CLK_RAM) THEN
+      lu_addr <= ADDR;
+      lu_data <= cache_byte;
+      lu_hit  <= hit;
+    END IF;
+  END PROCESS;
+
+  lu_ok  <= '1' WHEN (lu_hit = '1' AND lu_addr = ADDR) ELSE '0';
+  rd_hit <= cpu_rd_op AND lu_ok;
 
   -- conventional RAM above the 32 KB M9K low window, PLUS the full 64 KB
   -- F-segment BIOS (0xF0000..0xFFFFF) -- loaded once, then read/executed.
@@ -96,8 +214,16 @@ BEGIN
   sck_div <= 1 WHEN CTRL(2 DOWNTO 0) = "000" ELSE conv_integer(CTRL(2 DOWNTO 0));
   rd_lat  <= conv_integer(CTRL(6 DOWNTO 3));
 
-  DATAOUT <= read_data WHEN cpu_rd_op = '1' ELSE "ZZZZZZZZ";
-  READY   <= '0' WHEN (cpu_op = '1' AND state = S_IDLE) ELSE ready_int;
+  -- On a hit the byte comes straight out of the cache; read_data is only the
+  -- fallback for the cycle in which a fill completes.
+  DATAOUT <= lu_data   WHEN (cpu_rd_op = '1' AND lu_ok = '1') ELSE
+             read_data WHEN  cpu_rd_op = '1'                  ELSE "ZZZZZZZZ";
+
+  -- A read hit must NOT pull READY low, otherwise we would insert wait states
+  -- on exactly the accesses the cache is meant to make free. Writes and read
+  -- misses still stall until the FSM has run.
+  READY   <= '0' WHEN (cpu_op = '1' AND state = S_IDLE AND rd_hit = '0')
+             ELSE ready_int;
 
   RAM_SIO(0) <= sio_out(0) WHEN sio_oe(0) = '1' ELSE 'Z';
   RAM_SIO(1) <= sio_out(1) WHEN sio_oe(1) = '1' ELSE 'Z';
@@ -145,6 +271,11 @@ BEGIN
       in_sr      <= (OTHERS => '0');
       read_data  <= (OTHERS => '0');
       is_read_op <= '0';
+      valid      <= (OTHERS => '0');   -- cache starts empty
+      victim     <= 0;
+      fill_sel   <= 0;
+      fill_idx   <= 0;
+      nib_hi     <= '0';
 
     ELSIF falling_edge(CLK_RAM) THEN
       CASE state IS
@@ -217,13 +348,28 @@ BEGIN
 
         WHEN S_IDLE =>
           RAM_CS  <= '1'; RAM_SCK <= '0'; half_cnt <= 0;
-          IF cpu_rd_op = '1' THEN
-            out_sr     <= x"EB" & "0000" & ADDR & x"00";
+          IF cpu_rd_op = '1' AND hit = '0' THEN
+            -- read MISS: burst-fill the whole aligned line. The address sent is
+            -- the LINE BASE (low 4 bits zeroed), not the requested byte.
+            out_sr     <= x"EB" & "0000" & ADDR(19 DOWNTO 4) & "0000" & x"00";
             cycle_cnt  <= 0; is_read_op <= '1'; RAM_CS <= '0';
+            fill_sel      <= victim;
+            fill_idx      <= 0;
+            nib_hi        <= '0';
+            req_off       <= conv_integer(ADDR(3 DOWNTO 0));
+            valid(victim) <= '0';                 -- stale while being refilled
+            tag(victim)   <= ADDR(19 DOWNTO 4);
             ready_int  <= '0'; state <= S_QPI_LO;
           ELSIF cpu_wr_op = '1' THEN
             out_sr     <= x"38" & "0000" & ADDR & DATAIN;
             cycle_cnt  <= 0; is_read_op <= '0'; RAM_CS <= '0';
+            -- write-through: drop any cached copy so we can never serve stale
+            -- data (this also covers DMA, which writes through this same port)
+            FOR i IN 0 TO NLINES-1 LOOP
+              IF valid(i) = '1' AND tag(i) = ADDR(19 DOWNTO 4) THEN
+                valid(i) <= '0';
+              END IF;
+            END LOOP;
             ready_int  <= '0'; state <= S_QPI_LO;
           ELSE
             ready_int <= '1';
@@ -234,9 +380,17 @@ BEGIN
           RAM_SCK <= '0';
           IF half_cnt >= sck_div - 1 THEN
             half_cnt <= 0;
-            IF (is_read_op = '1' AND cycle_cnt >= 16 + rd_lat) OR
+            IF (is_read_op = '1' AND fill_idx >= LINE_BYTES) OR
                (is_read_op = '0' AND cycle_cnt >= 10) THEN
-              read_data <= in_sr;
+              IF is_read_op = '1' THEN
+                -- line complete: publish it. valid and ready_int are set on the
+                -- same edge, so by the time the CPU sees READY the lookup hits.
+                valid(fill_sel) <= '1';
+                IF victim = NLINES-1 THEN victim <= 0;
+                ELSE                      victim <= victim + 1; END IF;
+              END IF;
+              -- (read_data was set during the fill, at fill_idx = req_off)
+              IF is_read_op = '0' THEN read_data <= in_sr; END IF;
               ready_int <= '1';
               state     <= S_FINISH;
             ELSE
@@ -251,8 +405,23 @@ BEGIN
           RAM_SCK <= '1';
           IF half_cnt >= sck_div - 1 THEN
             half_cnt <= 0;
-            IF is_read_op = '1' AND cycle_cnt >= 14 + rd_lat AND cycle_cnt < 16 + rd_lat THEN
+            -- Burst capture: from cycle (14+RD_LAT) the chip streams nibbles.
+            -- Pair them into bytes and write straight into the line.
+            IF is_read_op = '1' AND cycle_cnt >= 14 + rd_lat
+                                AND fill_idx < LINE_BYTES THEN
               in_sr <= in_sr(3 DOWNTO 0) & RAM_SIO;
+              IF nib_hi = '0' THEN
+                nib_tmp <= RAM_SIO;
+                nib_hi  <= '1';
+              ELSE
+                cache(fill_sel)(fill_idx) <= nib_tmp & RAM_SIO;
+                -- also hand the requested byte straight to the CPU path
+                IF fill_idx = req_off THEN
+                  read_data <= nib_tmp & RAM_SIO;
+                END IF;
+                nib_hi   <= '0';
+                fill_idx <= fill_idx + 1;
+              END IF;
             END IF;
             IF cycle_cnt < 8 OR (is_read_op = '0' AND cycle_cnt < 10) THEN
               out_sr <= out_sr(35 DOWNTO 0) & x"0";

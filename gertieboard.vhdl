@@ -319,6 +319,7 @@ BEGIN
   ctrl1 : ENTITY work.ctrl_reg
     PORT MAP (
       CLK                  => n_c0,
+      RESET                => n_rst_out,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
       WR                   => n_io_wr,
