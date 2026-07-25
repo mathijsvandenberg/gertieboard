@@ -73,3 +73,6 @@ tools/*.EXE
 # ...but keep the generated 8x8 font: it's a tiny build input for the BIOS
 !tools/font8x8.bin
 tools/philips.asm
+
+# Configuration-flash images (regenerate with tools/mkjic.sh)
+*.jic
