@@ -103,6 +103,7 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_iochk_n              : std_logic;
   SIGNAL n_irq                  : std_logic;
   SIGNAL n_irq1                 : std_logic;
+  SIGNAL n_cad_rst              : std_logic;   -- Ctrl+Alt+Del from the keyboard
   SIGNAL n_irq2                 : std_logic;
   SIGNAL n_kbd_clear            : std_logic;
   SIGNAL n_mem_addr             : std_logic_vector(19 downto 0);
@@ -410,7 +411,8 @@ BEGIN
       ps2_dat              => n_ps2dat,
       kbd_clr              => n_kbd_clear,
       pa_data              => n_pa_data,
-      irq1                 => n_irq1
+      irq1                 => n_irq1,
+      cad_rst              => n_cad_rst
     );
 
   -- constant tie-offs (GND/VCC symbols in the schematic)
@@ -425,7 +427,11 @@ BEGIN
   VGA_HS <= n_hs;
   VGA_VS <= n_vs;
   VGA_RGB <= n_rgb;
-  n_reset <= RESET;
+  -- clkgen's RESET is active LOW, so pulling it low forces the reset sequence.
+  -- Either the reset button or a hardware Ctrl+Alt+Del does it. Because this is
+  -- a real reset, bootrom re-arms its overlay and the BIOS is re-fetched from
+  -- the host, video returns to text mode and ctrl_reg reloads its safe default.
+  n_reset <= RESET AND NOT n_cad_rst;
   n_fl_miso <= FL_MISO;
   FL_SCK <= n_fl_sck;
   FL_CS <= n_fl_cs;

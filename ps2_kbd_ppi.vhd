@@ -50,6 +50,14 @@ entity ps2_kbd_ppi is
         pa_data : out std_logic_vector(7 downto 0);    -- -> 8255 Port A (60h)
         irq1    : out std_logic;                       -- -> 8259 IR1
         kbd_clr : in  std_logic;                       -- <- 8255 PB7 (61h.7)
+        -- Ctrl+Alt+Del seen in HARDWARE -> ~1 ms active-high system reset request.
+        -- The BIOS also implements Ctrl+Alt+Del in its INT 09h handler, but any
+        -- program that installs its own INT 09h (most games do) takes that path
+        -- away, leaving no way out of a wedged game except power-cycling. This
+        -- sits in the scancode stream itself, so no software can bypass it, and
+        -- because it drives a real reset the boot ROM overlay re-arms and the
+        -- BIOS is re-fetched from the host -- a true cold boot, not a warm one.
+        cad_rst : out std_logic;
         -- DEBUG (wire to LEDs; leave => open if unused). Latches last byte.
         dbg_raw : out std_logic_vector(7 downto 0);    -- last RAW Set2 byte rx'd
         dbg_s1  : out std_logic_vector(7 downto 0)     -- last Set1 byte queued
@@ -227,6 +235,16 @@ architecture rtl of ps2_kbd_ppi is
     type fifo_t is array (0 to FD-1) of std_logic_vector(7 downto 0);
     signal fifo    : fifo_t := (others => (others => '0'));
     signal wptr    : unsigned(FW downto 0) := (others => '0');
+
+    -- Ctrl+Alt+Del detector (Set-1 codes: ctrl 1D, alt 38, Del 53; the extended
+    -- E0-prefixed right-hand ctrl/alt and the dedicated Del map to the same
+    -- values, so both sides of the keyboard work).
+    constant CAD_TICKS : integer := CLK_FREQ_HZ / 1000;   -- ~1 ms assertion
+    signal ctrl_held : std_logic := '0';
+    signal alt_held  : std_logic := '0';
+    -- NOTE: cad_cnt is deliberately NOT cleared by `reset`. It is what CAUSES
+    -- the reset, so clearing it there would cut its own pulse short.
+    signal cad_cnt   : integer range 0 to CAD_TICKS := 0;
     signal rptr    : unsigned(FW downto 0) := (others => '0');
     signal f_empty : std_logic;
 
@@ -266,6 +284,7 @@ begin
     --==========================================================================
     pa_data <= pa_reg;
     irq1    <= irq_r;
+    cad_rst <= '1' when cad_cnt /= 0 else '0';
     dbg_raw <= dbg_raw_r;
     dbg_s1  <= dbg_s1_r;
     f_empty <= '1' when wptr = rptr else '0';
@@ -375,10 +394,17 @@ begin
         end procedure;
     begin
         if rising_edge(clk) then
+            -- self-timed Ctrl+Alt+Del pulse, outside the reset branch on purpose
+            if cad_cnt /= 0 then
+                cad_cnt <= cad_cnt - 1;
+            end if;
+
             if reset = '1' then
                 wptr       <= (others => '0');
                 f0_pending <= '0';
                 e0_pending <= '0';
+                ctrl_held  <= '0';
+                alt_held   <= '0';
             else
                 wrp_v := wptr;
                 if rx_valid = '1' then
@@ -404,9 +430,19 @@ begin
                                 if f0_pending = '1' then
                                     push(s1 or x"80");   -- break
                                     dbg_s1_r <= s1 or x"80";
+                                    -- release of ctrl / alt
+                                    if s1 = x"1D" then ctrl_held <= '0'; end if;
+                                    if s1 = x"38" then alt_held  <= '0'; end if;
                                 else
                                     push(s1);            -- make
                                     dbg_s1_r <= s1;
+                                    if s1 = x"1D" then ctrl_held <= '1'; end if;
+                                    if s1 = x"38" then alt_held  <= '1'; end if;
+                                    -- Del pressed while both are down -> reset
+                                    if s1 = x"53" and ctrl_held = '1'
+                                                  and alt_held  = '1' then
+                                        cad_cnt <= CAD_TICKS;
+                                    end if;
                                 end if;
                             end if;
                             f0_pending <= '0';
