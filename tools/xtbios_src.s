@@ -114,13 +114,14 @@ _post:
     xor ax, ax
     rep stosw
     mov word ptr es:[0x10], 0x0021   # equipment: 1 floppy, 80x25 colour
-    mov word ptr es:[0x13], 640      # base memory size in KB
+    # 632, not 640: the top 8 KB (0x9E000+) is the fixed-disk block buffer.
+    mov word ptr es:[0x13], 632      # base memory size in KB
     # Fixed-disk count deliberately 0 for now. INT 13h AH>=0x80 works and
     # HDTEST.COM exercises it, but the flash holds no partition table yet, so
     # advertising a disk only makes DOS probe an empty device during startup --
     # which is what broke booting. Set this to 1 once the disk is partitioned
     # and HDTEST passes.
-    mov byte ptr es:[0x75], 0        # fixed disks visible to DOS
+    mov byte ptr es:[0x75], 1        # fixed disks visible to DOS
     mov word ptr es:[0x1A], KBBUF    # kbd buffer head
     mov word ptr es:[0x1C], KBBUF    # kbd buffer tail
     mov word ptr es:[0x80], KBBUF    # buffer start
@@ -2213,6 +2214,170 @@ hd_read_one:
     pop ax
     ret
 
+## =====================================================================
+##  Write support: one 4 KB block held in RAM, written back lazily
+##
+##  The flash erases 4 KB at a time, so changing a 512-byte sector means
+##  erase + reprogram of the whole block. Doing that per sector would cost 8
+##  erases for 8 consecutive sectors, so the block is cached and only written
+##  back when a different block is needed, or on AH=00/0D (which DOS issues,
+##  making it our commit point). 8 sequential writes then cost ONE erase.
+##
+##  The buffer sits just above the 632 KB reported to DOS. Do not raise the
+##  reported size back to 640 without moving HDBUF_SEG first.
+## =====================================================================
+.equ HDBUF_SEG, 0x9E00       # 4 KB block buffer at linear 0x9E000
+
+spi_wren:                    # write enable, required before erase or program
+    call spi_cs_lo
+    mov al, 0x06
+    call spi_xfer
+    call spi_cs_hi
+    ret
+
+## spi_wait_wip: spin until the status register's WIP bit clears.
+## A 4 KB erase takes ~100 ms and a page program ~1 ms; each poll here is about
+## 15 us, so 0xFFFF iterations is roughly a second -- ample, while still
+## guaranteeing we return if the chip never answers. An unbounded wait would turn
+## a wiring fault, or a MISO that floats high, into a dead machine.
+spi_wait_wip:
+    push ax
+    push cx
+    mov cx, 0xFFFF
+.ww_l:
+    call spi_cs_lo
+    mov al, 0x05             # RDSR
+    call spi_xfer
+    mov al, 0xFF
+    call spi_xfer
+    call spi_cs_hi
+    test al, 0x01            # WIP
+    jz  .ww_done
+    loop .ww_l
+.ww_done:
+    pop cx
+    pop ax
+    ret
+
+## hd_send_addr: BX = block, SI = byte offset in block -> 3 flash address bytes
+## (flash address = block*4096 + offset; used for erase, program and block load)
+hd_send_addr:
+    push ax
+    push cx
+    push dx
+    mov dx, bx
+    mov ax, dx
+    mov cl, 4
+    shr ax, cl               # block >> 4
+    call spi_xfer            # addr[23:16]
+    mov ax, dx
+    and al, 0x0F
+    mov cl, 4
+    shl al, cl               # (block & 0x0F) << 4
+    mov dl, al
+    mov ax, si
+    mov cl, 8
+    shr ax, cl               # offset >> 8
+    or  al, dl
+    call spi_xfer            # addr[15:8]
+    mov ax, si
+    call spi_xfer            # addr[7:0]
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+## ---- hd_flush: write the cached block back if dirty (DS = BDA) ----
+hd_flush:
+    push ax
+    push bx
+    push cx
+    push si
+    push ds
+    cmp byte ptr [0xE8], 0
+    je .hf_done
+    mov bx, [0xE6]
+    cmp bx, 0xFFFF
+    je .hf_clean
+
+    call spi_wren            # erase the 4 KB block
+    call spi_cs_lo
+    mov al, 0x20
+    call spi_xfer
+    xor si, si
+    call hd_send_addr
+    call spi_cs_hi
+    call spi_wait_wip
+
+    xor si, si               # then program it back, 16 pages of 256 bytes
+.hf_page:
+    call spi_wren
+    call spi_cs_lo
+    mov al, 0x02
+    call spi_xfer
+    call hd_send_addr
+    push ds
+    mov ax, HDBUF_SEG
+    mov ds, ax
+    mov cx, 256
+.hf_byte:
+    mov al, [si]
+    call spi_xfer
+    inc si
+    loop .hf_byte
+    pop ds
+    call spi_cs_hi
+    call spi_wait_wip
+    cmp si, 4096
+    jb .hf_page
+.hf_clean:
+    mov byte ptr [0xE8], 0
+.hf_done:
+    pop ds
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---- hd_load_block: make block AX resident (DS = BDA) ----
+hd_load_block:
+    push ax
+    push bx
+    push cx
+    push si
+    push di
+    push es
+    cmp ax, [0xE6]
+    je .hl_done
+    call hd_flush            # evict the previous block first
+    mov [0xE6], ax
+    mov bx, ax
+    call spi_cs_lo
+    mov al, 0x03
+    call spi_xfer
+    xor si, si
+    call hd_send_addr
+    mov ax, HDBUF_SEG
+    mov es, ax
+    xor di, di
+    mov cx, 4096
+    cld
+.hl_byte:
+    mov al, 0xFF
+    call spi_xfer
+    stosb
+    loop .hl_byte
+    call spi_cs_hi
+.hl_done:
+    pop es
+    pop di
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+
 ## ---- hd_chs2lba: CH/CL/DH -> AX = LBA  (DS = BDA; CX,DX preserved) ----
 hd_chs2lba:
     push bx
@@ -2338,7 +2503,8 @@ hd_int13:
     push ax
     mov ax, BDA
     mov ds, ax
-    mov byte ptr [0x74], 0   # nothing is buffered, so reset has nothing to commit
+    call hd_flush            # DOS's disk reset is our commit point
+    mov byte ptr [0x74], 0
     pop ax
     pop ds
     xor ah, ah
@@ -2430,30 +2596,58 @@ hd_transfer:
     jae .ht_err              # past the end of the disk
 
     mov bx, ax               # BX = LBA of this sector
+    mov cl, 3
+    mov si, ax
+    shr si, cl               # SI = block = LBA >> 3
+    and ax, 7
+    mov cl, 9
+    shl ax, cl               # AX = byte offset of the sector inside the block
+    mov [0xF5], ax
 
     cmp byte ptr [0xEC], 0
     jne .ht_wr
 
-    # ---- read straight from flash into the caller's buffer ----
+    # ---- read ----------------------------------------------------------
+    # If this block is cached AND dirty, the flash copy is stale, so the data
+    # must come from the buffer. Otherwise read straight from flash, which
+    # avoids pulling in 4 KB just to hand back 512 bytes.
+    cmp byte ptr [0xE8], 0
+    je .ht_rd_flash
+    cmp si, [0xE6]
+    jne .ht_rd_flash
+    mov si, [0xF5]           # buffer -> caller
     mov es, [0xED]
     mov di, [0xEF]
-    call hd_read_one
+    mov ax, HDBUF_SEG
+    push ds
+    mov ds, ax
+    mov cx, 512
+    cld
+    rep movsb
+    pop ds
+    jmp short .ht_next
+.ht_rd_flash:
+    mov es, [0xED]
+    mov di, [0xEF]
+    call hd_read_one         # BX is still the LBA
     jmp short .ht_next
 
-    # ---- write: not supported yet, report write-protected ----
+    # ---- write: into the buffer, block becomes dirty --------------------
 .ht_wr:
-    mov byte ptr [0x74], 0x03
-    pop ax
-    pop bx
-    pop dx
-    pop cx
-    pop di
-    pop si
-    pop es
-    pop ds
-    mov ah, 0x03             # write protected
-    stc
-    retf 2
+    mov ax, si
+    call hd_load_block       # read-modify-write: keep the other 7 sectors
+    mov di, [0xF5]
+    mov si, [0xEF]
+    mov ax, [0xED]
+    push ds
+    mov ds, ax               # DS = caller segment
+    mov ax, HDBUF_SEG
+    mov es, ax
+    mov cx, 512
+    cld
+    rep movsb
+    pop ds                   # DS = BDA again
+    mov byte ptr [0xE8], 1
 
 .ht_next:
     add word ptr [0xEF], 512
@@ -2565,7 +2759,7 @@ b_ver:    .asciz "Philips ROM BIOS Version 1.00"
 b_model:  .asciz "Gertieboard BIOS Pensioen Edition"
 b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"
 b_hdr:    .asciz "                     Total  Base Extra"
-b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
+b_mem:    .asciz "System Memory Found:   632   632     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
 b_drv:    .asciz "Using Diskette Drive A:"
 b_boot:   .asciz "Booting..."

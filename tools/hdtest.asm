@@ -144,21 +144,68 @@ start:
 .t4_bad:
         call fail
 
-        ; ---------------- 5: write must report write-protect ----------------
+        ; ---------------- 5: write 8 sectors, one erase block ---------------
 .t5:
         mov  dx, msg_t5
         call puts
-        mov  ax, 0x0301         ; AH=03 write, 1 sector
-        mov  cx, 0x0019
-        mov  dx, 0x0380
+        mov  di, BUF1
+        mov  al, 0xC3
+        call fill8              ; walking pattern, 4 KB
+        mov  ax, 0x0308         ; AH=03 write, 8 sectors
+        mov  cx, 0x0019         ; C=0, S=25  (an aligned 4 KB block)
+        mov  dx, 0x0380         ; H=3
         mov  bx, BUF1
         int  0x13
-        jnc  .t5_bad            ; success would be wrong -- writes are disabled
-        cmp  ah, 0x03           ; expect "write protected"
-        jne  .t5_bad
+        jc   .t5_bad
+        mov  di, BUF2
+        mov  cx, 4096
+        call clearbuf
+        mov  ax, 0x0208         ; read them straight back
+        mov  cx, 0x0019
+        mov  dx, 0x0380
+        mov  bx, BUF2
+        int  0x13
+        jc   .t5_bad
+        mov  cx, 4096
+        call cmp_buf
+        jc   .t5_bad
+        call pass
+        jmp  short .t6
+.t5_bad:
+        call fail
+
+        ; ---------------- 6: does the dirty block reach the flash? ----------
+        ; THE important test. Read a different block to force an eviction, then
+        ; re-read the first one -- which must now come back from FLASH, not RAM.
+        ; If the flush is broken the data looks perfect until it is evicted and
+        ; then silently reverts, which is the worst failure this design can have.
+.t6:
+        mov  dx, msg_t6
+        call puts
+        mov  ax, 0x0201         ; touch block 0, evicting the dirty one
+        mov  cx, 0x0001
+        mov  dx, 0x0080
+        mov  bx, BUF2
+        int  0x13
+        jc   .t6_bad
+        mov  ah, 0x00           ; and commit explicitly too
+        mov  dl, HDD
+        int  0x13
+        mov  di, BUF2
+        mov  cx, 4096
+        call clearbuf
+        mov  ax, 0x0208
+        mov  cx, 0x0019
+        mov  dx, 0x0380
+        mov  bx, BUF2
+        int  0x13
+        jc   .t6_bad
+        mov  cx, 4096
+        call cmp_buf
+        jc   .t6_bad
         call pass
         jmp  short .fin
-.t5_bad:
+.t6_bad:
         call fail
 
 .fin:
@@ -173,6 +220,18 @@ start:
         int  0x21
 
 ; ---------------------------------------------------------------------------
+fill8:                           ; DI = start, AL = seed -> 4 KB walking pattern
+        push di
+        push cx
+        mov  cx, 4096
+.f:     mov  [di], al
+        inc  di
+        add  al, 0x1B
+        loop .f
+        pop  cx
+        pop  di
+        ret
+
 clearbuf:                        ; DI = start, CX = count
         push di
         xor  al, al
@@ -253,14 +312,15 @@ putdec:
         pop  ax
         ret
 
-msg_hdr:  db 'gertieboard fixed disk (SPI flash) -- read-only stage',13,10,'$'
+msg_hdr:  db 'gertieboard fixed disk (SPI flash) -- read/write',13,10,'$'
 msg_geo:  db 'geometry C x H x S             : $'
 msg_x:    db ' x $'
 msg_t1:   db '1 read LBA 0                   : $'
 msg_t2:   db '2 erased flash reads 0xFF      : $'
 msg_t3:   db '3 multi-sector read (8)        : $'
 msg_t4:   db '4 same sector twice matches    : $'
-msg_t5:   db '5 write reports write-protect  : $'
+msg_t5:   db '5 write 8 sectors + read back  : $'
+msg_t6:   db '6 survives eviction (flushed)  : $'
 msg_pass: db 'PASS',13,10,'$'
 msg_fail: db 'FAIL',13,10,'$'
 msg_done: db 'done.',13,10,'$'
