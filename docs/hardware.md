@@ -43,6 +43,11 @@ Using a stock DE0-Nano rather than putting the FPGA on the board follows from th
 decision. A Cyclone IV in an F17 package is not something a hobbyist solders at the
 kitchen table; a 40-pin header is.
 
+> **Schematics are not published yet.** They are coming — see
+> [the licence note](../README.md#third-party-content) for how they will be licensed.
+> Until then this page and [the pinout](pinout.md) are the best description of what is
+> connected to what.
+
 ### About the CPU
 
 The V20 is an NEC-designed 8088-compatible: same pinout, same multiplexed 8-bit bus,

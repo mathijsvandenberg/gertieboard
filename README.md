@@ -124,6 +124,11 @@ deadline this picked up in mid-2026, and the reason the BIOS banner reads
 **"Gertieboard BIOS Retirement Edition"**: I wanted the board he had soldered to
 actually work, and to hand it to him now that he finally has the time for it.
 
+The boot screen is a deliberate callback to the same period. It is styled after
+the **Philips P2120** BIOS — the first PC we had at home, paired with a Philips
+**7BM723** monochrome monitor. Same layout, same wording, same spacing, down to
+`Parity Checking Enabled` on a machine that has no parity to check.
+
 This time Claude went at it with me. The three original blockers went first —
 which turned out to be the whole problem, because everything after them had only
 ever been waiting on a stable machine. From there it went quickly: CGA, then the
@@ -171,8 +176,9 @@ are **not** mine to license, and are handled as follows:
 | **Reference BIOS disassembly** | `tools/philips.asm` is a disassembly of a commercial BIOS kept locally for comparison. Gitignored, never committed, and no code from it is in this BIOS. |
 | **`tools/font8x8.bin`** | An 8×8 character font, squashed down from the FPGA's 8×16 text font. Bitmap fonts of this kind are generally not copyrightable, but the provenance is not documented — treat it as replaceable if that matters to you. |
 | **Tool executables** | `nasm.exe`, `ndisasm.exe` and similar are gitignored. Install your own. |
-| **The boot screen** | Deliberately styled after a Philips P3105 and it says so. The BIOS underneath is written from scratch. |
+| **The boot screen** | Deliberately styled after a Philips P2120 and it says so. The BIOS underneath is written from scratch. |
 
-The board design files are not in this repository. If they are added later, the natural
-pairing for hardware is [CERN-OHL-P](https://cern-ohl.web.cern.ch/), which is the
-permissive hardware licence in the same spirit as MIT.
+**Schematics are coming.** They are not in the repository yet. MIT is a software
+licence and does not map cleanly onto a PCB, so when they land the natural pairing is
+[CERN-OHL-P](https://cern-ohl.web.cern.ch/) — the permissive hardware licence in the
+same spirit as MIT, written for exactly this.

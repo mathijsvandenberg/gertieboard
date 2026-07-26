@@ -5,8 +5,44 @@ Build: [`tools/mkbios.sh`](../tools/mkbios.sh) → `xtbios_claude.bin` (8 KB) an
 `xtbios_claude.64k` (64 KB)
 
 A minimal IBM PC/XT-class ROM BIOS. Visually it presents itself as
-*"Gertieboard BIOS Retirement Edition"*, styled after the Philips P3105 boot screen.
-The name is not decoration — see [why the project restarted](../README.md#a-short-history).
+*"Gertieboard BIOS Retirement Edition"* — the name is not decoration, see
+[why the project restarted](../README.md#a-short-history).
+
+## The boot screen
+
+The layout is a deliberate imitation of the **Philips P2120** BIOS: the author's first
+home PC, driven by a Philips **7BM723** monochrome monitor. Same rows, same wording,
+same column alignment.
+
+| Row | Content |
+|---|---|
+| 0 | `Philips ROM BIOS Version 1.00` |
+| 1 | `Gertieboard BIOS Retirement Edition` |
+| 2 | `2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)` |
+| 4 | `                     Total  Base Extra` |
+| 5 | `System Memory Found:   632   632     0 Kbytes` |
+| 6 | `Parity Checking Enabled` |
+| 8 | `Using Diskette Drive A:` |
+| 9 | `Fixed Disk: ID 9D 60 15  2048 KB SPI flash` |
+| 10 | `Booting...` |
+
+Rows 3 and 7 are left blank. Rows 0–2, 4–6, 8 and 10 are written by `putrow` during
+POST; row 9 is filled in later by `hd_detect`, which prints the **raw** JEDEC ID bytes
+rather than a friendly name so that the wrong chip in the socket is visible at a glance
+(`9D 60 15` is the IS25LP016D).
+
+Two details are homage rather than fact. `Parity Checking Enabled` is printed by a
+machine with no parity memory to check, and the `Extra` column is always zero because
+there is nothing above 640 KB. Both are kept because the original said them.
+
+The strings are drawn **directly to `0xB8000`** by `putrow` during POST, before the PIC,
+the PIT or `STI` — so the screen appears even when the interrupt controller or the timer
+is broken. That has repeatedly been the difference between a diagnosable failure and a
+dark monitor.
+
+> The memory line is a hardcoded string, not a formatted value. It once read `632 KB`
+> while the BDA said 640, which made the POST screen useless as a build indicator and
+> sent a debugging session down a false path. See [gotchas](gotchas.md).
 
 ## Layout and build
 

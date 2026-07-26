@@ -104,6 +104,13 @@ convenience of moving files on a stick, not capability.
 If it happens, doing the USB keyboard first is the right order: it builds the SIE, the
 CRCs and the enumeration machinery that this would reuse.
 
+### Publish the schematics
+
+Planned. The board is meant to be built by hand — see
+[hardware](hardware.md#built-to-be-soldered-by-hand) — which is only true in practice once the
+schematics are in the repository. They will be licensed separately from the code, most
+likely under CERN-OHL-P, since MIT does not really fit a PCB.
+
 ## Ideas, unscheduled
 
 - **Serial port that actually works** — [`com1_stub`](modules/com1_stub.md) currently

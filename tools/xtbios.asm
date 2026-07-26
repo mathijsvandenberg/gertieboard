@@ -1,6 +1,6 @@
 ; =====================================================================
 ;  XTBIOS  -  a minimal IBM PC/XT-class ROM BIOS for an FPGA 5160 clone
-;  Visual style inspired by the Philips P3105 BIOS boot screen.
+;  Visual style inspired by the Philips P2120 BIOS boot screen.
 ;
 ;  - 8 KB image, organised at segment F000 offset E000 (phys FE000-FFFFF)
 ;  - Reset vector at F000:FFF0 -> POST
@@ -1427,9 +1427,9 @@ scancode_uc:
     db '8','9','-','4','5','6','+','1'            ; 48-4F
     db '2','3','0','.'                            ; 50-53
 
-; ---- boot screen strings (Philips P3105 visual style) ---------------
+; ---- boot screen strings (Philips P2120 visual style) ---------------
 msg_ver: db "Philips ROM BIOS Version 1.00", 13, 10, 0
-msg_model: db "P3105 BIOS  (FPGA PC/XT clone)", 13, 10, 0
+msg_model: db "P2120 BIOS  (FPGA PC/XT clone)", 13, 10, 0
 msg_copy: db "(C) 2026", 13, 10, 13, 10, 0
 msg_memhdr: db "                     Total  Base Extra", 13, 10, 0
 msg_memfound: db "System Memory Found:   ", 0
