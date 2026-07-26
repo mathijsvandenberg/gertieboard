@@ -26,6 +26,7 @@
 
         org  0x100
         bits 16
+        CPU  8086               ; mandatory: see docs/gotchas.md
 
 TICKLO  equ 0x6C                ; BDA offset of the low tick word
 REPS    equ 24                  ; 32 KB sweeps per measurement
@@ -240,7 +241,10 @@ puthex:                              ; AL -> two hex digits
         push ax
         push cx
         mov  cl, al
-        shr  al, 4
+        shr al, 1
+        shr al, 1
+        shr al, 1
+        shr al, 1      ; 8086: no shift-by-immediate (see docs/gotchas.md)
         call .nib
         mov  al, cl
         and  al, 0x0F

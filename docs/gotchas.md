@@ -52,13 +52,31 @@ long-branch pattern itself (`cmp` / `jnz skip` / `jmp target`).
 
 ```asm
 shr al, 4            ; 80186+ !  encodes as C0 E8 04
+push strict word 5   ; 80186+ !  no PUSH imm16 on an 8086
 ```
 
-Pinning the architecture found one of these sitting in the graphics-mode glyph renderer.
-The V20 **does** implement the 80186 additions, so it was executing correctly on this
-hardware — but it is not 8088 code, and it would fail the moment the socket held a real
-Intel part. Use `mov cl, 4` / `shr al, cl`, or repeated single-bit shifts if `CL` is
-busy.
+The V20 **does** implement the 80186 additions, so both run correctly on this hardware —
+but neither is 8088 code, and both fail the moment the socket holds a real Intel part.
+
+Pinning the architecture across every assembly file in `tools/` turned up **six**
+instances that had been sitting there unnoticed: `shr` by an immediate in the glyph
+renderer and in five diagnostics, and a `push imm16` in the three `IRQTEST` variants'
+stray-vector stubs.
+
+Fixes, both 8086-clean:
+
+```asm
+shr al, 1            ; x4 -- and no register needed, unlike mov cl,4 / shr al,cl
+                     ; which matters when CL already holds something
+
+push ax              ; the stray-vector stub saves AX itself and passes
+mov  al, v           ; the vector in AL, still exactly 6 bytes per stub
+jmp near stray_common
+```
+
+That last one is worth the detail: the stubs are indexed by `add bx, 6`, so the
+replacement had to keep the **same stride** as `push imm16`. `50 / B0 xx / E9 xx xx` is
+6 bytes exactly.
 
 `.arch i8086` is therefore stricter than this board strictly needs. That is deliberate:
 it keeps the sources honest to the machine they claim to be, and it is the same setting

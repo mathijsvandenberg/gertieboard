@@ -32,6 +32,7 @@
 
         org  0x100
         bits 16
+        CPU  8086               ; mandatory: see docs/gotchas.md
 
 VID     equ 0xB800
 MODEREG equ 0x03D8

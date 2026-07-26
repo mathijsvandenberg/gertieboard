@@ -165,6 +165,10 @@ Two rules, both learned the hard way:
 > **`CPU 8086`.** NASM will otherwise silently emit a 386 encoding for a conditional
 > jump whose target is out of short range — and that encoding is not a branch on this
 > CPU, nor on a real 8088. See [gotchas](gotchas.md).
+>
+> Every `.asm` file in `tools/` now carries it. Adding it to the sixteen that did not is
+> what surfaced the six 80186 instructions described there, so put it in a new file
+> before writing the code, not after.
 
 > **Make a test's PASS mean something.** An early `HDTEST` reported PASS on tests that
 > were silently falling through to the *floppy* handler, because the fixed-disk hook was

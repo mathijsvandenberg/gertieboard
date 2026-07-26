@@ -27,6 +27,7 @@
 
         org  0x100
         bits 16
+        CPU  8086               ; mandatory: see docs/gotchas.md
 
 start:
         mov  dx, msg_hdr

@@ -15,6 +15,7 @@
 ; FDC is read in NON-DMA mode (Specify ND=1) so the bootloader needs no 8237.
 
         BITS 16
+        CPU  8086               ; mandatory: see docs/gotchas.md
         ORG 0xFF00                 ; CS=F000 at runtime -> physical 0xFFF00
 
 FDC_DOR    equ 0x3F2

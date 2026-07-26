@@ -18,6 +18,7 @@
 ;-------------------------------------------------------------------------------
 
 [bits 16]
+[cpu 8086]                     ; mandatory: see docs/gotchas.md
 [org 0xE000]
 
 VIDEO_SEG   equ 0B800h
@@ -259,7 +260,10 @@ puthex_al:
     push bx
     mov bl, al
     mov al, bl
-    shr al, 4
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    shr al, 1      ; 8086: no shift-by-immediate (see docs/gotchas.md)
     call ph_nib
     mov al, bl
     call ph_nib

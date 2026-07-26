@@ -30,6 +30,7 @@
 
         org  0x100
         bits 16
+        CPU  8086               ; mandatory: see docs/gotchas.md
 
 SEG_LO  equ 0x2000              ; 128 KB -- above DOS and this program
 SEG_HI  equ 0x7000              ; 448 KB -- below the COMMAND.COM transient

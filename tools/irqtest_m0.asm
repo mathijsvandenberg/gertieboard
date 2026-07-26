@@ -30,6 +30,7 @@
 ;==============================================================================
 
         BITS 16
+        CPU  8086               ; mandatory: see docs/gotchas.md
         ORG 0xE000                  ; top 8 KB of the F-segment -> 0xFE000
 
 VID     equ 0xB800                  ; CGA text buffer segment
@@ -165,21 +166,18 @@ irq0:
 ;   [bp+6]=vector  [bp+8]=IP  [bp+10]=CS  [bp+12]=FLAGS
 ;------------------------------------------------------------------------------
 stray_common:
-        push ax
         push ds
-        push bp
-        mov bp, sp
+        push bx
+        mov bl, al                  ; vector number, passed in AL by the stub
         xor ax, ax
         mov ds, ax
-        mov ax, [bp+6]              ; pushed vector word
-        mov [V_SVEC], al
+        mov [V_SVEC], bl
         inc word [V_SCNT]
         mov al, 0x20
         out 0x20, al                ; EOI so a mis-vectored IR0 keeps firing
-        pop bp
+        pop bx
         pop ds
-        pop ax
-        add sp, 2                   ; discard pushed vector
+        pop ax                      ; the AX the stub pushed
         iret
 
 ;------------------------------------------------------------------------------
@@ -301,7 +299,10 @@ phex8:
         push cx
         mov cl, al
         mov al, cl
-        shr al, 4
+        shr al, 1
+        shr al, 1
+        shr al, 1
+        shr al, 1      ; 8086: no shift-by-immediate (see docs/gotchas.md)
         call .n
         mov al, cl
         call .n
@@ -322,13 +323,14 @@ phex8:
         ret
 
 ;------------------------------------------------------------------------------
-; 256 per-vector catch stubs (6 bytes each: push word n ; jmp near common)
+; 256 per-vector catch stubs (6 bytes each: push ax ; mov al,n ; jmp near common)
 ;------------------------------------------------------------------------------
 stubs:
 %assign v 0
 %rep 256
-        push strict word v
-        jmp near stray_common
+        push ax                     ; 8086 has no PUSH imm16, so the stub saves AX
+        mov  al, v                  ; and passes the vector in AL instead
+        jmp near stray_common       ; still exactly 6 bytes: 50 / B0 xx / E9 xx xx
 %assign v v+1
 %endrep
 

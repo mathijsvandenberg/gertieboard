@@ -23,6 +23,7 @@
 
         org  0x100
         bits 16
+        CPU  8086               ; mandatory: see docs/gotchas.md
 
 HDD     equ 0x80
 ROMSEG  equ 0xF000              ; the running BIOS image
