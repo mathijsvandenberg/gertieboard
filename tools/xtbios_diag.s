@@ -1,6 +1,6 @@
 ## =====================================================================
 ##  XTBIOS  -  a minimal IBM PC/XT-class ROM BIOS for an FPGA 5160 clone
-##  Visual style inspired by the Philips P2120 BIOS boot screen.
+##  Visual style inspired by the Philips P3105 BIOS boot screen.
 ##
 ##  - 8 KB image, organised at segment F000 offset E000 (phys FE000-FFFFF)
 ##  - Reset vector at F000:FFF0 -> POST
@@ -1719,10 +1719,10 @@ scancode_uc:
     .byte '8','9','-','4','5','6','+','1'          # 48-4F
     .byte '2','3','0','.'                          # 50-53
 
-# ---- boot screen strings (Philips P2120 visual style) ---------------
+# ---- boot screen strings (Philips P3105 visual style) ---------------
 # ---- banner shown directly to video during POST (no CRLF) ----------
 b_ver:    .asciz "Philips ROM BIOS Version 1.00"
-b_model:  .asciz "P2120 BIOS  (FPGA PC/XT clone)"
+b_model:  .asciz "P3105 BIOS  (FPGA PC/XT clone)"
 b_copy:   .asciz "(C) 2026"
 b_hdr:    .asciz "                     Total  Base Extra"
 b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
@@ -1731,7 +1731,7 @@ b_drv:    .asciz "Using Diskette Drive A:"
 b_boot:   .asciz "Booting..."
 
 msg_ver:      .asciz "Philips ROM BIOS Version 1.00\r\n"
-msg_model:    .asciz "P2120 BIOS  (FPGA PC/XT clone)\r\n"
+msg_model:    .asciz "P3105 BIOS  (FPGA PC/XT clone)\r\n"
 msg_copy:     .asciz "(C) 2026\r\n\r\n"
 msg_memhdr:   .asciz "                     Total  Base Extra\r\n"
 msg_memfound: .asciz "System Memory Found:   "

@@ -124,10 +124,14 @@ deadline this picked up in mid-2026, and the reason the BIOS banner reads
 **"Gertieboard BIOS Retirement Edition"**: I wanted the board he had soldered to
 actually work, and to hand it to him now that he finally has the time for it.
 
-The boot screen is a deliberate callback to the same period. It is styled after
-the **Philips P2120** BIOS — the first PC we had at home, paired with a Philips
-**7BM723** monochrome monitor. Same layout, same wording, same spacing, down to
-`Parity Checking Enabled` on a machine that has no parity to check.
+The boot screen is a deliberate callback to the same period. The first PC in the
+house was a **Philips P2120** with a Philips **7BM723** monochrome monitor, and
+years later my father pulled the ROM chips out for me and I dumped them. They
+turned out to be a **P3105** BIOS — version 3.23, dated January 1989 — so that is
+what the boot screen is copied from: same layout, same wording, same spacing,
+down to `Parity Checking Enabled` on a machine that has no parity to check.
+
+Not quite the machine I remembered, but it came from him either way.
 
 This time Claude went at it with me. The three original blockers went first —
 which turned out to be the whole problem, because everything after them had only
@@ -173,10 +177,10 @@ are **not** mine to license, and are handled as follows:
 | | |
 |---|---|
 | **Disk images, DOS, games** | Not in the repository — `*.img` and `*.IMA` are gitignored. Bring your own. |
-| **Reference BIOS disassembly** | `tools/philips.asm` is a disassembly of a commercial BIOS kept locally for comparison. Gitignored, never committed, and no code from it is in this BIOS. |
+| **Reference BIOS dump and disassembly** | `tools/philips.bin` and `tools/philips.asm` — a Philips P3105 ROM dump and its disassembly, kept locally for comparison. Gitignored, never committed, and **no code from it is in this BIOS**. |
 | **`tools/font8x8.bin`** | An 8×8 character font, squashed down from the FPGA's 8×16 text font. Bitmap fonts of this kind are generally not copyrightable, but the provenance is not documented — treat it as replaceable if that matters to you. |
 | **Tool executables** | `nasm.exe`, `ndisasm.exe` and similar are gitignored. Install your own. |
-| **The boot screen** | Deliberately styled after a Philips P2120 and it says so. The BIOS underneath is written from scratch. |
+| **The boot screen** | A deliberate imitation of the P3105's, and it says so. The code is written from scratch, but **three short strings are reproduced verbatim** to preserve the look: the `Total  Base Extra` column header with its exact spacing, `Parity Checking Enabled`, and `Booting...`. Everything else on the screen is ours. |
 
 **Schematics are coming.** They are not in the repository yet. MIT is a software
 licence and does not map cleanly onto a PCB, so when they land the natural pairing is

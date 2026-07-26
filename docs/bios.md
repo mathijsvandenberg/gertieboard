@@ -10,9 +10,10 @@ A minimal IBM PC/XT-class ROM BIOS. Visually it presents itself as
 
 ## The boot screen
 
-The layout is a deliberate imitation of the **Philips P2120** BIOS: the author's first
-home PC, driven by a Philips **7BM723** monochrome monitor. Same rows, same wording,
-same column alignment.
+The layout is a deliberate imitation of a **Philips P3105** BIOS, version 3.23, dated
+January 1989 — dumped from ROM chips the author's father salvaged. (The family PC was
+actually a P2120 with a 7BM723 monochrome monitor; the chips that survived were the
+P3105's.) Same rows, same wording, same column alignment.
 
 | Row | Content |
 |---|---|
@@ -34,6 +35,12 @@ rather than a friendly name so that the wrong chip in the socket is visible at a
 Two details are homage rather than fact. `Parity Checking Enabled` is printed by a
 machine with no parity memory to check, and the `Extra` column is always zero because
 there is nothing above 640 KB. Both are kept because the original said them.
+
+Exactly **three** strings are byte-for-byte from the P3105 ROM — the column header with
+its precise spacing, `Parity Checking Enabled`, and `Booting...`. The other twenty are
+ours; the memory and drive lines only *look* like the original because they were
+retyped to match, not copied. See the
+[third-party note](../README.md#third-party-content).
 
 The strings are drawn **directly to `0xB8000`** by `putrow` during POST, before the PIC,
 the PIT or `STI` — so the screen appears even when the interrupt controller or the timer
