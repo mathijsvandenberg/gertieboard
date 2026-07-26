@@ -102,6 +102,15 @@ docs/                This documentation
 
 ## A short history
 
+The idea was a board you could **build yourself**. Nearly everything on it is
+through-hole — the CPU in a socket, the connectors, the display, the buzzer, the
+headers — so it is a kit an enthusiast can assemble with an ordinary iron. Only
+the PSRAM and the SPI FLASH are surface-mount, two SOIC-8 parts. Using an
+off-the-shelf DE0-Nano for the FPGA is part of the same decision: nobody has to
+solder a fine-pitch device to own one of these.
+
+My father soldered one.
+
 The top board was designed and built in **2021** — the silkscreen still reads
 `MVDB 2021 REV 100`. Then it stalled. Not for lack of interest, but because three
 problems refused to give way: **memory corruption**, **timing closure**, and
@@ -110,11 +119,16 @@ around. A machine that boots differently every time is not a machine you can
 debug your way forward on, and eventually the motivation ran out. The board went
 in a drawer for the better part of four years.
 
-It came back out in **mid-2026**, this time with Claude as a debugging partner.
-The three original blockers went first — which turned out to be the whole problem,
-because everything after them had only ever been waiting on a stable machine.
-From there it went quickly: CGA, then the keyboard, then DMA and the floppy link,
-then DOS, then a hard disk on the SPI flash. The board now runs real software.
+What got it out again was my father turning **67 and retiring**. That is the
+deadline this picked up in mid-2026, and the reason the BIOS banner reads
+**"Gertieboard BIOS Retirement Edition"**: I wanted the board he had soldered to
+actually work, and to hand it to him now that he finally has the time for it.
+
+This time Claude went at it with me. The three original blockers went first —
+which turned out to be the whole problem, because everything after them had only
+ever been waiting on a stable machine. From there it went quickly: CGA, then the
+keyboard, then DMA and the floppy link, then DOS, then a hard disk on the SPI
+flash. The board runs real software now.
 
 The [gotchas](docs/gotchas.md) page is the honest record of that second stretch.
 Several of the entries cost days, and one of them — an assembler quietly emitting

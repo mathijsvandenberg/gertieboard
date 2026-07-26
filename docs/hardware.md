@@ -31,6 +31,18 @@ Putting a genuine processor on the board was the point of the exercise. A soft c
 would have been easier and faster, but then the FPGA would be *the computer* rather than
 the chipset around one.
 
+### Built to be soldered by hand
+
+The board is meant to be assembled by the person using it, and that shaped the parts
+list. Almost everything is **through-hole**: the CPU sits in a 40-pin socket, and the
+connectors, the 7-segment display, the buzzer, the reset button and both GPIO headers
+all mount the same way. Only two parts are surface-mount — the **PSRAM** and the **SPI
+FLASH**, both SOIC-8, which is still a pitch that hand-soldering reaches.
+
+Using a stock DE0-Nano rather than putting the FPGA on the board follows from the same
+decision. A Cyclone IV in an F17 package is not something a hobbyist solders at the
+kitchen table; a 40-pin header is.
+
 ### About the CPU
 
 The V20 is an NEC-designed 8088-compatible: same pinout, same multiplexed 8-bit bus,
@@ -103,3 +115,4 @@ sectors from a [host program](tools.md) over the serial header.
 - [Pinout](pinout.md) — every FPGA pin, and which of these parts it goes to
 - [Architecture](architecture.md) — how the FPGA side is organised
 - [Status and roadmap](status.md) — what the unused hardware is earmarked for
+- [A short history](../README.md#a-short-history) — why the board was built this way

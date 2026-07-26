@@ -2789,7 +2789,7 @@ scancode_uc:
 # ---- boot screen strings (Philips P3105 visual style) ---------------
 # ---- banner shown directly to video during POST (no CRLF) ----------
 b_ver:    .asciz "Philips ROM BIOS Version 1.00"
-b_model:  .asciz "Gertieboard BIOS Pensioen Edition"
+b_model:  .asciz "Gertieboard BIOS Retirement Edition"
 b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"
 b_hdr:    .asciz "                     Total  Base Extra"
 b_mem:    .asciz "System Memory Found:   632   632     0 Kbytes"
@@ -2801,7 +2801,7 @@ b_hd_kb:  .asciz " KB SPI flash"
 b_hd_no:  .asciz "  no response"
 
 msg_ver:      .asciz "Philips ROM BIOS Version 1.00\r\n"
-msg_model:    .asciz "Gertieboard BIOS Pensioen Edition\r\n"
+msg_model:    .asciz "Gertieboard BIOS Retirement Edition\r\n"
 msg_copy:     .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)\r\n\r\n"
 msg_memhdr:   .asciz "                     Total  Base Extra\r\n"
 msg_memfound: .asciz "System Memory Found:   "

@@ -5,7 +5,8 @@ Build: [`tools/mkbios.sh`](../tools/mkbios.sh) → `xtbios_claude.bin` (8 KB) an
 `xtbios_claude.64k` (64 KB)
 
 A minimal IBM PC/XT-class ROM BIOS. Visually it presents itself as
-*"Gertieboard BIOS Pensioen Edition"*, styled after the Philips P3105 boot screen.
+*"Gertieboard BIOS Retirement Edition"*, styled after the Philips P3105 boot screen.
+The name is not decoration — see [why the project restarted](../README.md#a-short-history).
 
 ## Layout and build
 
