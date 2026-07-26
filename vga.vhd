@@ -201,7 +201,26 @@ BEGIN
     IF (rising_edge(CLK_VGA)) THEN
       IF (X < 799) THEN
         X <= X + 1;
-        IF (X > 143 AND X < 784) THEN
+        -- XX must run TWO clocks ahead of the visible window, because the pixel
+        -- pipeline is two registers deep: vga_idx -> MEMCHR -> CHAR. Content
+        -- fetched at XX = n therefore reaches the output at X = n + 2.
+        --
+        -- Active video is X = 144..783 (96 sync + 48 back porch + 640). Starting
+        -- XX at 142 lands cell 0 column 0 exactly on X = 144.
+        --
+        -- This used to start at 144, which put the image at X = 146..785: one
+        -- stale pixel down the left edge and the last two columns pushed into the
+        -- front porch. The stale pixel was the ROW'S FIRST CHARACTER, column 7 --
+        -- during blanking XX = 0, so MEMCHR already holds cell 0 while the
+        -- wrapped "XX(2:0) - 1" index reads 7. It looked like a sliver of the
+        -- first letter mirrored into the left margin, and it changed per line
+        -- because the first letter changes.
+        --
+        -- It went unnoticed for a long time because the previous font was
+        -- left-aligned: only 12 printable glyphs used column 7 at all. The
+        -- Philips P2120 font is inset one pixel, so 188 characters use it and the
+        -- artifact appeared on nearly every line.
+        IF (X > 141 AND X < 782) THEN
           XX <= XX + 1;
         END IF;
       ELSE
@@ -255,7 +274,8 @@ BEGIN
   -- HSYNC and VSYNC generation
   HS    <= '0' WHEN X < 96 ELSE '1';
   VS    <= '0' WHEN Y < 2  ELSE '1';
-  VALID <= '1' WHEN (X > 144 AND X < 784 AND Y > 34 AND Y < (515-80)) ELSE '0';
+  -- Exactly the 640 active pixels, X = 144..783, now that XX is aligned to them.
+  VALID <= '1' WHEN (X > 143 AND X < 784 AND Y > 34 AND Y < (515-80)) ELSE '0';
 
   -- ---------------- Color decode -------------------------------------
   -- Text attribute byte layout (CGA, 16/16 mode):

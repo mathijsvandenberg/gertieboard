@@ -1931,8 +1931,14 @@ puts19:
 
 ## =====================================================================
 ##  Diagnostic hex output (direct to video, bypasses INT 10h)
-##  dbg_byte: AL = byte -> two hex chars at ES:DI (attr 0x0E), DI += 4
+##  dbg_byte: AL = byte -> two hex chars at ES:DI, DI += 4
+##
+##  DBG_ATTR matches putrow's 0x07 so the fixed-disk line on the POST screen
+##  looks like every other line, the way the original Philips BIOS presented it.
+##  It was 0x0E (yellow): it stood out, but the real machine did not do that.
+##  These helpers are used only by hd_detect.
 ## =====================================================================
+.equ DBG_ATTR, 0x07
 dbg_byte:
     push ax
     push bx
@@ -1957,13 +1963,13 @@ dbg_nib:
 .dn0:
     add al, '0'
 .dn1:
-    mov ah, 0x0E
+    mov ah, DBG_ATTR
     mov es:[di], ax
     add di, 2
     ret
 
 ## =====================================================================
-##  dbg_dec: AX = value -> decimal digits at ES:DI (attr 0x0E), DI advances
+##  dbg_dec: AX = value -> decimal digits at ES:DI, DI advances
 ## =====================================================================
 dbg_dec:
     push ax
@@ -1982,7 +1988,7 @@ dbg_dec:
 .ddc_out:
     pop ax
     add al, '0'
-    mov ah, 0x0E
+    mov ah, DBG_ATTR
     mov es:[di], ax
     add di, 2
     loop .ddc_out
@@ -2113,9 +2119,30 @@ hd_detect:
     mov di, 9*160
     push cs
     pop ds
-    mov si, offset b_hd
+    mov si, offset b_hd          # "Internal Hard Disk : " -- original wording
     call dbg_str
-    mov al, bl                   # ID bytes, raw, so a wrong chip is visible
+    test dx, dx
+    jz .hd_none
+    mov si, offset b_hd_ready
+    call dbg_str
+    call dbg_spc
+    call dbg_spc
+    mov ax, dx                   # decoded size
+    call dbg_dec
+    mov si, offset b_hd_kb
+    call dbg_str
+    jmp short .hd_id
+.hd_none:
+    mov si, offset b_hd_no       # "NOT READY", also the original wording
+    call dbg_str
+.hd_id:
+    # Raw JEDEC ID last, in brackets. Not something the original printed, but it
+    # is the only thing on screen that proves the chip answered and says WHICH
+    # chip: a wrong part reads as a different ID, a missing one as FF FF FF.
+    # dbg_byte and dbg_dec both preserve BX and CX, so the ID is still intact.
+    mov si, offset b_hd_idl
+    call dbg_str
+    mov al, bl
     call dbg_byte
     call dbg_spc
     mov al, bh
@@ -2123,17 +2150,7 @@ hd_detect:
     call dbg_spc
     mov al, cl
     call dbg_byte
-    test dx, dx
-    jz .hd_none
-    call dbg_spc
-    call dbg_spc
-    mov ax, dx                   # decoded size
-    call dbg_dec
-    mov si, offset b_hd_kb
-    call dbg_str
-    jmp short .hd_out
-.hd_none:
-    mov si, offset b_hd_no
+    mov si, offset b_hd_idr
     call dbg_str
 .hd_out:
     pop es
@@ -2738,7 +2755,7 @@ dbg_str:
     lodsb
     test al, al
     jz .dst_d
-    mov ah, 0x0E
+    mov ah, DBG_ATTR
     mov es:[di], ax
     add di, 2
     jmp .dst_l
@@ -2804,9 +2821,12 @@ b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
 b_drv:    .asciz "Using Diskette Drive A:"
 b_boot:   .asciz "Booting..."
-b_hd:     .asciz "Fixed Disk: ID "
-b_hd_kb:  .asciz " KB SPI flash"
-b_hd_no:  .asciz "  no response"
+b_hd:      .asciz "Internal Hard Disk : "
+b_hd_ready:.asciz "Ready"
+b_hd_no:   .asciz "NOT READY"
+b_hd_kb:   .asciz " KB"
+b_hd_idl:  .asciz "  ("
+b_hd_idr:  .asciz ")"
 
 msg_ver:      .asciz "Philips ROM BIOS Version 1.00\r\n"
 msg_model:    .asciz "Gertieboard BIOS Retirement Edition\r\n"

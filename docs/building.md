@@ -170,6 +170,7 @@ running BIOS into the flash — see [boot flow](boot.md).
 | [`tools/make64k.py`](../tools/make64k.py) | Expand a small BIOS image into a full 64 KB F-segment, top-aligned |
 | [`tools/mkmif.py`](../tools/mkmif.py) | Binary → Quartus `.mif` (legacy; the boot ROM now uses a constant) |
 | [`tools/mkrom.py`](../tools/mkrom.py) | Binary → VHDL constant array |
+| [`tools/mkfont_p2120.py`](../tools/mkfont_p2120.py) | Philips P2120 character ROM → `font.vhd` + `tools/font8x8.bin` |
 | [`tools/floppy_host.py`](../tools/floppy_host.py) | Python host loader (superseded by GertieBoardLoader) |
 
 ## Build artefacts and `.gitignore`

@@ -10,10 +10,15 @@ A minimal IBM PC/XT-class ROM BIOS. Visually it presents itself as
 
 ## The boot screen
 
-The layout is a deliberate imitation of a **Philips P3105** BIOS, version 3.23, dated
-January 1989 — dumped from ROM chips the author's father salvaged. (The family PC was
-actually a P2120 with a 7BM723 monochrome monitor; the chips that survived were the
-P3105's.) Same rows, same wording, same column alignment.
+The layout is a deliberate imitation of the BIOS in the author's family **Philips
+P2120**, dumped from its own ROM chips. Same rows, same wording, same column alignment,
+and — since the [character ROM](../tools/P2120/README.md) went into the FPGA too — the
+same letter shapes.
+
+The ROM identifies itself as `P3105 BIOS`, version 3.23, `JANUARY 16 1989`, which caused
+a good deal of confusion about which machine was being copied. There is nothing to
+choose between them: Philips shipped one BIOS across both models, and the P2120 dump is
+byte-identical to the P3105 one (MD5 `59bf05a0c207efcb2981f1c9c6eb21e1`).
 
 | Row | Content |
 |---|---|
@@ -24,13 +29,21 @@ P3105's.) Same rows, same wording, same column alignment.
 | 5 | `System Memory Found:   640   640     0 Kbytes` |
 | 6 | `Parity Checking Enabled` |
 | 8 | `Using Diskette Drive A:` |
-| 9 | `Fixed Disk: ID 9D 60 15  2048 KB SPI flash` |
+| 9 | `Internal Hard Disk : Ready  2048 KB  (9D 60 15)` |
 | 10 | `Booting...` |
 
 Rows 3 and 7 are left blank. Rows 0–2, 4–6, 8 and 10 are written by `putrow` during
-POST; row 9 is filled in later by `hd_detect`, which prints the **raw** JEDEC ID bytes
-rather than a friendly name so that the wrong chip in the socket is visible at a glance
-(`9D 60 15` is the IS25LP016D).
+POST; row 9 is filled in later by `hd_detect`.
+
+Row 9 uses the original's own wording — `Internal Hard Disk : ` followed by `Ready` or
+`NOT READY`, both lifted from the P3105 ROM's string table — and the same `0x07`
+attribute as every other row. It was briefly yellow (`0x0E`), which made the disk easy
+to spot but is not something the real machine ever did.
+
+The **raw JEDEC ID** in brackets is the one deliberate departure. The original printed no
+such thing, but it is the only item on screen that proves the chip answered and says
+*which* chip: a wrong part reads as a different ID and a missing one as `FF FF FF`. Drop
+`b_hd_idl`/`b_hd_idr` from `hd_detect` if you would rather have the line exact.
 
 Two details are homage rather than fact. `Parity Checking Enabled` is printed by a
 machine with no parity memory to check, and the `Extra` column is always zero because
@@ -130,9 +143,14 @@ glyph** into the framebuffer (`g_render`), handling the even/odd interleave, cur
 advance, newline and scroll. Foreground is colour 3, background 0.
 
 The 8×8 font is [`tools/font8x8.bin`](../tools/font8x8.bin), `.incbin`'d into the
-image. It was generated from the hardware 8×16 font in [`font.vhd`](../font.vhd) by
-OR-ing row pairs — `font.vhd` is a genuine 8×16 font, not a doubled 8×8, so dropping
-alternate rows loses crossbars. OR-ing keeps every feature, slightly bold.
+image. It comes **straight from the Philips P2120 character ROM**, which holds a native
+8×8 page alongside the 16-row font — so no squashing is involved and the graphics-mode
+text is the same typeface as the text-mode display.
+
+> It used to be derived from [`font.vhd`](../font.vhd) by OR-ing row pairs, because
+> that was a genuine 8×16 font and dropping alternate rows loses crossbars. The real
+> ROM having its own 8×8 page made that hack unnecessary. See
+> [`tools/mkfont_p2120.py`](../tools/mkfont_p2120.py).
 
 > Only `AH=0E` is hooked. `AH=09`/`0A` still write raw character cells in graphics
 > modes.
@@ -272,7 +290,7 @@ Custom fields, all in the reserved `0xE0`+ area:
 [`flash`](modules/flash.md) engine, and prints row 9:
 
 ```
-Fixed Disk: ID 9D 60 15  2048 KB SPI flash
+Internal Hard Disk : Ready  2048 KB  (9D 60 15)
 ```
 
 The **raw ID bytes are always shown** next to the decoded size, so a wrong or absent

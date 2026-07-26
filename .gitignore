@@ -74,5 +74,15 @@ tools/*.EXE
 !tools/font8x8.bin
 tools/philips.asm
 
+# Philips ROM images -- dumps of commercial ROMs, not ours to redistribute.
+# Same policy as tools/philips.asm. The derived font bitmaps in font.vhd and
+# tools/font8x8.bin ARE committed; regenerate them with tools/mkfont_p2120.py
+# after putting the character ROM back in place. See tools/p2120/README.md.
+tools/[Pp]2120/*.bin
+
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Configuration-flash images (regenerate with tools/mkjic.sh)
 *.jic
