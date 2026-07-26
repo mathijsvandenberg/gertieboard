@@ -2,9 +2,10 @@
 
 ## Overview
 
-A real CPU drives a multiplexed 8088-style bus. Everything else — bus decode,
-memory control, video, interrupts, timers, DMA, floppy, keyboard — lives in the
-FPGA as separate VHDL modules hanging off two internal buses.
+A real CPU — an NEC **V20** (µPD70108C-8) on the [top board](hardware.md) — drives a
+multiplexed 8088-style bus. Everything else — bus decode, memory control, video,
+interrupts, timers, DMA, floppy, keyboard — lives in the FPGA as separate VHDL
+modules hanging off two internal buses.
 
 The top level is [`gertieboard.vhdl`](../gertieboard.vhdl): a purely structural
 netlist that instantiates the modules and wires them together. It contains no
@@ -12,7 +13,7 @@ logic of its own beyond tie-offs and the speaker AND gate.
 
 ```mermaid
 flowchart TB
-    CPU["Real CPU, on the top board<br/>multiplexed 8088-style bus"]
+    CPU["NEC V20, on the top board<br/>multiplexed 8088-style bus"]
 
     subgraph FPGA["FPGA - Cyclone IV EP4CE22F17C6"]
         BD["busdecode<br/>address latch, strobes,<br/>READY, DMA mux, ROM overlay"]
@@ -201,6 +202,7 @@ schematic the top level was converted from:
 
 ## Related
 
+- [Hardware](hardware.md) — the physical side of this diagram
 - [Memory map](memory-map.md)
 - [Modules](modules/README.md)
 - [Boot flow](boot.md)

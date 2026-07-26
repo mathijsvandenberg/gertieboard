@@ -3,26 +3,36 @@
 An IBM PC/XT-class computer built around a **real, physical CPU**, with the entire
 rest of the chipset implemented in an FPGA.
 
-The FPGA is an off-the-shelf **Terasic DE0-Nano** (Cyclone IV `EP4CE22F17C6`). A
-custom top board adds the things that are deliberately *not* emulated: the CPU
-itself, real physical connectors, PSRAM and a serial FLASH.
+![The Gertieboard Mini XT, assembled](docs/images/gertieboard-rev100.jpg)
+
+Two stacked boards. The **Gertieboard Mini XT** top board carries everything that
+had to be physical; a stock **Terasic DE0-Nano** underneath carries the FPGA.
 
 ```
-   +--------------------------------------------------+
-   |  Gertieboard top board                           |
-   |    real CPU  .  connectors  .  PSRAM  .  FLASH   |
-   +--------------------------------------------------+
-                  |  address / data / control
-   +--------------------------------------------------+
-   |  Terasic DE0-Nano  (Cyclone IV EP4CE22F17C6)     |
-   |    chipset: bus, RAM ctrl, CGA, PIC, PIT, PPI,   |
-   |             DMA, FDC, keyboard, boot ROM         |
-   +--------------------------------------------------+
+   +----------------------------------------------------------+
+   |  GERTIEBOARD MINI XT  -  MVDB 2021 REV 100                |
+   |                                                            |
+   |    NEC V20 CPU  .  PSRAM  .  SPI FLASH (2 MB)             |
+   |    VGA  .  PS/2 keyboard  .  2x USB  .  FTDI 3V3 serial   |
+   |    7-segment POST display  .  buzzer  .  reset button     |
+   +----------------------------------------------------------+
+                  |  2x 40-pin GPIO
+   +----------------------------------------------------------+
+   |  Terasic DE0-Nano  (Cyclone IV EP4CE22F17C6)              |
+   |                                                            |
+   |    the chipset: bus decode, memory controller, CGA,        |
+   |    8259 PIC, 8253 PIT, 8255 PPI, 8237 DMA, 8272 FDC,       |
+   |    keyboard controller, boot ROM                           |
+   |                                                            |
+   |    also on it, unused: 32 MB SDRAM, accelerometer, ADC     |
+   +----------------------------------------------------------+
 ```
 
 The CPU could have been a soft core in the FPGA, but putting a genuine processor
 on the board was the point of the exercise: the FPGA plays the role the
 surrounding chipset played in 1983, and nothing more.
+
+Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
 
 ## What it does today
 
@@ -56,6 +66,7 @@ Start at **[docs/README.md](docs/README.md)**.
 
 | Page | Contents |
 |---|---|
+| [Hardware](docs/hardware.md) | The two boards: what is on each, and what is deliberately unused |
 | [Architecture](docs/architecture.md) | System overview, clock tree, reset, bus cycles, DMA, interrupts |
 | [Memory map](docs/memory-map.md) | Memory regions and the complete I/O port map |
 | [Modules](docs/modules/README.md) | Every FPGA module: entity ports, addresses, behaviour |
@@ -89,10 +100,31 @@ tools/               BIOS source, DOS utilities, build and host scripts
 docs/                This documentation
 ```
 
+## A short history
+
+The top board was designed and built in **2021** — the silkscreen still reads
+`MVDB 2021 REV 100`. Then it stalled. Not for lack of interest, but because three
+problems refused to give way: **memory corruption**, **timing closure**, and
+**negative slack** that would not go away no matter how the design was pushed
+around. A machine that boots differently every time is not a machine you can
+debug your way forward on, and eventually the motivation ran out. The board went
+in a drawer for the better part of four years.
+
+It came back out in **mid-2026**, this time with Claude as a debugging partner.
+The three original blockers went first — which turned out to be the whole problem,
+because everything after them had only ever been waiting on a stable machine.
+From there it went quickly: CGA, then the keyboard, then DMA and the floppy link,
+then DOS, then a hard disk on the SPI flash. The board now runs real software.
+
+The [gotchas](docs/gotchas.md) page is the honest record of that second stretch.
+Several of the entries cost days, and one of them — an assembler quietly emitting
+a 386 instruction that is not a branch at all on this CPU — cost considerably
+more than that.
+
 ## About the name
 
-Gertieboard is named after my father, **Gertie** — like me, an enthusiast for
-retro computing.
+Gertieboard is named after my father, **Geert**, known to everyone as
+**Gertie** — like me, an enthusiast for retro computing.
 
 > _Personal note to be expanded by the author._
 

@@ -2,6 +2,9 @@
 
 ## Start here
 
+- **[Hardware](hardware.md)** — the two physical boards, with a photo: what the
+  top board carries, what the DE0-Nano contributes, and what is deliberately
+  unused on each.
 - **[Architecture](architecture.md)** — how the pieces fit together: clock tree,
   reset, bus cycles, DMA and interrupt wiring.
 - **[Memory map](memory-map.md)** — every memory region and every I/O port, in one

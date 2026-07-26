@@ -7,7 +7,7 @@ marketing: if something is listed as working it has been run on hardware.
 
 | Feature | Detail |
 |---|---|
-| **Real 8088-class CPU** | Physical processor on the top board, FPGA as the surrounding chipset |
+| **Real CPU** | NEC V20 (µPD70108C-8) on the [top board](hardware.md), FPGA as the surrounding chipset |
 | **Boots PC-DOS 3.3** | From a floppy image served over serial |
 | **CGA text** | Modes 0–3, 80×25 and 40×25, 16 colours — [vga](modules/vga.md) |
 | **CGA graphics** | Modes 4, 5, 6 — 320×200×4 and 640×200×2 |
@@ -115,6 +115,9 @@ CRCs and the enumeration machinery that this would reuse.
 - **Real floppy drive** on a physical connector, instead of serving images.
 - **Faster CPU clock** — `c0` is 5 MHz; the PSRAM path is the limit, not the CPU.
 - **Composite/RGBI output** alongside VGA, for a period-correct monitor.
+- **CP/M-80 software**, using the V20's 8080 emulation mode (`BRKEM`). Needs a host
+  program on the DOS side rather than anything in the FPGA — a curiosity the CPU
+  happens to make possible. See [hardware](hardware.md#about-the-cpu).
 
 ## Related
 

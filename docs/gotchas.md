@@ -18,9 +18,16 @@ Both assemblers silently upgrade an out-of-range conditional jump to a 386 encod
 je  far_label          ; target beyond +/-127 bytes
 ```
 
-becomes `0F 84 rel16` — `JZ rel16`, a 386 instruction. On an 8088, **opcode `0F` is
-`POP CS`**. It pops garbage into the code segment and execution vanishes. Worse, it is
-**not a branch at all** on this CPU, so it fires *unconditionally*, regardless of flags.
+becomes `0F 84 rel16` — `JZ rel16`, a 386 instruction. Nothing of that era decodes it as
+a jump:
+
+| CPU | What `0F` actually is |
+|---|---|
+| Intel 8088 | **`POP CS`** — pops garbage into the code segment; execution vanishes |
+| NEC V20 (the CPU on this board) | the **prefix for NEC's extended instructions**, and `0F 84` is not one of them |
+
+Either way it is **not a branch**, so it "fires" *unconditionally*, regardless of flags,
+and the `rel16` displacement that follows is decoded as whatever it happens to look like.
 
 ### Why it is so hard to spot
 
@@ -41,16 +48,21 @@ CPU 8086             ; NASM    (tools/bootldr_64k.asm, and every .COM)
 With that set, the assembler both **errors** on newer instructions and emits the correct
 long-branch pattern itself (`cmp` / `jnz skip` / `jmp target`).
 
-### Related: shifts by an immediate greater than 1
+### Related: instructions the V20 has but an 8088 does not
 
 ```asm
 shr al, 4            ; 80186+ !  encodes as C0 E8 04
 ```
 
-Use `mov cl, 4` / `shr al, cl`, or repeated single-bit shifts if `CL` is busy. Pinning
-the architecture catches this too — it found a `shr al, 4` that had been sitting in the
-graphics-mode glyph renderer, meaning every character drawn in a CGA graphics mode
-executed an invalid instruction.
+Pinning the architecture found one of these sitting in the graphics-mode glyph renderer.
+The V20 **does** implement the 80186 additions, so it was executing correctly on this
+hardware — but it is not 8088 code, and it would fail the moment the socket held a real
+Intel part. Use `mov cl, 4` / `shr al, cl`, or repeated single-bit shifts if `CL` is
+busy.
+
+`.arch i8086` is therefore stricter than this board strictly needs. That is deliberate:
+it keeps the sources honest to the machine they claim to be, and it is the same setting
+that catches the trap above — which is *not* survivable on either CPU.
 
 ### Checking a built image
 

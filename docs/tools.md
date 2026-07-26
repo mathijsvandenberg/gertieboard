@@ -163,8 +163,8 @@ kept for comparison, not source.
 Two rules, both learned the hard way:
 
 > **`CPU 8086`.** NASM will otherwise silently emit a 386 encoding for a conditional
-> jump whose target is out of short range, and on the 8088 that byte is `POP CS`. See
-> [gotchas](gotchas.md).
+> jump whose target is out of short range — and that encoding is not a branch on this
+> CPU, nor on a real 8088. See [gotchas](gotchas.md).
 
 > **Make a test's PASS mean something.** An early `HDTEST` reported PASS on tests that
 > were silently falling through to the *floppy* handler, because the fixed-disk hook was

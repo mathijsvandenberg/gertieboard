@@ -6,8 +6,9 @@ Every I/O standard is **3.3 V LVTTL**. Source of truth:
 
 ## CPU interface
 
-The CPU uses the 8088's multiplexed bus: `CPU_AD[7:0]` carries the low address
-byte during `ALE` and the data byte afterwards, so it is bidirectional.
+The CPU — an NEC V20, see [hardware](hardware.md) — uses the 8088's multiplexed
+bus: `CPU_AD[7:0]` carries the low address byte during `ALE` and the data byte
+afterwards, so it is bidirectional.
 
 | Signal | Dir | Pin | Purpose |
 |---|---|---|---|
@@ -164,3 +165,9 @@ handles that crossing. Everything else is integer-related and timed together.
 > SDC filters reference the PLL by **instance path** (`pll1|altpll_component|...`).
 > Renaming top-level instances silently drops those constraints — see
 > [gotchas](gotchas.md).
+
+## Related
+
+- [Hardware](hardware.md) — the parts these pins connect to
+- [Architecture](architecture.md) — how the FPGA side is organised
+- [Gotchas](gotchas.md)
