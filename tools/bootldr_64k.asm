@@ -5,21 +5,40 @@
 ; The F-segment is PSRAM-backed now, so this populates the entire 64 KB ROM area
 ; with real, distinct content (no mirroring) before handing off.
 ;
+; The serial loader is tried FIRST, so a connected host always wins and BIOS
+; development stays a rebuild-and-reboot away. If no host answers within a couple
+; of seconds, the BIOS is instead read from the on-board SPI flash, which makes
+; the machine standalone. The flash copy lives in the top 64 KB of the chip
+; (0x1F0000..0x1FFFFF); the fixed disk is limited to 31 cylinders so DOS can
+; never reach it.
+;
 ; POST markers on port 0x80 (7-seg), read as a ladder:
 ;   1 entered / stack set   2 about to talk to FDC   3 Specify accepted
 ;   4 Read(128 sec) issued  5 first data byte         6 all 64 KB received
 ;   7 about to disable overlay + jump to loaded BIOS
+;   A no serial host, falling back to flash   B 64 KB read from flash
+;   EF flash holds no BIOS (no 0xEA at offset 0xFFF0) -- halted
 ;
 ; Assemble:  nasm -f bin bootldr_64k.asm -o bootldr.bin
-;            python mkrom.py bootldr.bin bootrom.vhd 256
+;            python mkmif.py bootldr.bin bootldr.mif 1024
 
         BITS 16
-        ORG 0xFF00
+        CPU 8086                  ; refuse anything newer. Without this NASM
+                                  ; silently emits the 386 near form of a
+                                  ; conditional jump whose target is out of short
+                                  ; range -- and on an 8088 opcode 0F is POP CS,
+                                  ; which vaporises execution unconditionally.
+                                  ; That exact trap cost days in the BIOS already.
+        ORG 0xFC00               ; 1 KB overlay window 0xFFC00..0xFFFFF
 
 FDC_DOR    equ 0x3F2
 FDC_MSR    equ 0x3F4
 FDC_DATA   equ 0x3F5
 OVL_CTRL   equ 0xE2
+SPI_DATA   equ 0x98               ; flash.vhd byte engine
+SPI_STAT   equ 0x99               ; bit 7 = BUSY
+SPI_CTRL   equ 0x9A               ; bit 0 = /CS
+BIOS_OFF   equ 0x1F               ; flash address 0x1F0000 = top 64 KB
 BIOS_CYL   equ 0xFF
 POST       equ 0x80
 
@@ -74,7 +93,8 @@ start:
         mov     es, ax
         xor     di, di
 
-        call    fdc_rd              ; first byte alone, for the marker
+        call    fdc_rd_to           ; first byte, but do not wait forever
+        jc      flash_load          ; nobody answered -> use the flash copy
         stosb
         MARK    5
         mov     cx, 0xFFFF          ; 65535 more  (+1 above = 65536 = 64 KB)
@@ -114,6 +134,85 @@ trampoline:
         jmp     0xF000:0xFFF0       ; loaded BIOS reset vector
 tramp_end:
 
+; --- read one FDC byte, giving up after roughly two seconds (CF=1) ----------
+; Only the FIRST byte is read this way. If a host is there it answers at once,
+; and the rest of the transfer uses the unbounded fdc_rd; if none is, we must be
+; able to give up, or a standalone board would simply hang here forever.
+fdc_rd_to:
+        push    dx
+        push    cx
+        push    bx
+        mov     bx, 4
+.o:     xor     cx, cx
+.i:     mov     dx, FDC_MSR
+        in      al, dx
+        and     al, 0xC0
+        cmp     al, 0xC0
+        je      .got
+        loop    .i
+        dec     bx
+        jnz     .o
+        stc
+        jmp     short .out
+.got:   mov     dx, FDC_DATA
+        in      al, dx
+        clc
+.out:   pop     bx
+        pop     cx
+        pop     dx
+        ret
+
+; --- exchange one SPI byte: AL out -> AL in --------------------------------
+spi_x:
+        out     SPI_DATA, al
+        ; The status read must not overtake the write. flash.vhd latches the
+        ; transmit on the FALLING edge of the write strobe and only then raises
+        ; BUSY; an immediately following IN can sample the status BEFORE that,
+        ; see BUSY=0, and hand back the PREVIOUS byte -- shifting the whole image
+        ; by one and producing exactly the garbled BIOS this produced. The BIOS's
+        ; own copy of this loop only works because it happens to have two
+        ; instructions in between. Make the gap explicit rather than accidental.
+        jmp     short $+2
+        jmp     short $+2
+.w:     in      al, SPI_STAT
+        test    al, 0x80
+        jnz     .w
+        in      al, SPI_DATA
+        ret
+
+; --- load the 64 KB BIOS image from flash 0x1F0000 -> 0xF0000 --------------
+flash_load:
+        MARK    0xA
+        xor     al, al
+        out     SPI_CTRL, al        ; /CS low
+        mov     al, 0x03            ; READ
+        call    spi_x
+        mov     al, BIOS_OFF        ; addr[23:16]
+        call    spi_x
+        xor     al, al
+        call    spi_x               ; addr[15:8]
+        call    spi_x               ; addr[7:0]
+        mov     ax, 0xF000
+        mov     es, ax
+        xor     di, di
+        xor     cx, cx              ; 65536 bytes
+.fl:    mov     al, 0xFF
+        call    spi_x
+        stosb
+        loop    .fl
+        mov     al, 1
+        out     SPI_CTRL, al        ; /CS high
+        MARK    0xB
+        ; A blank chip reads 0xFF everywhere, which would "boot" into nothing.
+        ; The reset vector must start with a far jump, so check for it and stop
+        ; with a visible code rather than running off into erased flash.
+        cmp     byte [es:0xFFF0], 0xEA
+        jne     .nobios             ; short branch + near jmp: both 8086-legal
+        jmp     start.switch        ; shared hand-off path
+.nobios:
+        MARK    0xEF
+.hang:  jmp     .hang
+
 fdc_wr:
         push    dx
         mov     ah, al
@@ -142,7 +241,7 @@ fdc_rd:
         pop     dx
         ret
 
-        times (0xFFF0 - 0xFF00) - ($ - $$) db 0x90
+        times (0xFFF0 - 0xFC00) - ($ - $$) db 0x90
 reset_vector:
-        jmp     0xF000:0xFF00
+        jmp     0xF000:0xFC00
         times (0x10000 - 0xFFF0) - ($ - reset_vector) db 0xFF

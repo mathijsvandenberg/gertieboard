@@ -2167,11 +2167,15 @@ dbg_spc:
 ##  write-protect for now; they come back once reads pass, with the buffer in
 ##  M9K where it costs no DOS memory.
 ##
-##  Geometry: 2 MB / 512 = 4096 sectors, presented as 32 cyl x 4 heads x 32 spt.
+##  Geometry: 31 cyl x 4 heads x 32 spt = 3968 sectors = 1,986,560 bytes.
+##  NOT the full 4096 sectors: the top 64 KB of the flash (0x1F0000..0x1FFFFF)
+##  holds the BIOS image the boot ROM falls back to when no serial host answers,
+##  and 31 cylinders stops exactly at 0x1F0000 so DOS can never overwrite it.
 ## =====================================================================
 .equ HD_SPT,    32
 .equ HD_HEADS,  4
-.equ HD_CYLS,   32
+.equ HD_CYLS,   31       # REPORTED geometry: DOS never sees cylinder 31
+.equ HD_PHYS_SECTORS, 32*4*32   # the chip really holds 4096 sectors (2 MB)
 
 ## ---- SPI helpers on top of spi_xfer --------------------------------
 ## hd_send_lba: BX = LBA -> the 3 flash address bytes for LBA*512
@@ -2599,8 +2603,13 @@ hd_transfer:
     cmp byte ptr [0xF3], 0
     je .ht_done
     mov ax, [0xF1]
-    cmp ax, HD_CYLS * HD_HEADS * HD_SPT
-    jae .ht_err              # past the end of the disk
+    # Bounds-check against the PHYSICAL chip (4096 sectors), not the reported
+    # geometry. AH=08 advertises 31 cylinders so DOS keeps out of the last one,
+    # which holds the BIOS copy the boot ROM falls back to -- but a deliberate
+    # tool can still address cylinder 31 to write that copy, reusing this proven
+    # erase/program path instead of duplicating it.
+    cmp ax, HD_PHYS_SECTORS
+    jae .ht_err              # past the end of the chip
 
     mov bx, ax               # BX = LBA of this sector
     mov cl, 3

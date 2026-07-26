@@ -225,7 +225,6 @@ set_global_assignment -name VHDL_FILE cga_status.vhd
 set_global_assignment -name VHDL_FILE ctrl_reg.vhd
 set_global_assignment -name VHDL_FILE psram_ctrl.vhd
 set_global_assignment -name VHDL_FILE m9k_mem.vhd
-set_global_assignment -name MIF_FILE bootldr.mif
 set_global_assignment -name VHDL_FILE font.vhd
 set_global_assignment -name VHDL_FILE gertieboard.vhdl
 set_global_assignment -name VHDL_FILE clkgen.vhd

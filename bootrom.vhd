@@ -40,11 +40,145 @@ END bootrom;
 
 ARCHITECTURE behavior OF bootrom IS
 
-  -- 256-byte boot ROM, initialised from the assembled bootloader.
-  TYPE rom_t IS ARRAY (0 TO 255) OF std_logic_vector(7 DOWNTO 0);
-  SIGNAL rom : rom_t;
-  ATTRIBUTE ram_init_file : string;
-  ATTRIBUTE ram_init_file OF rom : SIGNAL IS "bootldr.mif";
+  -- 1 KB boot ROM, initialised from the assembled bootloader.
+  -- Was 256 bytes, which left 28 bytes free -- not enough for a bounded serial
+  -- wait plus an SPI-flash fallback loader, so the overlay window grew to
+  -- 0xFFC00..0xFFFFF. busdecode's in_overlay test must match this size.
+  TYPE rom_t IS ARRAY (0 TO 1023) OF std_logic_vector(7 DOWNTO 0);
+  -- Contents baked in from tools/bootldr.bin.
+  -- NOT a .mif via ram_init_file: that path produced a ROM Quartus never
+  -- reported using and never initialised (0 memory bits, and a warning that
+  -- 'rom' was never assigned), which for a boot ROM is fatal and silent. A
+  -- constant array always synthesises with its values.
+  CONSTANT rom : rom_t := (
+    x"FA", x"FC", x"31", x"C0", x"8E", x"D0", x"BC", x"00",
+    x"7C", x"B0", x"01", x"E6", x"80", x"BA", x"F2", x"03",
+    x"B0", x"04", x"EE", x"B0", x"02", x"E6", x"80", x"B0",
+    x"03", x"E8", x"0A", x"01", x"B0", x"DF", x"E8", x"05",
+    x"01", x"B0", x"03", x"E8", x"00", x"01", x"B0", x"03",
+    x"E6", x"80", x"B0", x"46", x"E8", x"F7", x"00", x"B0",
+    x"00", x"E8", x"F2", x"00", x"B0", x"FF", x"E8", x"ED",
+    x"00", x"B0", x"00", x"E8", x"E8", x"00", x"B0", x"01",
+    x"E8", x"E3", x"00", x"B0", x"02", x"E8", x"DE", x"00",
+    x"B0", x"80", x"E8", x"D9", x"00", x"B0", x"1B", x"E8",
+    x"D4", x"00", x"B0", x"FF", x"E8", x"CF", x"00", x"B0",
+    x"04", x"E6", x"80", x"B8", x"00", x"F0", x"8E", x"C0",
+    x"31", x"FF", x"E8", x"4B", x"00", x"72", x"7B", x"AA",
+    x"B0", x"05", x"E6", x"80", x"B9", x"FF", x"FF", x"E8",
+    x"C9", x"00", x"AA", x"E2", x"FA", x"B0", x"06", x"E6",
+    x"80", x"BA", x"F4", x"03", x"EC", x"A8", x"10", x"74",
+    x"0A", x"A8", x"80", x"74", x"F4", x"BA", x"F5", x"03",
+    x"EC", x"EB", x"EE", x"B0", x"07", x"E6", x"80", x"B8",
+    x"60", x"00", x"8E", x"C0", x"31", x"FF", x"0E", x"1F",
+    x"BE", x"A5", x"FC", x"B9", x"0B", x"00", x"F3", x"A4",
+    x"EA", x"00", x"00", x"60", x"00", x"BA", x"E2", x"00",
+    x"B0", x"01", x"EE", x"EA", x"F0", x"FF", x"00", x"F0",
+    x"52", x"51", x"53", x"BB", x"04", x"00", x"31", x"C9",
+    x"BA", x"F4", x"03", x"EC", x"24", x"C0", x"3C", x"C0",
+    x"74", x"08", x"E2", x"F4", x"4B", x"75", x"EF", x"F9",
+    x"EB", x"05", x"BA", x"F5", x"03", x"EC", x"F8", x"5B",
+    x"59", x"5A", x"C3", x"E6", x"98", x"EB", x"00", x"EB",
+    x"00", x"E4", x"99", x"A8", x"80", x"75", x"FA", x"E4",
+    x"98", x"C3", x"B0", x"0A", x"E6", x"80", x"30", x"C0",
+    x"E6", x"9A", x"B0", x"03", x"E8", x"E4", x"FF", x"B0",
+    x"1F", x"E8", x"DF", x"FF", x"30", x"C0", x"E8", x"DA",
+    x"FF", x"E8", x"D7", x"FF", x"B8", x"00", x"F0", x"8E",
+    x"C0", x"31", x"FF", x"31", x"C9", x"B0", x"FF", x"E8",
+    x"C9", x"FF", x"AA", x"E2", x"F8", x"B0", x"01", x"E6",
+    x"9A", x"B0", x"0B", x"E6", x"80", x"26", x"80", x"3E",
+    x"F0", x"FF", x"EA", x"75", x"03", x"E9", x"6B", x"FF",
+    x"B0", x"EF", x"E6", x"80", x"EB", x"FE", x"52", x"88",
+    x"C4", x"BA", x"F4", x"03", x"EC", x"24", x"C0", x"3C",
+    x"80", x"75", x"F6", x"BA", x"F5", x"03", x"88", x"E0",
+    x"EE", x"5A", x"C3", x"52", x"BA", x"F4", x"03", x"EC",
+    x"24", x"C0", x"3C", x"C0", x"75", x"F6", x"BA", x"F5",
+    x"03", x"EC", x"5A", x"C3", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"90", x"90", x"90", x"90", x"90", x"90", x"90", x"90",
+    x"EA", x"00", x"FC", x"00", x"F0", x"FF", x"FF", x"FF",
+    x"FF", x"FF", x"FF", x"FF", x"FF", x"FF", x"FF", x"FF");
 
   SIGNAL rom_en_i : std_logic := '1';
   SIGNAL wr_prev  : std_logic := '1';
@@ -52,7 +186,7 @@ ARCHITECTURE behavior OF bootrom IS
 BEGIN
 
   ROM_EN   <= rom_en_i;
-  ROM_DATA <= rom(conv_integer(MEM_ADDR(7 DOWNTO 0)));
+  ROM_DATA <= rom(conv_integer(MEM_ADDR(9 DOWNTO 0)));
 
   PROCESS (CLK)
   BEGIN

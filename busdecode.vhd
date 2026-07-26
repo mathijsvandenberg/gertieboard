@@ -129,7 +129,10 @@ BEGIN
 	-- During reset (ROM_EN=1) a memory read of 0xFFF00..0xFFFFF returns the boot
 	-- ROM instead of PSRAM. WRITES are unaffected -> they pass through to PSRAM,
 	-- so the bootloader can fill the BIOS image underneath the overlay.
-	in_overlay <= '1' WHEN (ROM_EN = '1' AND IOM = '0' AND maddr_l(19 DOWNTO 8) = x"FFF")
+	-- 1 KB window 0xFFC00..0xFFFFF (was 256 bytes at 0xFFF00). Keep this in
+	-- step with the rom_t size in bootrom.vhd.
+	in_overlay <= '1' WHEN (ROM_EN = '1' AND IOM = '0'
+	                        AND maddr_l(19 DOWNTO 10) = "1111111111")
 	         ELSE '0';
 
 	-- Drive read data back to the CPU only when the CPU owns the bus.
