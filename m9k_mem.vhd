@@ -1,10 +1,23 @@
 --------------------------------------------------------------------------------
--- m9k_mem.vhd  --  reliable on-chip M9K low RAM for the hybrid map
+-- m9k_mem.vhd  --  reliable on-chip M9K RAM for the hybrid map
 --
--- Backs ONLY the low 32 KB:
---   0x00000..0x07FFF  -- IVT, BDA, stack, trampoline scratch
--- The BIOS now lives in the PSRAM-backed F-segment (full 64 KB, no mirror), so
--- this block no longer touches 0xF0000+. 32 M9K blocks.
+-- Backs two disjoint windows:
+--   0x00000..0x07FFF  -- 32 KB low RAM: IVT, BDA, stack, trampoline scratch
+--   0xE0000..0xE0FFF  --  4 KB fixed-disk block buffer
+-- The BIOS lives in the PSRAM-backed F-segment (full 64 KB, no mirror), so this
+-- block never touches 0xF0000+. 36 M9K blocks total.
+--
+-- The 4 KB window exists so the fixed-disk read-modify-write buffer costs no
+-- conventional memory. It used to sit at 0x9E000, which forced the BIOS to
+-- report 632 KB instead of 640 KB; up here DOS never sees it and the full
+-- 640 KB is given back. See tools/xtbios_src.s (HDBUF_SEG) and docs/fixed-disk.md.
+--
+-- 0xE0000 is not an arbitrary choice. busdecode's MEMADDR is true for
+-- ADDR < 0xA0000 OR ADDR >= 0xE0000, so a window here is treated as a real
+-- memory cycle and the CPU waits on RAM_READY. Anywhere in 0xA0000..0xDFFFF
+-- the READY handshake would be bypassed by the T >= 3 clause and the CPU could
+-- sample the bus before this block drives it. Do not move the window down
+-- without also widening MEMADDR.
 --------------------------------------------------------------------------------
 
 LIBRARY IEEE;
@@ -26,11 +39,15 @@ END m9k_mem;
 
 ARCHITECTURE m9k OF m9k_mem IS
 
-  CONSTANT DEPTH : integer := 16#8000#;      -- 32 KB low RAM
+  CONSTANT LOW_DEPTH : integer := 16#8000#;   -- 32 KB low RAM        0x00000..0x07FFF
+  CONSTANT BUF_DEPTH : integer := 16#1000#;   -- 4 KB disk buffer     0xE0000..0xE0FFF
+  CONSTANT DEPTH     : integer := LOW_DEPTH + BUF_DEPTH;
 
   TYPE mem_t IS ARRAY(0 TO DEPTH-1) OF std_logic_vector(7 DOWNTO 0);
   SIGNAL mem : mem_t;
 
+  SIGNAL in_low  : std_logic;
+  SIGNAL in_buf  : std_logic;
   SIGNAL in_win  : std_logic;
   SIGNAL midx    : integer RANGE 0 TO DEPTH-1;
   SIGNAL cpu_rd  : std_logic;
@@ -45,8 +62,13 @@ ARCHITECTURE m9k OF m9k_mem IS
 
 BEGIN
 
-  in_win <= '1' WHEN (ADDR < x"08000") ELSE '0';
-  midx   <= conv_integer(ADDR(14 DOWNTO 0));    -- 0x0000..0x7FFF
+  in_low <= '1' WHEN (ADDR < x"08000") ELSE '0';
+  in_buf <= '1' WHEN ((ADDR >= x"E0000") AND (ADDR < x"E1000")) ELSE '0';
+  in_win <= in_low OR in_buf;
+
+  -- Low RAM maps 1:1; the 4 KB buffer is packed on top of it at LOW_DEPTH.
+  midx   <= conv_integer(ADDR(14 DOWNTO 0)) WHEN in_low = '1'
+       ELSE LOW_DEPTH + conv_integer(ADDR(11 DOWNTO 0));
 
   cpu_rd <= in_win AND (NOT RD);
   cpu_wr <= in_win AND (NOT WR);

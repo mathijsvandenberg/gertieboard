@@ -8,13 +8,23 @@
 | `0x08000`–`0x9FFFF` | 608 KB | **PSRAM** (`psram_ctrl`) | rest of conventional memory |
 | `0xA0000`–`0xB7FFF` | — | unmapped | reads float; not a `MEMADDR` region |
 | `0xB8000`–`0xBBFFF` | 16 KB | **inside `vga`** | CGA video RAM (text + graphics) |
-| `0xBC000`–`0xEFFFF` | — | unmapped | |
+| `0xBC000`–`0xDFFFF` | — | unmapped | |
+| `0xE0000`–`0xE0FFF` | 4 KB | on-chip **M9K** (`m9k_mem`) | fixed-disk block buffer; **invisible to DOS** |
+| `0xE1000`–`0xEFFFF` | — | unmapped | |
 | `0xF0000`–`0xFFFFF` | 64 KB | **PSRAM** | BIOS F-segment, filled at boot |
 | `0xFFC00`–`0xFFFFF` | 1 KB | **boot ROM overlay** | *reads only*, while `ROM_EN = '1'` |
 
-Total conventional memory reported to DOS: **632 KB**. The top 8 KB
-(`0x9E000`–`0x9FFFF`) is reserved as the fixed disk's 4 KB read-modify-write
-buffer — see [fixed disk](fixed-disk.md).
+Total conventional memory reported to DOS: **640 KB** — all of it.
+
+The fixed disk's 4 KB read-modify-write buffer used to sit at `0x9E000`, costing 8 KB
+and forcing the BIOS to report 632 KB. It now lives in on-chip M9K at `0xE0000`, above
+conventional memory, so DOS gets the full 640 KB back. See
+[fixed disk](fixed-disk.md#where-the-buffer-lives).
+
+> `0xE0000` is not arbitrary. `busdecode`'s `MEMADDR` is true for `ADDR < 0xA0000` **or**
+> `ADDR >= 0xE0000`, so a window there is treated as a real memory cycle and the CPU
+> waits on `RAM_READY`. Anywhere in `0xA0000`–`0xDFFFF` the handshake is bypassed by the
+> `T >= 3` clause, and the CPU could sample the bus before the RAM drives it.
 
 ### The boot ROM overlay
 

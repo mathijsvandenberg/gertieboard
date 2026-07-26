@@ -51,7 +51,7 @@ the same block** — both slow and 8× the flash wear.
 
 ## The solution: a 4 KB block buffer
 
-One 4 KB block is held in RAM at `0x9E000`, just above the 632 KB reported to DOS.
+One 4 KB block is held in on-chip M9K at `0xE0000`, outside conventional memory.
 
 | Operation | Behaviour |
 |---|---|
@@ -117,13 +117,37 @@ anything run afterwards and looked exactly like a detection failure in FDISK.
 Roughly real-XT-hard-disk speed. FORMAT is noticeably slow and pauses on each erase;
 that is the flash, not a fault.
 
-### Why the buffer is in main RAM, not M9K
+### Where the buffer lives
 
-It costs 8 KB of conventional memory (632 KB instead of 640). The alternative is a 4 KB
-buffer in M9K, which would return that memory and speed block loads roughly tenfold —
-but it needs a ~300-line erase/program/poll state machine in VHDL, so every bug would
-mean a reflash instead of a rebuild. The RAM version was chosen to get the logic
-proven first. Moving it later is a pure optimisation.
+In **on-chip M9K at `0xE0000`**, outside conventional memory, so it costs DOS nothing
+and the BIOS reports the full **640 KB**.
+
+It did not start there. The first version put it at `0x9E000`, in reserved conventional
+RAM just above what was then advertised as 632 KB — the classic way for a BIOS to keep
+private RAM, and the quickest way to get the write logic proven. That cost 8 KB of DOS
+memory.
+
+Moving it was a small change on both sides:
+
+- [`m9k_mem.vhd`](../m9k_mem.vhd) backs a second window, `0xE0000`–`0xE0FFF`, packed on
+  top of the low 32 KB in the same inferred RAM — 36 KB total, +4 M9K blocks, 50 logic
+  elements for the whole module
+- `HDBUF_SEG` in the BIOS changed from `0x9E00` to `0xE000`, and the reported size and
+  banner string went back to 640
+
+> **`0xE0000` is load-bearing.** `busdecode`'s `MEMADDR` is true for `ADDR < 0xA0000` or
+> `ADDR >= 0xE0000`, so a window there is a proper memory cycle and the CPU waits on
+> `RAM_READY`. Put the buffer anywhere in `0xA0000`–`0xDFFFF` and the `T >= 3` clause
+> releases the CPU without consulting the RAM at all — it would appear to work, at 50 MHz,
+> right up until it did not. Moving the buffer means changing both the VHDL window and
+> `HDBUF_SEG` together.
+
+**This does not make the disk much faster.** Buffer writes now land in on-chip RAM
+instead of PSRAM, but a 4 KB block load is dominated by 4096 bit-banged SPI byte
+transfers at roughly 6 µs each. The tenfold speedup that was once hoped for here needs
+the erase/program/poll sequence itself moved into VHDL — a ~300-line state machine that
+does not exist, and where every bug would mean a reflash instead of a rebuild. The gain
+from this change is 8 KB of conventional memory, not speed.
 
 ## Verification
 

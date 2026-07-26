@@ -37,14 +37,21 @@ in [`gertieboard.qsf`](../gertieboard.qsf).
 
 | Metric | Value |
 |---|---|
-| Logic elements | ~5300 / 22320 (24 %) |
-| Memory bits | ~398 000 / 608 256 (65 %) |
+| Logic elements | 11 525 / 22 320 (52 %) |
+| Memory bits | 425 984 / 608 256 (70 %) |
 | PLLs | 1 / 4 |
 | Pins | 76 / 154 |
-| Worst-case setup slack | ~+2.1 ns |
+| Worst-case setup slack | +1.42 ns |
+| Worst-case hold slack | +0.36 ns |
 | Fitter warnings | 11 |
 
-A clean build is 0 errors with those warning counts. If the fitter warning count jumps,
+Where the logic goes, largest first: `fdc8272` 5881, `vga` 2047, `psram_ctrl` 1114,
+`dma8237` 725, `bootrom` 271, `m9k_mem` 50. The serial floppy controller is over half
+the design.
+
+A clean build is 0 errors with those warning counts. Every slack must be **positive** —
+negative slack on this design is not a rounding detail, it is the failure mode that
+stalled the project for four years. If the fitter warning count jumps,
 check for new unmatched SDC filters:
 
 ```bash

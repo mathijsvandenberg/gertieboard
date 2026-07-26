@@ -3,6 +3,7 @@
 --
 -- Splits the memory map across reliable M9K and PSRAM:
 --   M9K   : 0x00000..0x07FFF (low RAM: IVT, BDA, stack)
+--           0xE0000..0xE0FFF (4 KB fixed-disk block buffer, invisible to DOS)
 --   PSRAM : 0x08000..0x9FFFF (conventional RAM)  +  0xF0000..0xFFFFF (64 KB BIOS)
 --
 -- The low RAM stays in M9K so the stack/IVT are rock-solid; the full 64 KB
@@ -68,7 +69,9 @@ ARCHITECTURE struct OF mem_hybrid IS
 BEGIN
 
   -- PSRAM owns conventional RAM 0x08000..0x9FFFF AND the 64 KB F-segment BIOS
-  -- 0xF0000..0xFFFFF; M9K owns only the low 32 KB (0x00000..0x07FFF).
+  -- 0xF0000..0xFFFFF; M9K owns the low 32 KB (0x00000..0x07FFF) plus the 4 KB
+  -- disk buffer at 0xE0000. Note 0xE0000..0xE0FFF falls through to M9K here
+  -- because sel_ps only claims 0xF0000 and above -- do not widen it to 0xE0000.
   sel_ps <= '1' WHEN ((ADDR >= x"08000") AND (ADDR < x"A0000"))
                   OR  (ADDR >= x"F0000")
             ELSE '0';

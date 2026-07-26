@@ -38,16 +38,38 @@ READY  <= ready_ps WHEN sel_ps = '1' ELSE ready_m9k;
 |---|---|---|
 | `0x00000`–`0x07FFF` | `m9k_mem` (32 KB on-chip) | ~60 ns |
 | `0x08000`–`0x9FFFF` | `psram_ctrl` | see below |
+| `0xE0000`–`0xE0FFF` | `m9k_mem` (4 KB on-chip) | ~60 ns; fixed-disk block buffer |
 | `0xF0000`–`0xFFFFF` | `psram_ctrl` | BIOS F-segment |
 
 Their ranges are disjoint, so there is never contention. Note the consequence:
-**game code, DOS and the BIOS all execute from PSRAM** — only the lowest 32 KB is
-on-chip.
+**game code, DOS and the BIOS all execute from PSRAM** — only the lowest 32 KB and the
+disk buffer are on-chip.
+
+> The 4 KB buffer window falls to `m9k_mem` because `sel_ps` claims `0xF0000` and above,
+> not `0xE0000` and above. Widening `sel_ps` would hand the buffer to the PSRAM and put
+> 8 KB back on the DOS memory bill. See
+> [fixed disk](../fixed-disk.md#where-the-buffer-lives).
 
 ## m9k_mem
 
-A simple 32 KB synchronous RAM (`DEPTH = 0x8000`) with a small state machine
+A simple 36 KB synchronous RAM with a small state machine
 (`M_IDLE → M_WAIT → M_DONE`) that drops `READY` for one cycle and then completes.
+
+It backs **two disjoint windows** out of one inferred RAM: the low 32 KB maps 1:1, and
+the 4 KB disk buffer at `0xE0000` is packed on top of it at index `LOW_DEPTH`.
+
+```vhdl
+in_low <= '1' WHEN (ADDR < x"08000") ELSE '0';
+in_buf <= '1' WHEN ((ADDR >= x"E0000") AND (ADDR < x"E1000")) ELSE '0';
+in_win <= in_low OR in_buf;
+
+midx   <= conv_integer(ADDR(14 DOWNTO 0)) WHEN in_low = '1'
+     ELSE LOW_DEPTH + conv_integer(ADDR(11 DOWNTO 0));
+```
+
+Quartus infers this as a single 36864×8 altsyncram — 294,912 bits, 36 M9K blocks — with
+50 logic elements for the whole module. Check that in the fit report if you touch it: if
+the address mux ever stops it inferring RAM, 36 KB of registers will not fit.
 
 ## psram_ctrl — QPI controller
 

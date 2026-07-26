@@ -21,7 +21,7 @@ P3105's.) Same rows, same wording, same column alignment.
 | 1 | `Gertieboard BIOS Retirement Edition` |
 | 2 | `2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)` |
 | 4 | `                     Total  Base Extra` |
-| 5 | `System Memory Found:   632   632     0 Kbytes` |
+| 5 | `System Memory Found:   640   640     0 Kbytes` |
 | 6 | `Parity Checking Enabled` |
 | 8 | `Using Diskette Drive A:` |
 | 9 | `Fixed Disk: ID 9D 60 15  2048 KB SPI flash` |
@@ -220,7 +220,7 @@ Standard fields:
 | Offset | Size | Contents |
 |---|---|---|
 | `0x10` | word | Equipment word — `0x0021`: 1 floppy, 80×25 colour |
-| `0x13` | word | Base memory in KB — **632**, not 640 (see below) |
+| `0x13` | word | Base memory in KB — **640** |
 | `0x17` | byte | Keyboard shift flags |
 | `0x1A` / `0x1C` | word | Keyboard buffer head / tail |
 | `0x1E`–`0x3D` | 32 B | Keyboard ring buffer |
@@ -256,9 +256,15 @@ Custom fields, all in the reserved `0xE0`+ area:
 | `0xF3` | byte | Sectors remaining |
 | `0xF5` | word | Byte offset within the cached block |
 
-> **632 KB, not 640.** The top 8 KB of conventional memory (`0x9E000`+) is the fixed
-> disk's 4 KB read-modify-write buffer — the classic way for a BIOS to keep private
-> RAM. If that is ever raised back to 640, `HDBUF_SEG` must move first.
+> **The full 640 KB.** The fixed disk's 4 KB read-modify-write buffer used to occupy
+> the top 8 KB of conventional memory at `0x9E000`, which is the classic way for a BIOS
+> to keep private RAM, and it cost 8 KB of DOS memory. It now lives in on-chip M9K at
+> `0xE0000` (`HDBUF_SEG`), outside conventional memory, so the reported size went back
+> to 640.
+>
+> This value and the `b_mem` banner string are **two separate literals**. Change one and
+> you must change the other — a mismatch between them once made the POST screen useless
+> as a build indicator. See [gotchas](gotchas.md).
 
 ## SPI flash identification
 

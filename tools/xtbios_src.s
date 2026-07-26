@@ -114,8 +114,10 @@ _post:
     xor ax, ax
     rep stosw
     mov word ptr es:[0x10], 0x0021   # equipment: 1 floppy, 80x25 colour
-    # 632, not 640: the top 8 KB (0x9E000+) is the fixed-disk block buffer.
-    mov word ptr es:[0x13], 632      # base memory size in KB
+    # Full 640 KB. The fixed-disk block buffer used to live at 0x9E000 and cost
+    # 8 KB of this; it now sits in on-chip M9K at 0xE0000 (see HDBUF_SEG), which
+    # DOS never sees. Keep this in step with b_mem below.
+    mov word ptr es:[0x13], 640      # base memory size in KB
     # Fixed-disk count deliberately 0 for now. INT 13h AH>=0x80 works and
     # HDTEST.COM exercises it, but the flash holds no partition table yet, so
     # advertising a disk only makes DOS probe an empty device during startup --
@@ -2154,18 +2156,17 @@ dbg_spc:
     ret
 
 ## =====================================================================
-##  FIXED DISK (INT 13h, DL >= 0x80) backed by the SPI flash -- READ ONLY
+##  FIXED DISK (INT 13h, DL >= 0x80) backed by the SPI flash -- READ + WRITE
 ##
-##  Staged deliberately. The write path needs a 4 KB read-modify-write buffer
-##  (the flash erases 4 KB at a time), and the first attempt put that buffer in
-##  reserved conventional RAM, dropping the reported memory from 640 KB to
-##  632 KB. That coincided with the boot breaking, so both the buffer and the
-##  memory-size change are gone until READS are proven on hardware.
+##  Built in stages. Reads need no buffer at all: a sector is just 512 bytes at
+##  flash address LBA*512, streamed straight into the caller's buffer. Writes
+##  need a 4 KB read-modify-write buffer, because the flash erases 4 KB at a
+##  time; see HDBUF_SEG below.
 ##
-##  Reads need no buffer at all: a sector is just 512 bytes at flash address
-##  LBA*512, streamed straight into the caller's buffer. Writes report
-##  write-protect for now; they come back once reads pass, with the buffer in
-##  M9K where it costs no DOS memory.
+##  That buffer first went into reserved conventional RAM at 0x9E000, which cost
+##  8 KB and dropped the reported memory from 640 KB to 632 KB. It now lives in
+##  on-chip M9K at 0xE0000 where DOS cannot see it, and the full 640 KB is
+##  reported again.
 ##
 ##  Geometry: 31 cyl x 4 heads x 32 spt = 3968 sectors = 1,986,560 bytes.
 ##  NOT the full 4096 sectors: the top 64 KB of the flash (0x1F0000..0x1FFFFF)
@@ -2230,10 +2231,17 @@ hd_read_one:
 ##  INT 13h AH=03 is expected to have committed when it returns, and anything
 ##  still dirty is lost on reboot.
 ##
-##  The buffer sits just above the 632 KB reported to DOS. Do not raise the
-##  reported size back to 640 without moving HDBUF_SEG first.
+##  The buffer lives in on-chip M9K at 0xE0000, NOT in conventional memory, so
+##  it costs no DOS memory and the BIOS reports the full 640 KB. It used to sit
+##  at 0x9E000, which forced the reported size down to 632 KB.
+##
+##  0xE0000 is load-bearing on the FPGA side: m9k_mem.vhd maps exactly
+##  0xE0000..0xE0FFF, and busdecode's MEMADDR covers ADDR >= 0xE0000 so the
+##  access waits on RAM_READY like any other memory cycle. Moving this segment
+##  means changing m9k_mem.vhd to match -- and anywhere in 0xA0000..0xDFFFF the
+##  READY handshake is bypassed, so do not put it there.
 ## =====================================================================
-.equ HDBUF_SEG, 0x9E00       # 4 KB block buffer at linear 0x9E000
+.equ HDBUF_SEG, 0xE000       # 4 KB block buffer at linear 0xE0000 (M9K, not DOS RAM)
 
 spi_wren:                    # write enable, required before erase or program
     call spi_cs_lo
@@ -2792,7 +2800,7 @@ b_ver:    .asciz "Philips ROM BIOS Version 1.00"
 b_model:  .asciz "Gertieboard BIOS Retirement Edition"
 b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"
 b_hdr:    .asciz "                     Total  Base Extra"
-b_mem:    .asciz "System Memory Found:   632   632     0 Kbytes"
+b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
 b_drv:    .asciz "Using Diskette Drive A:"
 b_boot:   .asciz "Booting..."

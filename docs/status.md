@@ -20,7 +20,7 @@ marketing: if something is listed as working it has been run on hardware.
 | **8237A DMA** | Channel 2 for floppy transfers, channel 0 refresh — [dma8237](modules/dma8237.md) |
 | **8255 PPI** | Keyboard port, speaker gate, DIP switches — [ppi8255](modules/ppi8255.md) |
 | **PC speaker** | Timer channel 2 gated through the PPI |
-| **640 KB RAM** | 632 KB reported to DOS; the rest is the disk write buffer — [mem_hybrid](modules/mem_hybrid.md) |
+| **640 KB RAM** | All 640 KB reported to DOS; the disk write buffer sits in M9K outside it — [mem_hybrid](modules/mem_hybrid.md) |
 | **Standalone FPGA config** | `.jic` in the DE0-Nano's EPCS16, no JTAG needed at power-on — [building](building.md) |
 | **Runs real software** | Alley Cat, Digger, Sopwith, the PC-DOS utilities |
 
@@ -35,10 +35,10 @@ needs one for the floppy.
 
 ## Planned
 
-Roughly in the order they are likely to happen. The FPGA has plenty of room in logic
-(~24 % of the LEs used) but **on-chip memory is the scarce resource** — about 65 % of
-the 608 Kbit of M9K is already committed — so several of these are memory problems
-before they are logic problems.
+Roughly in the order they are likely to happen. Two budgets to keep in mind: **52 % of
+the logic elements** and **70 % of the 608 Kbit of M9K** are already committed. Memory is
+the tighter of the two, so several of these are memory problems before they are logic
+problems.
 
 ### USB keyboard
 
@@ -74,7 +74,7 @@ Output would be a sigma-delta or PWM pin on the top board rather than a real DAC
 The awkward one, and the reason it is last.
 
 EGA's 640×350×16 needs **four bit planes of 64 KB each — 256 KB, or 2 Mbit**. The whole
-device has 608 Kbit of M9K and 65 % of it is spoken for, so planar video memory cannot
+device has 608 Kbit of M9K and 70 % of it is spoken for, so planar video memory cannot
 live on-chip the way the current [16 KB of CGA VRAM](modules/vga.md) does. It has to be
 PSRAM-backed, which puts the scan-out fetch in direct competition with CPU accesses on
 the same controller — and the [read cache](modules/mem_hybrid.md) is tuned for CPU
@@ -116,9 +116,10 @@ likely under CERN-OHL-P, since MIT does not really fit a PCB.
 - **Serial port that actually works** — [`com1_stub`](modules/com1_stub.md) currently
   answers COM1 probes as "absent" on purpose. The board's UART is committed to the host
   link, so a real 8250 would need the second one.
-- **Move the disk write buffer into M9K** — returns 8 KB of conventional memory and
-  speeds block loads roughly tenfold, at the cost of a ~300-line erase/program state
-  machine in VHDL. Reasoning in [fixed disk](fixed-disk.md#why-the-buffer-is-in-main-ram-not-m9k).
+- **Move the erase/program sequence into VHDL** — a ~300-line state machine would make
+  block loads roughly tenfold faster, at the cost of every bug meaning a reflash instead
+  of a rebuild. The buffer itself is already in M9K; this is the remaining half of that
+  idea. Reasoning in [fixed disk](fixed-disk.md#where-the-buffer-lives).
 - **Real floppy drive** on a physical connector, instead of serving images.
 - **Faster CPU clock** — `c0` is 5 MHz; the PSRAM path is the limit, not the CPU.
 - **Composite/RGBI output** alongside VGA, for a period-correct monitor.
