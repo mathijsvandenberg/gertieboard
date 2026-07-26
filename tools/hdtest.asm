@@ -1,19 +1,29 @@
 ; ============================================================================
 ;  hdtest.asm  --  exercise the INT 13h fixed disk (SPI flash) from DOS
 ;
-;  The disk is READ ONLY for now, so this checks the read path properly rather
-;  than just the handshake. The key trick: an erased flash reads 0xFF in every
-;  byte, so "all 512 bytes are 0xFF" is a real data-path check on a blank chip.
-;  A broken read (dropped SPI byte, wrong address, stuck MISO low) shows up as
-;  something other than 0xFF.
+;  Reads AND writes are implemented, so this exercises both. The key trick for
+;  the read path: an erased flash reads 0xFF in every byte, so "all N bytes are
+;  0xFF" is a real data-path check rather than a return-code check. A broken read
+;  (dropped SPI byte, wrong address, stuck MISO low) shows up as something other
+;  than 0xFF.
 ;
-;  Writes are expected to REPORT write-protect, not to hang or silently succeed.
+;  Every 0xFF test therefore has to read a region NOTHING ELSE WRITES. Cylinder
+;  30 is that region: DOS allocates from the start of the partition, and the
+;  write tests here use cylinder 0. Both tests that once read elsewhere -- test 2
+;  from LBA 0, test 3 from the block tests 5-7 fill -- started failing as soon as
+;  the disk was really used, which looked like hardware faults and was not.
+;
+;  Tests 6 and 7 are the valuable ones: 6 forces an eviction to prove the flush
+;  reaches flash, and 7 asserts the dirty flag is clear when AH=03 returns. Tests
+;  5 and 6 pass even when writes are never committed, because they force the
+;  eviction themselves -- which is exactly the bug that lost an FDISK partition.
 ;
 ;  Build:  nasm -f bin hdtest.asm -o hdtest.com
 ; ============================================================================
 
         org  0x100
         bits 16
+        CPU  8086               ; mandatory: see docs/gotchas.md
 
 HDD     equ 0x80
 BUF1    equ 0x4000              ; 4 KB
@@ -84,9 +94,24 @@ start:
         call fail
 
         ; ---------------- 2: erased flash must read 0xFF ----------------
+        ; Does its OWN read, of a single sector DOS never touches. It used to
+        ; just inspect the buffer test 1 left behind -- but test 1 reads LBA 0,
+        ; and the moment FDISK wrote a partition table there this test could
+        ; never pass again. Same staleness bug as test 3 had, same fix: read
+        ; somewhere the rest of the system does not write.
+        ; C30/H3/S24 = LBA 3959, just below the range test 3 reads.
 .t2:
         mov  dx, msg_t2
         call puts
+        mov  di, BUF1
+        mov  cx, 512
+        call clearbuf
+        mov  ax, 0x0201         ; AH=02 read, AL=1 sector
+        mov  cx, 0x1E18         ; C=30, S=24
+        mov  dx, 0x0380         ; H=3, drive 80
+        mov  bx, BUF1
+        int  0x13
+        jc   .t2_bad
         mov  si, BUF1
         mov  cx, 512
         call all_ff
