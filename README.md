@@ -142,6 +142,37 @@ Gertieboard is named after my father, **Geert**, known to everyone as
 
 > _Personal note to be expanded by the author._
 
+## Contributing
+
+Contributions are welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)**. By opening a
+pull request you agree that your contribution is licensed under the MIT Licence, the
+same as everything else here. No CLA, no paperwork.
+
+If you are looking for somewhere to start, [docs/status.md](docs/status.md) lists what
+is planned and what the actual obstacle is for each item. Read
+[docs/gotchas.md](docs/gotchas.md) first regardless — it is short and it will save you
+days.
+
 ## Licence
 
-Not yet chosen.
+[MIT](LICENSE) — do what you like with it, keep the copyright notice, and it comes with
+**no warranty of any kind**. This is a hobby computer built from a real CPU, an FPGA and
+a soldering iron; if you build one, you build it at your own risk, and nothing here is
+fit for any purpose beyond having fun with it.
+
+### Third-party content
+
+The licence covers the work in this repository. A few things in or around the project
+are **not** mine to license, and are handled as follows:
+
+| | |
+|---|---|
+| **Disk images, DOS, games** | Not in the repository — `*.img` and `*.IMA` are gitignored. Bring your own. |
+| **Reference BIOS disassembly** | `tools/philips.asm` is a disassembly of a commercial BIOS kept locally for comparison. Gitignored, never committed, and no code from it is in this BIOS. |
+| **`tools/font8x8.bin`** | An 8×8 character font, squashed down from the FPGA's 8×16 text font. Bitmap fonts of this kind are generally not copyrightable, but the provenance is not documented — treat it as replaceable if that matters to you. |
+| **Tool executables** | `nasm.exe`, `ndisasm.exe` and similar are gitignored. Install your own. |
+| **The boot screen** | Deliberately styled after a Philips P3105 and it says so. The BIOS underneath is written from scratch. |
+
+The board design files are not in this repository. If they are added later, the natural
+pairing for hardware is [CERN-OHL-P](https://cern-ohl.web.cern.ch/), which is the
+permissive hardware licence in the same spirit as MIT.
