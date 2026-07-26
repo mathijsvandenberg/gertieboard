@@ -175,3 +175,4 @@ The floppy image is still served over serial in either case.
 - [fdc8272](modules/fdc8272.md) — cylinder `0xFF` and the host protocol
 - [BIOS](bios.md) — what runs after the hand-off
 - [Building](building.md) — `mkjic.sh` and programming
+- [Status and roadmap](status.md) — the flash fallback is the one open item

@@ -19,6 +19,9 @@
 
 ## Practical
 
+- **[Status and roadmap](status.md)** — what works today, the one thing that does
+  not, and what is planned (USB keyboard, AdLib/Sound Blaster, EGA, USB storage)
+  with the real obstacle for each.
 - **[Building](building.md)** — Quartus and assembler toolchains, the build
   scripts, and programming the FPGA and its configuration flash.
 - **[Tools](tools.md)** — DOS diagnostics (`HDTEST`, `MEMTEST`, `RAMSPEED`,

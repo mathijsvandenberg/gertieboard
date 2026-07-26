@@ -80,8 +80,9 @@ kept being served. Every fix appeared to change nothing.
 **A `grep` that matches nothing returns failure.** Never chain a build step after one.
 
 Compounding it: the host loader (`floppy_host.py`) reads the BIOS **once at startup**, so
-a rebuild is ignored until it is restarted. GertieBoardLoader watches the file and
-reloads automatically.
+a rebuild is ignored until it is restarted.
+[GertieBoardLoader](https://github.com/mathijsvandenberg/gertieboardloader) watches the
+file and reloads automatically.
 
 **Fixes:** [`tools/mkbios.sh`](../tools/mkbios.sh) and
 [`tools/mkjic.sh`](../tools/mkjic.sh) do everything under `set -e` and then *verify the
@@ -260,4 +261,5 @@ or the write side is at fault.
 
 - [Building](building.md) — the scripts and guards these lessons produced
 - [Tools](tools.md) — the diagnostics
+- [Status and roadmap](status.md) — the open item, in context
 - [Architecture](architecture.md)

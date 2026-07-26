@@ -9,9 +9,12 @@ The board has no floppy drive and no ROM, so a host program supplies both. It se
 
 ### GertieBoardLoader (current)
 
-A C# WinForms application: `~/source/repos/GertieBoardLoader`. It has a
-`FileSystemWatcher` on both the image and the BIOS file, so **a rebuild is picked up
-automatically** — no restart needed.
+**<https://github.com/mathijsvandenberg/gertieboardloader>**
+
+A C# WinForms application. It has a `FileSystemWatcher` on both the image and the BIOS
+file, so **a rebuild is picked up automatically** — no restart needed. That single
+detail is what makes BIOS work bearable; see the `floppy_host.py` warning below for
+what the alternative costs.
 
 ### floppy_host.py (superseded)
 
@@ -172,4 +175,5 @@ Two rules, both learned the hard way:
 
 - [Building](building.md) — how to assemble these and get them onto the floppy image
 - [Fixed disk](fixed-disk.md), [BIOS](bios.md) — what they test
+- [Status and roadmap](status.md) — what is verified working
 - [Gotchas](gotchas.md)
