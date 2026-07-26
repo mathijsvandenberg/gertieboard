@@ -22,6 +22,7 @@ marketing: if something is listed as working it has been run on hardware.
 | **PC speaker** | Timer channel 2 gated through the PPI |
 | **640 KB RAM** | All 640 KB reported to DOS; the disk write buffer sits in M9K outside it — [mem_hybrid](modules/mem_hybrid.md) |
 | **Standalone FPGA config** | `.jic` in the DE0-Nano's EPCS16, no JTAG needed at power-on — [building](building.md) |
+| **USB host, full speed** | Enumerates a mass-storage device: descriptor, SET_ADDRESS, descriptor again at the new address — [usb_host](modules/usb_host.md) |
 | **Runs real software** | Alley Cat, Digger, Sopwith, the PC-DOS utilities |
 
 ## Not working yet
@@ -35,25 +36,39 @@ needs one for the floppy.
 
 ## Planned
 
-Roughly in the order they are likely to happen. Two budgets to keep in mind: **52 % of
+Roughly in the order they are likely to happen. Two budgets to keep in mind: **60 % of
 the logic elements** and **70 % of the 608 Kbit of M9K** are already committed. Memory is
-the tighter of the two, so several of these are memory problems before they are logic
-problems.
+still the tighter of the two, so several of these are memory problems before they are
+logic problems.
+
+### USB mass storage
+
+**The host controller is done and enumerating** — see [`usb_host`](modules/usb_host.md).
+What remains is entirely software, built on transactions the hardware already performs:
+
+- `GET_DESCRIPTOR` for the configuration, to find the bulk IN/OUT endpoints
+- `SET_CONFIGURATION`
+- Bulk-Only Transport: the 31-byte Command Block Wrapper, the data phase, the 13-byte
+  Command Status Wrapper, and the endpoint-toggle bookkeeping across all of them
+- SCSI: `INQUIRY`, `READ CAPACITY(10)`, `READ(10)`, `WRITE(10)`
+- then hang it off the existing `INT 13h` fixed-disk path in place of the SPI flash
+
+That last step is the reason this is now tractable rather than daunting: the `INT 13h`
+side already exists and is proven against the [SPI flash](fixed-disk.md), so joining a
+USB stick to it is a different backing store behind an interface DOS already uses, not
+new BIOS surface.
 
 ### USB keyboard
 
-Both USB ports on the top board are wired **straight to FPGA pins** as raw `D+`/`D-`
-pairs — [`USB0_DP`/`USB0_DM`](pinout.md#assigned-but-unused) and `USB1_*`. There is no
-host-controller chip, so this means a soft USB host in fabric.
+The easy one now that the SIE exists. A HID boot-protocol keyboard is one interrupt
+endpoint polled every 10 ms with fixed 8-byte reports, and
+[`ps2_kbd_ppi`](modules/ps2_kbd_ppi.md) already does the hard part downstream — HID usage
+codes to XT scancodes is the same class of translation it performs today, and the
+PPI-side interface would not change.
 
-A low-speed (1.5 Mbps) host doing nothing but enumerate one HID boot-protocol keyboard
-is the tractable version: fixed 8-byte reports, a single interrupt endpoint, polled at
-10 ms. The existing [`ps2_kbd_ppi`](modules/ps2_kbd_ppi.md) already does the hard part
-downstream — HID usage codes to XT scancodes is the same class of translation it does
-now, and the PPI-side interface would not change.
-
-Needs: a 12 MHz-domain bit-level SIE, NRZI and bit-stuffing, CRC5/CRC16, and enough of
-the enumeration state machine to reach `SET_PROTOCOL(boot)`.
+One caveat: most keyboards are **low speed** (1.5 Mbps) and `usb_host` is full-speed
+only. So this needs either a low-speed mode in the SIE — a different bit rate, and
+keep-alive instead of SOF — or a full-speed keyboard.
 
 ### Sound Blaster / AdLib
 
@@ -88,21 +103,6 @@ A useful intermediate step is **EGA's 640×200×16 mode alone** (128 KB, two pla
 worth of pressure rather than four) or a plane-per-M9K-block layout at reduced colour
 depth, to get the register model and the latch path proven before taking on the
 bandwidth problem.
-
-### USB mass storage
-
-Listed for completeness, but this is the hardest item here and the one with the least
-favourable ratio of effort to payoff.
-
-A USB HDD or stick is full-speed at minimum (12 Mbps), needs bulk-only transport, SCSI
-command wrapping (`INQUIRY`, `READ CAPACITY`, `READ(10)`, `WRITE(10)`), and a real
-enumeration stack — a considerably larger soft host than a HID keyboard, driven from
-raw pins with no PHY. The 2 MB SPI-flash [fixed disk](fixed-disk.md) already covers the
-"storage that survives a reboot" case, so the honest motivation is capacity and the
-convenience of moving files on a stick, not capability.
-
-If it happens, doing the USB keyboard first is the right order: it builds the SIE, the
-CRCs and the enumeration machinery that this would reuse.
 
 ### Publish the schematics
 

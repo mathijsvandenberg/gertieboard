@@ -42,6 +42,7 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
 - **Floppy** served over serial from a host loader
 - **Fixed disk** (2 MB) backed by the on-board SPI flash — FDISK and FORMAT work
 - PC speaker, 8253 timer, 8259 interrupt controller, 8237 DMA, 8255 PPI
+- **USB host** (full speed, in fabric) — enumerates a mass-storage device
 - 640 KB RAM, and the FPGA configures itself from its own flash at power-on
 - Runs real software: Alley Cat, Digger, Sopwith, PC-DOS utilities
 
@@ -49,10 +50,10 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
 
 | | Planned |
 |---|---|
-| **USB keyboard** | Both USB ports go straight to FPGA pins, so this means a soft low-speed host — the scancode translation already exists |
+| **USB mass storage** | The host controller enumerates already; what is left is Bulk-Only Transport and SCSI in software, then hanging it off the existing `INT 13h` path |
+| **USB keyboard** | The SIE exists now, so mostly a matter of low-speed support — most keyboards are 1.5 Mbps |
 | **AdLib / Sound Blaster** | The DMA controller and PIC are already there and proven; an OPL2 at `0x388` is the self-contained first step |
-| **EGA** | Wants 256 KB of planar video memory, which is four times the on-chip RAM this device has — so it has to be PSRAM-backed |
-| **USB mass storage** | The hardest of the four, and the one the SPI-flash disk already partly covers |
+| **EGA** | Wants 256 KB of planar video memory, four times the on-chip RAM this device has — so it has to be PSRAM-backed |
 
 One thing is **known broken**: the BIOS copy in flash verifies byte-for-byte but does
 not boot, so a host is still needed at power-on.

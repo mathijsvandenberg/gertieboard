@@ -7,6 +7,14 @@
 #   c2 (clk[2]) = 1.19 MHz  8253 counter clock (50/42, ~XT's 1.193182)
 #   c3 (clk[3]) = 50   MHz  RAM / system
 #
+# A SECOND PLL (pll48_1) makes 48 MHz for the USB SIE. It is derived from the
+# same 50 MHz input but is NOT integer-related to the others (24/25), so it
+# gets its own asynchronous group. Leaving it out of the groups is what put
+# -2.483 ns of setup slack on c0: the analyser paired 5 MHz launches with
+# 48 MHz latches and took the worst edge alignment, right across the domain
+# crossing (TNS -4474 ns). Nothing was really broken -- but negative slack is
+# what stalled this project for years, so it does not get to sit there.
+#
 # Key points:
 #   * The PLL outputs are integer-related, so they are timed TOGETHER, not
 #     declared asynchronous (that was the original bug that left the
@@ -34,10 +42,15 @@ derive_clock_uncertainty
 # -----------------------------------------------------------------------------
 # Clock groups
 #   - VGA pixel clock (c1): its own async domain (framebuffer BRAM handles CDC)
+#   - USB 48 MHz: its own async domain. usb_host crosses GO as a toggle
+#     through a three-stage synchroniser, samples its command registers only
+#     while the engine is idle, and moves packet data through dual-port
+#     buffers never accessed from both sides at once -- BUSY enforces that.
 #   - everything else: synchronous, timed together
 # -----------------------------------------------------------------------------
 set_clock_groups -asynchronous \
     -group { pll1|altpll_component|auto_generated|pll1|clk[1] } \
+    -group { pll48_1|altpll_component|auto_generated|pll1|clk[0] } \
     -group { CLOCK50 \
              pll1|altpll_component|auto_generated|pll1|clk[0] \
              pll1|altpll_component|auto_generated|pll1|clk[2] \

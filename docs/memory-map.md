@@ -68,6 +68,14 @@ serves everything below `0x08000`. `vga` independently decodes
 | `0x9A` | [flash](modules/flash.md) | W | SPI control — bit 0 = `/CS` (0 = assert) |
 | `0xE2` | [bootrom](modules/bootrom.md) | W | bit 0 = 1 disables the boot ROM overlay |
 | `0xE4` | [ctrl_reg](modules/ctrl_reg.md) | W | PSRAM timing: `SCK_DIV` (2:0), `RD_LAT` (6:3) |
+| `0xE8` | [usb_host](modules/usb_host.md) | R/W | USB command / status |
+| `0xE9` | [usb_host](modules/usb_host.md) | W | USB device address |
+| `0xEA` | [usb_host](modules/usb_host.md) | R/W | W endpoint · R raw PID of the last packet received |
+| `0xEB` | [usb_host](modules/usb_host.md) | R/W | W TX length · R RX length |
+| `0xEC` | [usb_host](modules/usb_host.md) | R/W | Packet buffer, pointer auto-increments |
+| `0xED` | [usb_host](modules/usb_host.md) | R/W | Buffer pointer |
+| `0xEE` | [usb_host](modules/usb_host.md) | R/W | W port select / bus reset / SOF enable · R line state |
+| `0xEF` | [usb_host](modules/usb_host.md) | R | USB frame counter, low byte |
 | `0x3D8` | [vga](modules/vga.md) | W | CGA mode control |
 | `0x3D9` | [vga](modules/vga.md) | W | CGA colour select |
 | `0x3DA` | [cga_status](modules/cga_status.md) | R | CGA status — bit 0 blanking, bit 3 vertical retrace |

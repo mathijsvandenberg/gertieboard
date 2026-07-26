@@ -139,17 +139,18 @@ Used by [`fdc8272`](modules/fdc8272.md) to fetch the BIOS image and floppy secto
 | `DBG[6]` | OUT | `PIN_D15` | tied `'0'` |
 | `DBG[7]` | OUT | `PIN_D14` | tied `'0'` |
 
-## Assigned but unused
+## USB
 
-These have pin assignments and (for USB0) top-level ports, but no logic behind
-them. `USB0_DP`/`USB0_DM` are held high-impedance.
+Driven by [`usb_host`](modules/usb_host.md). Raw D+/D− with the host-side 15K pulldowns
+on the board and **no series resistors** — see the caveat on that page. Only the selected
+port is driven; the other is held high-impedance.
 
-| Signal | Pin |
-|---|---|
-| `USB0_DP` | `PIN_T15` |
-| `USB0_DM` | `PIN_F13` |
-| `USB1_DP` | `PIN_B12` |
-| `USB1_DM` | `PIN_D12` |
+| Signal | Dir | Pin |
+|---|---|---|
+| `USB0_DP` | INOUT | `PIN_T15` |
+| `USB0_DM` | INOUT | `PIN_F13` |
+| `USB1_DP` | INOUT | `PIN_B12` |
+| `USB1_DM` | INOUT | `PIN_D12` |
 
 ## Timing constraints
 

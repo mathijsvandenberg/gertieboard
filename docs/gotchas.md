@@ -95,6 +95,110 @@ Beware false positives — `0F` is also a common `jnz` displacement. Confirm wit
 
 ---
 
+## A bus strobe is a level, not a pulse
+
+`busdecode` hands peripherals the CPU's strobes combinationally:
+
+```vhdl
+IO_WR <= NOT(NOT WR AND IOM);
+```
+
+So `WR` stays low for the **whole** I/O write cycle -- several `CLK` edges at 5 MHz. Any
+register that acts on the *level* therefore fires several times per write.
+
+For an idempotent register that is harmless, which is why it went unnoticed for years:
+writing the same value to `sevenseg` or `ctrl_reg` twice changes nothing. It is fatal for
+anything with a side effect:
+
+| Register | What repeated firing did |
+|---|---|
+| auto-incrementing data port | stored each byte into several slots, pointer ran away |
+| a GO bit implemented as a toggle | even number of edges = transaction never starts |
+| auto-incrementing read port | skipped bytes |
+
+The USB host's 8-byte SETUP packet went out as duplicated garbage, and the device
+answered **STALL** -- which is the correct response to a malformed request. The hardware
+was behaving better than we were.
+
+**`flash.vhd` had it right from the first version:**
+
+```vhdl
+IF (wr_prev = '1' AND WR = '0') THEN   -- falling edge: fires exactly once
+  ...
+END IF;
+wr_prev <= WR;
+```
+
+Use the falling edge for writes, and the **rising** edge for a read auto-increment --
+advancing on the falling edge changes the data underneath the cycle still reading it.
+
+**The lesson that stings:** the correct pattern was already in the repository, in a
+working peripheral, and the general principle was already written on this page under
+"Timing races in I/O sequences". Having the answer written down is not the same as
+applying it.
+
+---
+
+## Off-by-one-bit at the END of a serial packet
+
+The USB transmitter computes each bit's line level at a phase-counter wrap, and that
+level then sits on the wire through the *following* bit slot. Correct everywhere except
+the last bit of a packet, where jumping straight to EOP gave it **one clock instead of
+four**.
+
+Losing a single bit means the receiver never assembles the final byte. The visible
+result, per packet type:
+
+| Packet | What arrived |
+|---|---|
+| token | address/endpoint but no CRC5 byte |
+| data | payload but only half the CRC16 |
+| ACK | *nothing at all* -- the whole PID |
+
+A `T_TAIL` state that holds the final level for its own full bit time fixes all three.
+
+**Any bit-serial transmitter with this structure has the same trap at the tail.** The
+cheap check is to decode your own output and count the bytes.
+
+---
+
+## Polarity of a "previous state" register
+
+The NRZI receiver keeps `rx_prev`, the previous value of the sampled line. The sampled
+line here is `k := dm` -- **D minus**. Idle J has D− **low**, so `rx_prev` seeds to `'0'`.
+
+Seeding it to `'1'` -- thinking of it as "we came from the J state" -- made the very
+first SYNC bit decode as 1. Since SYNC ends at the first decoded 1, SYNC "completed"
+immediately and the entire packet shifted seven bits. The payload still arrived; it was
+just misaligned, so the PID looked like a valid-but-wrong value.
+
+**Naming a register after the abstraction (J/K) while storing the representation (a
+single line level) is how this happens.** One bit of initialisation, an entire packet
+wrong, and nothing in the source looks incorrect.
+
+It was found by modelling the state machine in Python and printing the decoded bit
+stream -- 40 lines of script against a rebuild-and-reflash cycle. See below.
+
+---
+
+## Simulate the state machine, not just the arithmetic
+
+Every USB bug above was found in Python before it was found on hardware, and the ones
+that were *not* modelled were the ones that reached the board:
+
+- CRC5 and CRC16 were checked against reference implementations first. Both were right
+  on the first hardware run, and the check caught a real bit-order error before the build.
+- The receiver and transmitter were then modelled cycle-accurately and fed generated
+  waveforms. That found the polarity bug and the missing tail bit.
+- The first transmitter model used a *simplified* byte stream instead of the VHDL's
+  actual literal-then-buffer sequencing -- so it missed the tail bug entirely on the
+  first pass. Modelling the wrong thing gives false confidence.
+
+**Model what the RTL actually does, then decode its output with an independently written
+decoder.** A loopback of two functions that share a misconception proves nothing.
+
+---
+
 ## Stale build artefacts
 
 A hand-built BIOS chain looked like this:

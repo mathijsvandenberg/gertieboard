@@ -37,17 +37,17 @@ in [`gertieboard.qsf`](../gertieboard.qsf).
 
 | Metric | Value |
 |---|---|
-| Logic elements | 11 525 / 22 320 (52 %) |
+| Logic elements | 13 450 / 22 320 (60 %) |
 | Memory bits | 425 984 / 608 256 (70 %) |
-| PLLs | 1 / 4 |
-| Pins | 76 / 154 |
-| Worst-case setup slack | +1.42 ns |
+| PLLs | 2 / 4 |
+| Pins | 78 / 154 |
+| Worst-case setup slack | +0.64 ns |
 | Worst-case hold slack | +0.36 ns |
-| Fitter warnings | 11 |
+| Fitter warnings | 7 |
 
-Where the logic goes, largest first: `fdc8272` 5881, `vga` 2047, `psram_ctrl` 1114,
-`dma8237` 725, `bootrom` 271, `m9k_mem` 50. The serial floppy controller is over half
-the design.
+Where the logic goes, largest first: `fdc8272` 5881, `vga` 2047, `usb_host` 1962,
+`psram_ctrl` 1114, `dma8237` 725, `bootrom` 271, `m9k_mem` 50. The serial floppy
+controller and the USB host together are more than half the design.
 
 A clean build is 0 errors with those warning counts. Every slack must be **positive** —
 negative slack on this design is not a rounding detail, it is the failure mode that

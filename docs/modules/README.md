@@ -33,6 +33,7 @@ entity ports, decoded addresses and behaviour.
 | Module | Instance | Clock | Function |
 |---|---|---|---|
 | [fdc8272](fdc8272.md) | `fdc1` | `c0` 5 MHz | Floppy controller, backed by a 1 Mbaud serial link to the host |
+| [usb_host](usb_host.md) | USB 1.1 full-speed host controller | I/O `0xE8`–`0xEF` |
 | [flash](flash.md) | `flash1` | `c0` 5 MHz | SPI byte engine for the on-board serial FLASH |
 | [ps2_kbd_ppi](ps2_kbd_ppi.md) | `inst3` | `c3` 50 MHz | PS/2 receiver, Set 2 → Set 1 translation, hardware Ctrl+Alt+Del |
 | [com1_stub](com1_stub.md) | `com1_stub1` | none | Answers COM1 probes as "absent" |

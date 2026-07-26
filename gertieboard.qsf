@@ -234,6 +234,8 @@ set_global_assignment -name VHDL_FILE vga.vhd
 set_global_assignment -name QIP_FILE pll.qip
 set_global_assignment -name SDC_FILE gertieboard.sdc
 set_global_assignment -name VHDL_FILE flash.vhd
+set_global_assignment -name VHDL_FILE usb_host.vhd
+set_global_assignment -name VHDL_FILE pll48.vhd
 set_global_assignment -name VHDL_FILE timer8253.vhd
 set_global_assignment -name VHDL_FILE int8259.vhd
 set_global_assignment -name VHDL_FILE ppi8255.vhd

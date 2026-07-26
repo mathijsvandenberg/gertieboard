@@ -6,7 +6,7 @@
 -- (no bit-ripping in the original); bit splitting happens inside modules.
 --
 -- Faithful to the schematic, including its quirks:
---   * DBG(7..2), USB0_DP/DM are undriven (were 'stuck at GND'/high-Z)
+--   * DBG(7..2) are undriven (were 'stuck at GND')
 --   * a second PLL (pll2) is instantiated but its outputs are unused
 ------------------------------------------------------------------------------
 LIBRARY IEEE;
@@ -55,6 +55,8 @@ ENTITY gertieboard IS
     CPU_AD         : INOUT std_logic_vector(7 downto 0);
     USB0_DP        : INOUT std_logic;
     USB0_DM        : INOUT std_logic;
+    USB1_DP        : INOUT std_logic;
+    USB1_DM        : INOUT std_logic;
     RAM_SIO        : INOUT std_logic_vector(3 downto 0);
     DBG            : OUT   std_logic_vector(7 downto 0)
   );
@@ -70,6 +72,8 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_c1                   : std_logic;
   SIGNAL n_c2                   : std_logic;
   SIGNAL n_c3                   : std_logic;
+  SIGNAL n_clk48       : std_logic;
+  SIGNAL n_usb_locked  : std_logic;
   SIGNAL n_clock50              : std_logic;
   SIGNAL n_cpu_a                : std_logic_vector(19 downto 8);
   SIGNAL n_cpu_ale              : std_logic;
@@ -388,14 +392,30 @@ BEGIN
       UART_TX              => n_uart_tx
     );
 
-  pll2 : ENTITY work.pll
+  -- 48 MHz for the USB SIE. This replaces the dead `pll2` the schematic
+  -- conversion left behind, which had every output OPEN.
+  pll48_1 : ENTITY work.pll48
     PORT MAP (
       inclk0               => n_clock50,
-      c0                   => OPEN,
-      c1                   => OPEN,
-      c2                   => OPEN,
-      c3                   => OPEN,
-      c4                   => OPEN
+      c0                   => n_clk48,
+      locked               => n_usb_locked
+    );
+
+  usb1 : ENTITY work.usb_host
+    PORT MAP (
+      CLK                  => n_c0,
+      CLK48                => n_clk48,
+      LOCKED               => n_usb_locked,
+      RESET                => n_rst_out,
+      DATAIN               => n_cpu_wdata,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      USB0_DP              => USB0_DP,
+      USB0_DM              => USB0_DM,
+      USB1_DP              => USB1_DP,
+      USB1_DM              => USB1_DM
     );
 
   inst3 : ENTITY work.ps2_kbd_ppi
@@ -479,7 +499,6 @@ BEGIN
   DBG(7) <= '0';
   DBG(4) <= '0';
   DBG(5) <= '0';
-  USB0_DP <= 'Z';
-  USB0_DM <= 'Z';
+  -- USB0_DP/DM and USB1_DP/DM are driven by usb_host now.
 
 END structural;

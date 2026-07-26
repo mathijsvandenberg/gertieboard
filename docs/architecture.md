@@ -30,6 +30,7 @@ flowchart TB
             CST["cga_status<br/>0x3DA"]
             FDC["fdc8272<br/>0x3F2-0x3F7"]
             COM["com1_stub<br/>0x3F8-0x3FF"]
+            USB["usb_host<br/>0xE8-0xEF"]
         end
 
         subgraph MEMB["Memory bus"]
@@ -43,6 +44,7 @@ flowchart TB
 
     RAM[("PSRAM<br/>QPI, on the top board")]
     FL[("SPI FLASH<br/>IS25LP016D, 2 MB")]
+    DEV["USB device<br/>full speed, 12 Mbps"]
     MON["VGA monitor"]
     KB["PS/2 keyboard"]
     HOST["Host loader<br/>serial: BIOS + floppy"]
@@ -52,6 +54,7 @@ flowchart TB
     BD --> MEMB
     MH <--> RAM
     SPI <--> FL
+    USB <--> DEV
     VGA --> MON
     KB --> KBD
     KBD --> PPI
@@ -63,9 +66,9 @@ flowchart TB
 
 ## Clocks
 
-One PLL (`pll1`) divides the DE0-Nano's 50 MHz oscillator. A second instance
-(`pll2`) is present in the top level but every output is left unconnected — it is
-a leftover from the schematic era and Quartus optimises it away.
+One PLL (`pll1`) divides the DE0-Nano's 50 MHz oscillator; a second
+([`pll48`](modules/clkgen-pll.md#pll48--48-mhz-for-usb)) makes 48 MHz for the USB
+host. Two of the device's four PLLs are used.
 
 | Output | Divider | Frequency | Drives |
 |---|---|---|---|
@@ -74,6 +77,12 @@ a leftover from the schematic era and Quartus optimises it away.
 | `c2` | ÷42 | **1.1905 MHz** | `timer8253` — within 0.23 % of the XT's 1.193182 MHz |
 | `c3` | ÷1 | **50 MHz** | `mem_hybrid` (PSRAM), `ps2_kbd_ppi`, `cga_status` |
 | `c4` | — | unused | |
+
+`pll48` is separate because 48 MHz is 50 × 24/25 and therefore **not** integer-related
+to the others. All of `pll1`'s outputs use `multiply_by => 1`, so adding a 24/25 output
+would force a new VCO for the whole block and all four working domains would have to be
+re-derived from it. It is also its own asynchronous clock group in the SDC — omitting
+that put −2.483 ns of setup slack on `c0`.
 
 > **Reading the PLL settings:** in `altpll`, `inclk0_input_frequency` is the input
 > **period in picoseconds** — `20000` means 20 ns, i.e. 50 MHz. Misreading it as
@@ -193,10 +202,13 @@ These look like bugs but are intentional, carried over faithfully from the
 schematic the top level was converted from:
 
 - `DBG(7..2)` are tied low; `DBG(0)`/`DBG(1)` are debug taps of `PS2CLK`/`PS2DAT`
-- `USB0_DP` / `USB0_DM` are left high-impedance (no USB support)
-- `pll2` is instantiated with all outputs unconnected
+- `ppi8255`'s unused outputs (below) — genuine XT features not implemented
 - `ppi8255`'s `ENABLE_PARITY_N`, `ENABLE_IOCHK_N` and `KBD_CLOCK_HOLD` outputs are
   `OPEN` — XT features not implemented
+
+Two former quirks are gone: `USB0_DP`/`USB0_DM` are now driven by
+[`usb_host`](modules/usb_host.md), and the dead `pll2` was replaced by the 48 MHz
+`pll48` that feeds it.
 - `SPEAKER_MUTE` is a constant in the top level for silencing the buzzer during
   late-night work
 

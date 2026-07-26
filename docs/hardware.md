@@ -75,12 +75,16 @@ It only restarts that cycle when the written value **changes**, which is why a s
 display cannot distinguish "halted here" from "looping here". See
 [`sevenseg`](modules/sevenseg.md).
 
-### USB, for later
+### USB
 
-Both ports are already routed to FPGA pins (`USB0_DP`/`USB0_DM`, `USB1_*`) but nothing
-drives them yet — `USB0_*` is held high-impedance in the top level. There is no host
-controller chip in between, so using them means a soft USB host in fabric. See
-[status](status.md#usb-keyboard).
+Both ports are raw `D+`/`D-` on FPGA pins (`USB0_DP`/`USB0_DM`, `USB1_*`), with the
+host-side 15K pulldowns on the board and no host-controller chip in between — so the
+serial interface engine lives in fabric. [`usb_host`](modules/usb_host.md) drives them
+and enumerates a full-speed device.
+
+> **No series resistors** on D+/D-. USB wants ~22-33 ohm of source termination and there
+> is none, so the lines are driven straight from 3.3 V LVTTL pins. It works on the bench;
+> it is the first thing to suspect if a longer cable brings intermittent CRC errors.
 
 ## The DE0-Nano
 

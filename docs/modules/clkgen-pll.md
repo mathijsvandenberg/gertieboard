@@ -95,6 +95,32 @@ together.
 > silently drops the generated clock and the clock groups from analysis — timing then
 > "passes" while being under-constrained. See [gotchas](../gotchas.md).
 
+## pll48 — 48 MHz for USB
+
+Source: [`pll48.vhd`](../../pll48.vhd) · Instance `pll48_1`
+
+```vhdl
+clk0_multiply_by => 24,
+clk0_divide_by   => 25,       -- 50 * 24 / 25 = 48 MHz exactly
+```
+
+USB full speed is 12 Mbps and a soft SIE has to oversample it. 4× is the usual choice —
+fast enough to resynchronise on every transition, slow enough to close timing easily —
+and 4 × 12 = 48. The ratio is exact, so there is no fractional accumulator and no phase
+error building up across a long packet.
+
+The alternatives were worse. 50 MHz direct gives 4.1667 samples per bit and needs a
+fractional DPLL. 24 MHz (2×) leaves nowhere to sample.
+
+It is a **second PLL** rather than another `pll1` output, for the reason in
+[architecture](../architecture.md#clocks): `pll1`'s outputs all use `multiply_by => 1`
+and share a VCO that is a plain multiple of 50 MHz. It also replaces the dead `pll2`
+that the schematic conversion left behind with every output `OPEN`.
+
+`locked` is wired through to [`usb_host`](usb_host.md) and readable from software, so a
+test program can distinguish "the PLL never came up" from "the PLL is fine but nothing
+is answering".
+
 ## Related
 
 - [Architecture](../architecture.md#clocks) — the clock tree in context

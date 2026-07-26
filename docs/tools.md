@@ -145,6 +145,47 @@ in graphics mode.
 > **not** cyan / magenta / white. Getting that expectation wrong once caused a correct
 > result to be reported as a failure.
 
+### USBTEST — USB host controller
+
+Nine checks, ordered by what can actually fail, stopping at the first failure rather
+than reporting a cascade of consequences. Expected with a stick plugged into USB0:
+
+```
+1  registers respond            : PASS
+1b buffer pointer per write     : PASS
+2  48 MHz PLL locked            : PASS
+3  idle line state (unplugged)  : PASS
+   D+/D- read 01 — idle J: full-speed device attached
+4  device detected              : PASS
+5  SOF generator running        : PASS
+6  bus reset, device survives   : PASS
+7  GET_DESCRIPTOR at address 0  : PASS
+8  SET_ADDRESS(1)               : PASS
+9  full descriptor at address 1 : PASS
+   VID:PID = 08EC:0008
+   class   = 00 (per interface)
+   ep0 max packet = 40
+```
+
+`class = 00` is correct for mass storage — the class is declared at the *interface*
+level, not the device level. `ep0 max packet = 40` (64 bytes) confirms full speed.
+
+Two of these earn their place:
+
+**1b** writes 8 bytes and checks the buffer pointer reads exactly 8. A pure software
+check of the register interface, and it fails loudly if a write fires more than once per
+bus cycle — which is what corrupted the first working SETUP packet. Much better than
+discovering it as a STALL five tests later.
+
+**3** interprets the line state rather than just testing it: `00` is a bare bus, `01` a
+full-speed device holding D+ up through its 1.5K, `02` the same for low speed. Only `03`
+is impossible, and that is the reading that means the pulldowns or the wiring are wrong.
+
+> When a transfer fails, the raw **PID** of whatever came back is printed next to the
+> decoded status, and the message says which *stage* failed. "The SETUP stage failed" and
+> "the SETUP stage was ACKed but the IN data stage failed" point at completely different
+> halves of the problem.
+
 ### BIOSFLSH — write the BIOS to flash
 
 Copies the running BIOS (`F000:0000`, 64 KB) into flash `0x1F0000` through ordinary

@@ -46,6 +46,7 @@
 | [dma8237](modules/dma8237.md) | 8237A DMA controller and bus master | I/O `0x00`–`0x0F` |
 | [fdc8272](modules/fdc8272.md) | Floppy controller over a serial link to the host | I/O `0x3F2`–`0x3F7` |
 | [flash](modules/flash.md) | SPI engine for the on-board serial FLASH | I/O `0x98`–`0x9A` |
+| [usb_host](modules/usb_host.md) | USB 1.1 full-speed host controller | I/O `0xE8`–`0xEF` |
 | [ps2_kbd_ppi](modules/ps2_kbd_ppi.md) | PS/2 keyboard → XT scancodes, hardware Ctrl+Alt+Del | — |
 | [bootrom](modules/bootrom.md) | 1 KB boot ROM overlay and its enable flag | I/O `0xE2` |
 | [ctrl_reg](modules/ctrl_reg.md) | Runtime PSRAM timing control | I/O `0xE4` |
