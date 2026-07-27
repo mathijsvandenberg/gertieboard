@@ -1267,8 +1267,23 @@ _int09:
     out 0x61, al
     mov al, ah
     out 0x61, al
-    # --- handle shift/ctrl/alt make & break ---
+    # --- E0 prefix ------------------------------------------------------
+    # An extended key's second byte REUSES ordinary scancodes -- up arrow is
+    # E0 48, and 0x48 on its own is numpad 8 -- so the prefix has to be known
+    # before anything below decides what a code means. Dropping it (0xE0 is
+    # past the end of the table) is why the arrow keys typed digits.
     mov al, bl
+    cmp al, 0xE0
+    jne .k_notpfx
+    or byte ptr [0x96], 0x02     # flags 3 bit 1: "last code was E0". KEYB and
+    jmp .k_eoi                   # other layout drivers read this too.
+.k_notpfx:
+    test byte ptr [0x96], 0x02
+    jz .k_plain
+    and byte ptr [0x96], 0xFD    # consume it
+    jmp .k_ext
+.k_plain:
+    # --- handle shift/ctrl/alt make & break ---
     cmp al, 0x2A
     je .k_shift_on
     cmp al, 0x36
@@ -1338,6 +1353,80 @@ _int09:
     pop ax
     iret
 
+## Extended keys, reached only with the E0 prefix consumed. DS = BDA.
+.k_ext:
+    # A keyboard brackets the navigation keys with FAKE shift codes when Num
+    # Lock is on (E0 2A ... E0 AA). Taken for real shift presses they corrupt
+    # the shift state on every arrow keypress, so they are discarded here.
+    cmp al, 0x2A
+    je .k_eoi
+    cmp al, 0xAA
+    je .k_eoi
+    cmp al, 0x36
+    je .k_eoi
+    cmp al, 0xB6
+    je .k_eoi
+    # Right ctrl and right alt drive the same 40:17 bits as the left ones, and
+    # additionally the right-hand bits of flags 3 -- which is how a layout
+    # driver tells AltGr from a plain Alt.
+    cmp al, 0x1D
+    jne .k_ext_n1d
+    or byte ptr [0x17], 0x04
+    or byte ptr [0x96], 0x04
+    jmp .k_eoi
+.k_ext_n1d:
+    cmp al, 0x9D
+    jne .k_ext_n9d
+    and byte ptr [0x17], 0xFB
+    and byte ptr [0x96], 0xFB
+    jmp .k_eoi
+.k_ext_n9d:
+    cmp al, 0x38
+    jne .k_ext_n38
+    or byte ptr [0x17], 0x08
+    or byte ptr [0x96], 0x08
+    jmp .k_eoi
+.k_ext_n38:
+    cmp al, 0xB8
+    jne .k_ext_nb8
+    and byte ptr [0x17], 0xF7
+    and byte ptr [0x96], 0xF7
+    jmp .k_eoi
+.k_ext_nb8:
+    test al, 0x80
+    jnz .k_eoi                   # any other extended break code
+    # Ctrl+Alt+Del from the dedicated Delete key, not just the numpad one
+    cmp al, 0x53
+    jne .k_ext_key
+    mov ah, [0x17]
+    and ah, 0x0C
+    cmp ah, 0x0C
+    jne .k_ext_key
+    jmp _reboot
+.k_ext_key:
+    cmp al, 0x1C                 # numpad Enter is a real Return ...
+    jne .k_ext_slash
+    mov ah, 0x1C
+    mov al, 0x0D
+    call kb_put
+    jmp .k_eoi
+.k_ext_slash:
+    cmp al, 0x35                 # ... and the grey slash a real '/'
+    jne .k_ext_nav
+    mov ah, 0x35
+    mov al, '/'
+    call kb_put
+    jmp .k_eoi
+.k_ext_nav:
+    # Arrows, Home/End, PgUp/PgDn, Insert, Delete: reported the way every PC
+    # BIOS reports an extended key -- ASCII 0, scancode in AH -- so software
+    # recognises them as navigation instead of reading the numpad digit that
+    # shares the code.
+    mov ah, al
+    xor al, al
+    call kb_put
+    jmp .k_eoi
+
 # kb_put: AX = (scancode<<8 | ascii) into ring buffer  (DS=BDA)
 kb_put:
     push bx
@@ -1353,9 +1442,14 @@ kb_put:
     je .kp_full
     mov [bx], ax             # store key
     mov [0x1C], si          # advance tail
+    pop si
+    pop bx
+    clc                      # CF answers "did it land", for INT 16h AH=05
+    ret
 .kp_full:
     pop si
     pop bx
+    stc
     ret
 
 ## =====================================================================
@@ -1385,6 +1479,8 @@ _int16:
     je .kb_peek                 # check enhanced keystroke  -> as AH=01
     cmp ah, 0x12
     je .kb_flags_ext            # enhanced shift status: AH is REAL data
+    cmp ah, 0x05
+    je .kb_push                 # push a keystroke
     iret
 .kb_read:
     push ds
@@ -1433,6 +1529,26 @@ _int16:
     pop bx
     pop ds
     iret
+## AH=05: place a keystroke in the buffer. Layout drivers and command-line
+## recall use this to inject translated or replayed keys. Unimplemented, it
+## fell through to a bare iret: the key vanished and AL never answered.
+##   entry  CH = scancode, CL = ASCII     exit  AL = 0 stored, 1 buffer full
+.kb_push:
+    push ds
+    push bx
+    mov bx, BDA
+    mov ds, bx
+    mov ah, ch
+    mov al, cl
+    call kb_put
+    mov al, 0
+    jnc .kbp_out
+    mov al, 1
+.kbp_out:
+    pop bx
+    pop ds
+    iret
+
 .kb_flags:
     push ds
     mov ax, BDA
