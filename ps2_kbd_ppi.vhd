@@ -226,6 +226,17 @@ architecture rtl of ps2_kbd_ppi is
     ----------------------------------------------------------------------------
     signal f0_pending : std_logic := '0';   -- next code is a break
     signal e0_pending : std_logic := '0';   -- next code is E0-extended
+    -- One FIFO write per clock. Enqueueing the E0 prefix and its code in the
+    -- SAME clock is legal VHDL but does not survive synthesis: two writes to
+    -- different elements of one array signal collapsed into a single write
+    -- using the last index, so the prefix never landed and its slot kept
+    -- whatever stale scancode was there before. On screen that made the arrow
+    -- keys emit a random old key followed by the numeric-keypad code they
+    -- share. The prefix goes out now, the code one clock later -- PS/2 bytes
+    -- are ~1 ms apart and this clock is 50 MHz, so the next byte cannot
+    -- overtake it.
+    signal pend_valid : std_logic := '0';
+    signal pend_byte  : std_logic_vector(7 downto 0) := (others => '0');
 
     ----------------------------------------------------------------------------
     -- scancode FIFO (dual-pointer, one extra wrap bit; no shared count)
@@ -379,8 +390,9 @@ begin
     -- enqueued in the same clock.
     --==========================================================================
     xlat_proc : process(clk)
-        variable wrp_v : unsigned(FW downto 0);
-        variable s1    : std_logic_vector(7 downto 0);
+        variable wrp_v  : unsigned(FW downto 0);
+        variable s1     : std_logic_vector(7 downto 0);
+        variable code_v : std_logic_vector(7 downto 0);
 
         procedure push(b : std_logic_vector(7 downto 0)) is
             variable full_v : boolean;
@@ -403,11 +415,15 @@ begin
                 wptr       <= (others => '0');
                 f0_pending <= '0';
                 e0_pending <= '0';
+                pend_valid <= '0';
                 ctrl_held  <= '0';
                 alt_held   <= '0';
             else
                 wrp_v := wptr;
-                if rx_valid = '1' then
+                if pend_valid = '1' then
+                    push(pend_byte);          -- the code owed from last clock
+                    pend_valid <= '0';
+                elsif rx_valid = '1' then
                     case rx_byte is
                         when x"F0" =>                 -- break prefix
                             f0_pending <= '1';
@@ -424,18 +440,24 @@ begin
                                 s1 := s2_to_s1(rx_byte);
                             end if;
                             if s1 /= x"00" then
+                                if f0_pending = '1' then
+                                    code_v := s1 or x"80";   -- break
+                                else
+                                    code_v := s1;            -- make
+                                end if;
+                                dbg_s1_r <= code_v;
                                 if e0_pending = '1' then
-                                    push(x"E0");
+                                    push(x"E0");             -- prefix now,
+                                    pend_byte  <= code_v;    -- code next clock
+                                    pend_valid <= '1';
+                                else
+                                    push(code_v);
                                 end if;
                                 if f0_pending = '1' then
-                                    push(s1 or x"80");   -- break
-                                    dbg_s1_r <= s1 or x"80";
                                     -- release of ctrl / alt
                                     if s1 = x"1D" then ctrl_held <= '0'; end if;
                                     if s1 = x"38" then alt_held  <= '0'; end if;
                                 else
-                                    push(s1);            -- make
-                                    dbg_s1_r <= s1;
                                     if s1 = x"1D" then ctrl_held <= '1'; end if;
                                     if s1 = x"38" then alt_held  <= '1'; end if;
                                     -- Del pressed while both are down -> reset
