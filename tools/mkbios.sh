@@ -24,39 +24,56 @@ BASE="$(basename "$SRC" .s)"
 BIN="$BASE.bin"
 K64="$BASE.64k"
 
+# The BIOS grew past 8 KB when USB mass storage went in -- it was using 8191 of
+# 8192 bytes, one byte spare. 16 KB at 0xC000 is the next step up: make64k.py
+# already top-aligns a 16 KB image there, and the reset vector needs no change
+# because it jumps to the _post SYMBOL, not a hardcoded address.
+ROMSZ=16384
+ROMOFF=0xC000
+
+# ---------------------------------------------------------------------------
+# GNU as turns a symbol used BEFORE its .equ into a forward label reference, so
+# "cmp dl, HD_DRIVE" silently assembles as "cmp dl, [0x0001]" -- a compare
+# against memory instead of an immediate. The source looks perfect and only the
+# encoding is wrong. This has cost two debugging rounds already (HD_DRIVE, then
+# U_BUFSZ), so it is a build failure rather than something to remember.
+echo "== checking .equ ordering =="
+python3 tools_equcheck.py "$SRC" || exit 1
+
 echo "== assembling $SRC =="
 # `as`/`ld` come from WSL; -e _post only sets the (unused for a flat binary)
 # ELF entry, so ld's "cannot find entry symbol" note is expected and harmless.
 wsl bash -c "cd /mnt/c/altera/gertieboard/tools && \
   as --32 '$SRC' -o /tmp/$BASE.o && \
-  ld -m elf_i386 -Ttext=0xE000 --section-start=.reset=0xFFF0 \
+  ld -m elf_i386 -Ttext=$ROMOFF --section-start=.reset=0xFFF0 \
      --oformat=binary -e _post /tmp/$BASE.o -o '$BIN'"
 
 sz=$(wc -c < "$BIN")
-[ "$sz" -eq 8192 ] || { echo "FAIL: $BIN is $sz bytes, expected 8192"; exit 1; }
+[ "$sz" -eq "$ROMSZ" ] || { echo "FAIL: $BIN is $sz bytes, expected $ROMSZ"; exit 1; }
 echo "   $BIN = $sz bytes"
 
 echo "== expanding to 64 KB =="
 python3 make64k.py "$BIN" -o "$K64"
 
 echo "== verifying =="
-python3 - "$BIN" "$K64" <<'PY'
+python3 - "$BIN" "$K64" "$ROMOFF" <<'PY'
 import sys
 binf, k64f = sys.argv[1], sys.argv[2]
+off = int(sys.argv[3], 0)
 b = open(binf,'rb').read()
 d = open(k64f,'rb').read()
 fails = []
 if len(d) != 65536:                       fails.append(f"{k64f} is {len(d)} bytes, expected 65536")
-if d[0xE000:0x10000] != b:                fails.append("8 KB image is not placed at F-seg offset 0xE000")
+if d[off:0x10000] != b:                   fails.append(f"image is not at F-seg offset 0x{off:04X}")
 if d[0xFFF0:0xFFF2] != b'\xea\x00':       fails.append("reset vector at 0xFFF0 is not a far jump")
 if d[0xFFF3:0xFFF5] != b'\x00\xf0':       fails.append("reset vector does not target segment F000")
-if any(x != 0xFF for x in d[:0xE000]):    fails.append("fill below 0xE000 is not 0xFF")
+if any(x != 0xFF for x in d[:off]):       fails.append(f"fill below 0x{off:04X} is not 0xFF")
 # the .64k must be built from THIS .bin -- the bug this script prevents
 if fails:
     print("BUILD FAILED:")
     for f in fails: print("   -", f)
     sys.exit(1)
-print("   64 KB image OK: 8 KB at 0xFE000-0xFFFFF, reset vector",
+print(f"   64 KB image OK: {len(b)//1024} KB at 0x{0xF0000+off:05X}-0xFFFFF, reset vector",
       d[0xFFF0:0xFFF5].hex(), "fill 0xFF below")
 PY
 
