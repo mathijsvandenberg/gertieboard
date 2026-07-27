@@ -133,6 +133,14 @@ _post:
     mov word ptr es:[0x1C], KBBUF    # kbd buffer tail
     mov word ptr es:[0x80], KBBUF    # buffer start
     mov word ptr es:[0x82], KBEND    # buffer end
+    # Keyboard status flags 3 and 4. These MUST be deterministic: DOS 4 and
+    # later, KEYB.COM and anything enhanced-keyboard-aware read 0x96 for the
+    # "last code was E0/E1" and right-ctrl/right-alt bits, and 0x97 for the
+    # lock LEDs. The floppy handler used to keep its buffer pointer at 0x96,
+    # so after any disk access these held whatever offset was last read from
+    # -- phantom modifier keys, but only on the DOS versions that look.
+    mov byte ptr es:[0x96], 0
+    mov byte ptr es:[0x97], 0
     mov byte ptr es:[0x49], 0x03     # video mode 3
     mov word ptr es:[0x4A], 80       # columns
     mov word ptr es:[0x4C], 0x1000   # page size
@@ -1362,7 +1370,7 @@ _int16:
     cmp ah, 0x11
     je .kb_peek                 # check enhanced keystroke  -> as AH=01
     cmp ah, 0x12
-    je .kb_flags                # enhanced shift status     -> as AH=02
+    je .kb_flags_ext            # enhanced shift status: AH is REAL data
     iret
 .kb_read:
     push ds
@@ -1417,6 +1425,30 @@ _int16:
     mov ds, ax
     mov al, [0x17]
     pop ds
+    iret
+
+## AH=12 returns shift state in AL *and* extended modifiers in AH. AH=02
+## leaves AH alone because nothing reads it there -- but for AH=12 it is the
+## answer, and falling through to the AH=02 code returned the caller's own
+## AH = 0x12. That is bit 1 and bit 4: "left Alt held" and "Scroll Lock held".
+## Every program using the enhanced call saw Alt permanently down and read
+## ordinary typing as menu shortcuts. DOS 3.3 never calls AH=12, which is
+## exactly why it was the one boot disk that behaved.
+.kb_flags_ext:
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0x17]
+    pop ds
+    mov ah, 0
+    test al, 0x04                # this keyboard has no left/right split, so
+    jz .kfx_noctrl               # report ctrl and alt as the LEFT ones
+    or ah, 0x01
+.kfx_noctrl:
+    test al, 0x08
+    jz .kfx_noalt
+    or ah, 0x02
+.kfx_noalt:
     iret
 
 ## =====================================================================
@@ -1565,7 +1597,7 @@ d_params:
 
 ## ---- d_read : read sectors via uPD765 + 8237 DMA ------------------
 # in: AL=count CH=cyl CL=sector(b0-5)+cylhi(b6-7) DH=head DL=drive ES:BX=buf
-# scratch in BDA: 0x90 count,0x91 drive,0x92 head,0x93 cyl,0x94 sector,
+# scratch in BDA: 0xA8 count,0xA9 drive,0xAA head,0xAB cyl,0xAC sector, 0xAE buf off, 0xB4 buf seg,
 #                 0x95 hd/drv sel, 0x96 off(w), 0x98 seg(w),
 #                 0x9A page, 0x9C physlow(w), 0x9E cnt-1(w)
 d_read:
@@ -1581,24 +1613,24 @@ d_read:
     mov ax, BDA
     mov ds, ax
     mov ax, si
-    mov [0x90], al               # count
-    mov [0x91], dl               # drive
-    mov [0x92], dh               # head
-    mov [0x93], ch               # cylinder (low 8)
+    mov [0xA8], al               # count
+    mov [0xA9], dl               # drive
+    mov [0xAA], dh               # head
+    mov [0xAB], ch               # cylinder (low 8)
     mov al, cl
     and al, 0x3F
-    mov [0x94], al               # sector
-    mov [0x96], bx               # buffer offset
-    mov [0x98], es               # buffer segment
+    mov [0xAC], al               # sector
+    mov [0xAE], bx               # buffer offset
+    mov [0xB4], es               # buffer segment
     mov byte ptr [0x41], 0
     # hd/drv select byte = (head<<2)|(drive&1)
-    mov al, [0x92]
+    mov al, [0xAA]
     shl al, 1
     shl al, 1
-    mov bl, [0x91]
+    mov bl, [0xA9]
     and bl, 0x01
     or al, bl
-    mov [0x95], al
+    mov [0xAD], al
     # ---- FDC out of reset (DOR=0x04), then Specify (NON-DMA) ----
     mov dx, 0x03F2
     mov al, 0x04                 # /reset high, drive 0, no motor, no IRQ
@@ -1607,18 +1639,18 @@ d_read:
     # ---- issue READ DATA command (no seek, no DMA) ----
     mov al, 0x46                 # MFM read
     call fdc_out
-    mov al, [0x95]
+    mov al, [0xAD]
     call fdc_out                 # hd/drv
-    mov al, [0x93]
+    mov al, [0xAB]
     call fdc_out                 # cylinder
-    mov al, [0x92]
+    mov al, [0xAA]
     call fdc_out                 # head
-    mov al, [0x94]
+    mov al, [0xAC]
     call fdc_out                 # sector
     mov al, 0x02
     call fdc_out                 # N = 2 (512 bytes)
-    mov al, [0x94]
-    mov bl, [0x90]
+    mov al, [0xAC]
+    mov bl, [0xA8]
     add al, bl
     dec al
     call fdc_out                 # EOT = sector + count - 1
@@ -1628,10 +1660,10 @@ d_read:
     call fdc_out                 # DTL
     # ---- NON-DMA execution phase: PIO read count*512 bytes ----
     cld
-    mov es, [0x98]               # ES:DI = destination buffer
-    mov di, [0x96]
+    mov es, [0xB4]               # ES:DI = destination buffer
+    mov di, [0xAE]
     xor ax, ax
-    mov al, [0x90]               # count
+    mov al, [0xA8]               # count
     mov cl, 9
     shl ax, cl                   # *512 -> total byte count (count<=127)
     mov cx, ax                   # CX = bytes to read
@@ -1642,7 +1674,7 @@ d_read:
     # ---- drain result phase ----
     call fdc_results             # watches CB, sets [0x41]=0
     mov ah, [0x41]               # status (DS still = BDA)
-    mov al, [0x90]               # sectors read = requested
+    mov al, [0xA8]               # sectors read = requested
     pop es
     pop di
     pop si
@@ -1674,24 +1706,24 @@ d_write:
     mov ax, BDA
     mov ds, ax
     mov ax, si
-    mov [0x90], al               # count
-    mov [0x91], dl               # drive
-    mov [0x92], dh               # head
-    mov [0x93], ch               # cylinder (low 8)
+    mov [0xA8], al               # count
+    mov [0xA9], dl               # drive
+    mov [0xAA], dh               # head
+    mov [0xAB], ch               # cylinder (low 8)
     mov al, cl
     and al, 0x3F
-    mov [0x94], al               # sector
-    mov [0x96], bx               # buffer offset
-    mov [0x98], es               # buffer segment
+    mov [0xAC], al               # sector
+    mov [0xAE], bx               # buffer offset
+    mov [0xB4], es               # buffer segment
     mov byte ptr [0x41], 0
     # hd/drv select byte = (head<<2)|(drive&1)
-    mov al, [0x92]
+    mov al, [0xAA]
     shl al, 1
     shl al, 1
-    mov bl, [0x91]
+    mov bl, [0xA9]
     and bl, 0x01
     or al, bl
-    mov [0x95], al
+    mov [0xAD], al
     # ---- FDC out of reset (DOR=0x04), then Specify (NON-DMA) ----
     mov dx, 0x03F2
     mov al, 0x04                 # /reset high, drive 0, no motor, no IRQ
@@ -1700,18 +1732,18 @@ d_write:
     # ---- issue WRITE DATA command (no seek, no DMA) ----
     mov al, 0x45                 # MFM write
     call fdc_out
-    mov al, [0x95]
+    mov al, [0xAD]
     call fdc_out                 # hd/drv
-    mov al, [0x93]
+    mov al, [0xAB]
     call fdc_out                 # cylinder
-    mov al, [0x92]
+    mov al, [0xAA]
     call fdc_out                 # head
-    mov al, [0x94]
+    mov al, [0xAC]
     call fdc_out                 # sector
     mov al, 0x02
     call fdc_out                 # N = 2 (512 bytes)
-    mov al, [0x94]
-    mov bl, [0x90]
+    mov al, [0xAC]
+    mov bl, [0xA8]
     add al, bl
     dec al
     call fdc_out                 # EOT = sector + count - 1
@@ -1722,12 +1754,12 @@ d_write:
     # ---- NON-DMA execution phase: PIO write count*512 bytes ----
     cld
     xor ax, ax
-    mov al, [0x90]               # count
+    mov al, [0xA8]               # count
     mov cl, 9
     shl ax, cl                   # *512 -> total byte count (count<=127)
     mov cx, ax                   # CX = bytes to send
-    mov si, [0x96]               # offset
-    mov ds, [0x98]               # DS:SI = source buffer (DS leaves BDA!)
+    mov si, [0xAE]               # offset
+    mov ds, [0xB4]               # DS:SI = source buffer (DS leaves BDA!)
 .wr_pio:
     lodsb
     call fdc_out                 # waits RQM=1,DIO=0, writes byte to FDC
@@ -1737,7 +1769,7 @@ d_write:
     mov ax, BDA
     mov ds, ax
     mov ah, [0x41]               # status
-    mov al, [0x90]               # sectors written = requested
+    mov al, [0xA8]               # sectors written = requested
     pop es
     pop di
     pop si
