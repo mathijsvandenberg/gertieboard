@@ -72,12 +72,6 @@ _post:
     mov al, 6
     mov si, offset b_par
     call putrow
-    mov al, 8
-    mov si, offset b_drv
-    call putrow
-    mov al, 10
-    mov si, offset b_boot
-    call putrow
 
 ## ---- 8259 PIC (master, XT single mode) -----------------------------
     mov al, 0x13            # ICW1: edge, single, ICW4 needed
@@ -184,6 +178,14 @@ _post:
     mov word ptr es:[bx],   offset _floppy_dpt
     mov word ptr es:[bx+2], 0xF000
 
+## ---- diskette A:: is the serial host actually serving an image? --------
+##  A: is a link to a host program, not a drive, so the only honest test is to
+##  read a sector and see whether the data ever arrives. A timeout is a normal
+##  outcome here -- it is precisely what NOT READY means -- and it costs the
+##  bounded ~2.5 s only when nothing is listening. The result is recorded so
+##  INT 19h can skip A: instead of paying that wait a second time.
+    call fd_detect
+
 ## ---- fixed disk: identify the SPI flash and report its size ---------
     mov ax, BDA
     mov ds, ax
@@ -202,6 +204,18 @@ _post:
     mov es:[0x75], al               # 1 = C: exists, 0 = it does not
 
 ## ---- boot (disk read is polled, so interrupts stay off for now) -----
+##  "Booting..." goes on LAST, under the device lines. It used to be painted
+##  with the banner, before the drives had reported, so it appeared wedged
+##  between drive B: and the hard disk.
+    push es
+    mov ax, VID
+    mov es, ax
+    mov al, 12
+    push cs
+    pop ds
+    mov si, offset b_boot
+    call putrow
+    pop es
     mov ax, BDA
     mov ds, ax
     int 0x19                # bootstrap from floppy A:
@@ -1472,6 +1486,14 @@ _int16:
 ##  fell through to the serial floppy and B: showed A:'s contents. The source
 ##  looked perfectly correct; only the encoding was wrong.
 .equ HD_DRIVE,  0x01     # drive B: -- the flash-backed second floppy
+##  Geometry lives up here rather than beside the INT 13h code because
+##  hd_detect, further down but assembled earlier, needs HD_KB for its POST
+##  line -- and a .equ used above its definition assembles as a memory operand.
+.equ HD_SPT,    18
+.equ HD_HEADS,  2
+.equ HD_CYLS,   80       # REPORTED: a standard 1.44 MB floppy, 80x2x18
+.equ HD_PHYS_SECTORS, 4096      # the chip really holds 4096 sectors (2 MB)
+.equ HD_KB,     (HD_CYLS*HD_HEADS*HD_SPT)/2   # 1440 KB -- what B: holds
 ## HD_DEBUG: report fixed-disk activity on the port-0x80 7-segment display, so a
 ## hang shows WHICH INT 13h function DOS asked for. 0xAn = function n entered,
 ## 0xBn = it returned. If the display stops on 0xAn we hung inside that call; if
@@ -1545,6 +1567,7 @@ d_reset:
     mov ax, BDA
     mov ds, ax
     mov byte ptr [0x41], 0
+    call fdc_arm               # without this the specify below short-circuits
     mov dx, 0x03F2             # DOR: /reset high, drive 0, no motor, no IRQ
     mov al, 0x04
     out dx, al
@@ -1623,6 +1646,8 @@ d_read:
     mov [0xAE], bx               # buffer offset
     mov [0xB4], es               # buffer segment
     mov byte ptr [0x41], 0
+    call fdc_arm                 # clears the timeout flag, and recovers the
+                                 # controller if the last operation timed out
     # hd/drv select byte = (head<<2)|(drive&1)
     mov al, [0xAA]
     shl al, 1
@@ -1674,6 +1699,11 @@ d_read:
     # ---- drain result phase ----
     call fdc_results             # watches CB, sets [0x41]=0
     mov ah, [0x41]               # status (DS still = BDA)
+    cmp byte ptr [0xB6], 0       # did the link go silent along the way?
+    je .rd_stat
+    mov ah, 0x80                 # AH=80: drive did not respond, like a real BIOS
+    mov [0x41], ah
+.rd_stat:
     mov al, [0xA8]               # sectors read = requested
     pop es
     pop di
@@ -1716,6 +1746,8 @@ d_write:
     mov [0xAE], bx               # buffer offset
     mov [0xB4], es               # buffer segment
     mov byte ptr [0x41], 0
+    call fdc_arm                 # clears the timeout flag, and recovers the
+                                 # controller if the last operation timed out
     # hd/drv select byte = (head<<2)|(drive&1)
     mov al, [0xAA]
     shl al, 1
@@ -1769,6 +1801,11 @@ d_write:
     mov ax, BDA
     mov ds, ax
     mov ah, [0x41]               # status
+    cmp byte ptr [0xB6], 0       # link went silent mid-write?
+    je .wr_stat
+    mov ah, 0x80                 # AH=80: drive did not respond
+    mov [0x41], ah
+.wr_stat:
     mov al, [0xA8]               # sectors written = requested
     pop es
     pop di
@@ -1787,57 +1824,169 @@ d_write:
 
 ## ---- FDC low-level helpers -----------------------------------------
 # fdc_out: send AL as a command/parameter byte (wait RQM=1,DIO=0)
+##  These waits used to spin forever -- "matches working bootloader", which is
+##  true and was fine while a loader was guaranteed to answer. Drive A: is a
+##  serial link to a host program, though, so if that program is not serving an
+##  image the data phase never produces a byte. INT 19h then hangs on its FIRST
+##  boot candidate and never reaches B: or C:, which on screen looks exactly
+##  like the machine doing nothing after POST.
+##
+##  Both waits are now bounded at roughly 2.5 s. On expiry they set a STICKY
+##  flag at BDA 0xB6 and every later fdc_out/fdc_in returns immediately, so a
+##  half-issued command sequence unwinds at once instead of stalling nine more
+##  times, and the caller tests the flag once at the end.
 fdc_out:
     push ax
+    push bx
+    push cx
     push dx
+    push ds
+    mov dx, BDA
+    mov ds, dx
+    cmp byte ptr [0xB6], 0
+    jne .fo_out               # already given up on this operation
     mov ah, al                # stash byte to send in AH
+    mov cx, 4                 # ~2.5 s at ~10 us per poll
+.fo_outer:
+    xor bx, bx
 .fo_wait:
     mov dx, 0x03F4            # MSR
     in al, dx
     and al, 0xC0
     cmp al, 0x80             # RQM=1, DIO=0 -> ready to accept a byte
-    jne .fo_wait             # wait indefinitely (matches working bootloader)
+    je .fo_send
+    dec bx
+    jnz .fo_wait
+    loop .fo_outer
+    mov byte ptr [0xB6], 1    # nothing is listening
+    jmp short .fo_out
+.fo_send:
     mov dx, 0x03F5
     mov al, ah
     out dx, al
+.fo_out:
+    pop ds
     pop dx
+    pop cx
+    pop bx
     pop ax
     ret
 
 # fdc_in: read one data byte into AL (wait RQM=1,DIO=1, indefinitely)
 fdc_in:
+    push bx
+    push cx
     push dx
+    push ds
+    mov dx, BDA
+    mov ds, dx
+    cmp byte ptr [0xB6], 0
+    je .fi_go
+    xor al, al                # timed out earlier: hand back a zero, fast
+    jmp short .fi_out
+.fi_go:
+    mov cx, 4                 # ~2.5 s at ~10 us per poll
+.fi_outer:
+    xor bx, bx
 .fi_wait:
     mov dx, 0x03F4
     in al, dx
     and al, 0xC0
     cmp al, 0xC0
-    jne .fi_wait
+    je .fi_read
+    dec bx
+    jnz .fi_wait
+    loop .fi_outer
+    mov byte ptr [0xB6], 1
+    xor al, al
+    jmp short .fi_out
+.fi_read:
     mov dx, 0x03F5
     in al, dx
+.fi_out:
+    pop ds
     pop dx
+    pop cx
+    pop bx
     ret
 
 # fdc_results: drain the result phase by watching CB, like the bootloader.
 #   reads whatever result bytes the FDC presents until Command-Busy clears.
+##  Bounded, and this is the one that actually mattered. Command-Busy only
+##  clears when the command completes, and a read whose data never arrived
+##  never completes -- so this spun here for ever while the drive-A: timeout
+##  in fdc_in looked like it "did not work". Worse, the sticky flag made
+##  fdc_in return instantly, so the PIO loop raced down here and parked.
+##
+##  The budget is deliberately generous: this is also the normal path for a
+##  healthy drive finishing its result phase.
 fdc_results:
     push ax
+    push bx
+    push cx
     push dx
     push ds
     mov ax, BDA
     mov ds, ax
     mov byte ptr [0x41], 0      # assume success; boot AA55 check validates
+    cmp byte ptr [0xB6], 0      # already given up? then there is nothing to
+    jne .fr_done                # drain, and no reason to wait again
+    mov cx, 4                 # ~2.5 s at ~10 us per poll
+.fr_outer:
+    xor bx, bx
 .fr_drain:
     mov dx, 0x03F4              # MSR
     in al, dx
     test al, 0x10              # CB still set? (still in command/result)
     jz .fr_done                # CB clear -> idle, done
     test al, 0x80              # RQM ready?
-    jz .fr_drain
+    jz .fr_tick
     mov dx, 0x03F5
     in al, dx                  # consume a result byte
-    jmp .fr_drain
+.fr_tick:
+    dec bx
+    jnz .fr_drain
+    loop .fr_outer
+    mov byte ptr [0xB6], 1     # never went idle: the link is gone
 .fr_done:
+    pop ds
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## fdc_arm -- prepare the controller for a new operation.
+##
+##  Clears the sticky timeout flag, and if the PREVIOUS operation timed out,
+##  resets the controller first. That matters: a wait can expire part-way
+##  through a nine-byte command sequence, leaving the FDC core still expecting
+##  the rest of it, and the next command's bytes are then swallowed as stale
+##  parameters of the abandoned one. Without the reset, a drive that was not
+##  ready at boot stays broken for ever -- which is not how a floppy behaves.
+##  You put a disk in, and it works.
+##
+##  The flag has to be cleared BEFORE fdc_specify, or the specify short-
+##  circuits on it and the controller is never actually reprogrammed. That is
+##  the bug d_reset had: AH=00, the call DOS makes to recover a drive, did
+##  nothing at all once a timeout had been recorded.
+fdc_arm:
+    push ax
+    push dx
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    cmp byte ptr [0xB6], 0
+    je .fa_clear
+    mov byte ptr [0xB6], 0
+    mov dx, 0x03F2             # DOR: /reset low ...
+    xor al, al
+    out dx, al
+    mov al, 0x04               # ... and back high, drive 0, motor off
+    out dx, al
+    call fdc_specify
+.fa_clear:
+    mov byte ptr [0xB6], 0
     pop ds
     pop dx
     pop ax
@@ -1875,9 +2024,9 @@ fdc_wait_seek:
     loop .ws_l
 .ws_sense:
     mov al, 0x08            # sense interrupt status
-    call fdc_out
-    call fdc_in             # ST0
-    call fdc_in             # PCN
+    call fdc_out            # all three honour the sticky timeout flag, so a
+    call fdc_in             # ST0    dead link costs one timeout here, not
+    call fdc_in             # PCN    three
     pop dx
     pop cx
     ret
@@ -1930,6 +2079,19 @@ _int19:
     cmp al, 0xFF
     je .boot_fail
     mov bl, al                 # bl = drive under test, survives the calls below
+    # skip drive A: if POST found nothing serving it -- otherwise every boot
+    # with the loader muted pays the FDC timeout again before moving on
+    test al, al
+    jnz .boot_chkhd
+    push ds
+    xor cx, cx
+    mov ds, cx
+    mov cl, [0x04B7]           # BDA 40:B7, set by fd_detect
+    pop ds
+    test cl, cl
+    jz .boot_next
+    jmp short .boot_try
+.boot_chkhd:
     # skip the fixed disk unless POST advertised one
     test al, 0x80
     jz .boot_try
@@ -1996,6 +2158,12 @@ _int19:
     .byte 0xEA            # jmp 0000:7C00
     .word 0x7C00
     .word 0x0000
+##  The original P2120 ROM does NOT say "Insert disk and press key when ready"
+##  -- that is IBM AT wording. The dump at tools/P2120 has no "insert",
+##  "strike", "any key" or "when ready" anywhere in it; what it has, at
+##  0x25B1 and 0x258D, is "Boot Error." followed by "Press Ctrl-Alt-Del to
+##  Reboot ... ", which is what these two strings already are. Nothing to
+##  change here -- recorded so the question is not reopened.
 .boot_fail:
     mov si, offset msg_bootfail
     call puts19
@@ -2227,7 +2395,7 @@ hd_detect:
     mov di, 9*160
     push cs
     pop ds
-    mov si, offset b_hd          # "Internal Hard Disk : " -- original wording
+    mov si, offset b_fd2         # the flash is drive B: now, not the hard disk
     call dbg_str
     test dx, dx
     jz .hd_none
@@ -2235,12 +2403,13 @@ hd_detect:
     call dbg_str
     call dbg_spc
     call dbg_spc
-    mov ax, dx                   # decoded size
-    call dbg_dec
+    mov ax, HD_KB                # the DRIVE's size: B: is a 1.44 MB floppy.
+    call dbg_dec                 # The chip is bigger, and says so in brackets.
     mov si, offset b_hd_kb
     call dbg_str
     jmp short .hd_id
 .hd_none:
+    xor dx, dx                   # no chip -> no size in the brackets either
     mov si, offset b_hd_no       # "NOT READY", also the original wording
     call dbg_str
 .hd_id:
@@ -2258,9 +2427,96 @@ hd_detect:
     call dbg_spc
     mov al, cl
     call dbg_byte
+    test dx, dx                  # dbg_dec/dbg_byte/dbg_str all preserve DX
+    jz .hd_idend
+    call dbg_spc
+    call dbg_spc
+    mov ax, dx                   # the flash chip's own capacity
+    call dbg_dec
+    mov si, offset b_hd_kb
+    call dbg_str
+.hd_idend:
     mov si, offset b_hd_idr
     call dbg_str
 .hd_out:
+    pop es
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  fd_detect -- probe drive A: and report it on POST row 8.
+##
+##  A: is not a drive, it is a serial link to floppy_host.py, so "Ready" has to
+##  mean the host is answering AND serving an image. The only honest test is to
+##  ask for a sector: reading LBA 0 to the boot-sector address costs nothing,
+##  since INT 19h would load it there anyway, and the BPB in it gives the real
+##  media size for the line. Silence costs the bounded ~2.5 s once.
+##
+##  The verdict goes in BDA 0xB7 so INT 19h can skip a drive POST already found
+##  silent, rather than paying that wait a second time.
+## ---------------------------------------------------------------------
+fd_detect:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+    push es
+
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0xB7], 0
+
+    xor ax, ax
+    mov es, ax
+    mov bx, 0x7C00
+    mov ax, 0x0201               # AH=02 read, AL=1 sector
+    mov cx, 0x0001               # cylinder 0, sector 1
+    xor dx, dx                   # head 0, drive 0 = A:
+    int 0x13
+    mov cx, 0                    # CX = media size in KB, 0 = unknown
+    jc .fdd_none
+    xor ax, ax                   # the read worked: take the size from the BPB
+    mov ds, ax
+    mov ax, [0x7C13]             # BPB total sectors
+    shr ax, 1                    # 512-byte sectors -> KB
+    mov cx, ax
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0xB7], 1
+.fdd_none:
+    mov ax, VID
+    mov es, ax
+    mov di, 8*160
+    mov bl, [0xB7]
+    push cs
+    pop ds
+    mov si, offset b_fd1
+    call dbg_str
+    test bl, bl
+    jz .fdd_no
+    mov si, offset b_hd_ready
+    call dbg_str
+    jcxz .fdd_out                # answered, but the BPB made no sense
+    call dbg_spc
+    call dbg_spc
+    mov ax, cx
+    call dbg_dec
+    mov si, offset b_hd_kb
+    call dbg_str
+    jmp short .fdd_out
+.fdd_no:
+    mov si, offset b_hd_no
+    call dbg_str
+.fdd_out:
     pop es
     pop ds
     pop di
@@ -2298,10 +2554,6 @@ dbg_spc:
 ##  holds the BIOS image the boot ROM falls back to when no serial host answers,
 ##  and 31 cylinders stops exactly at 0x1F0000 so DOS can never overwrite it.
 ## =====================================================================
-.equ HD_SPT,    18
-.equ HD_HEADS,  2
-.equ HD_CYLS,   80       # REPORTED: a standard 1.44 MB floppy, 80x2x18
-.equ HD_PHYS_SECTORS, 4096      # the chip really holds 4096 sectors (2 MB)
 
 ##  1.44 MB is the largest format every DOS from 3.3 onward knows, and 80x2x18
 ##  = 2880 sectors = 1440 KB fits inside the 1984 KB of flash the disk region
@@ -4745,7 +4997,7 @@ usb_report:
     push si
     mov ax, VID
     mov es, ax
-    mov di, 11*160
+    mov di, 10*160
     mov ax, BDA
     mov ds, ax
     mov bl, [0xC1]
@@ -4758,30 +5010,31 @@ usb_report:
     jz .ur_absent
     mov si, offset b_usb_ok
     call dbg_str
+    # Capacity, not the CHS triple: the geometry is an INT 13h addressing
+    # detail and 504 MB says more than 1024 x 16 x 63 does. The product
+    # overflows 16 bits (1024 x 1008 = 1,032,192), so it must be taken as a
+    # 32-bit DX:AX result; the divide by 2048 sectors/MB is safe because the
+    # quotient is only ever a few hundred.
     push ds
+    push bx
+    push dx
     mov ax, BDA
     mov ds, ax
-    mov ax, [0xCC]               # cylinders
-    pop ds
-    call dbg_dec
-    mov si, offset b_usb_x
-    call dbg_str
-    push ds
-    mov ax, BDA
-    mov ds, ax
+    mov al, [0xCE]               # heads
     xor ah, ah
-    mov al, [0xCE]
+    mov bl, [0xCF]               # sectors per track
+    xor bh, bh
+    mul bx                       # ax = sectors per cylinder
+    mov bx, [0xCC]               # cylinders
+    mul bx                       # dx:ax = total sectors
+    mov bx, 2048                 # 2048 sectors of 512 bytes = 1 MB
+    div bx                       # ax = megabytes
+    pop dx
+    pop bx
     pop ds
     call dbg_dec
-    mov si, offset b_usb_x
+    mov si, offset b_usb_mb
     call dbg_str
-    push ds
-    mov ax, BDA
-    mov ds, ax
-    xor ah, ah
-    mov al, [0xCF]
-    pop ds
-    call dbg_dec
     jmp short .ur_out
 .ur_absent:
     cmp bh, 0xF0
@@ -4891,6 +5144,11 @@ usb_report:
     pop ax
     ret
 
+##  Boot order: A: (serial loader), then C: (USB disk), then B: (SPI flash).
+##  Each entry is tried in turn: reset, read sector 1, require the 0xAA55
+##  signature. Anything missing, unreadable or unsigned simply moves to the
+##  next. Running out prints what the original Philips BIOS printed -- see
+##  _int19's .boot_fail.
 boot_order: .byte 0x00, 0x80, 0x01, 0xFF   # A:, C:, B:, end
 
 b_ver:    .asciz "Philips ROM BIOS Version 1.00"
@@ -4899,11 +5157,11 @@ b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"
 b_hdr:    .asciz "                     Total  Base Extra"
 b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
-b_drv:    .asciz "Using Diskette Drive A:"
+b_fd1:     .asciz "Diskette Drive A:  : "   # 21 columns, like B: and the disk
 b_boot:   .asciz "Booting..."
-b_usb:     .asciz "USB Hard Disk      : "
+b_usb:     .asciz "Internal Hard Disk : "   # the original ROM's own wording, 0x1F39
 b_usb_ok:  .asciz "Ready  "
-b_usb_x:   .asciz " x "
+b_usb_mb:  .asciz " MB"
 b_usb_no:  .asciz "None stage "
 b_usb_ev:  .asciz " c/t/n/s/b "
 b_usb_sig: .asciz " fpga "
@@ -4911,7 +5169,7 @@ b_usb_txn: .asciz " txn "
 b_usb_frm: .asciz " frm "
 b_usb_st:  .asciz "  txseq/flags "
 b_usb_old: .asciz "FPGA image is older than this BIOS - reprogram it"
-b_hd:      .asciz "Internal Hard Disk : "
+b_fd2:     .asciz "Diskette Drive B:  : "   # same 21 columns, so the two lines align
 b_hd_ready:.asciz "Ready"
 b_hd_no:   .asciz "NOT READY"
 b_hd_kb:   .asciz " KB"
