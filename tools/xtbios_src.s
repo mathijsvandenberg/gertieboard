@@ -113,17 +113,22 @@ _post:
     mov cx, 0x80            # zero 256 bytes of BDA
     xor ax, ax
     rep stosw
-    mov word ptr es:[0x10], 0x0021   # equipment: 1 floppy, 80x25 colour
+    # bits 7:6 = (floppy count - 1), bit 0 = floppies present, bits 5:4 = 10
+    # for 80x25 colour. Two drives now: A: over serial, B: on the SPI flash.
+    mov word ptr es:[0x10], 0x0061   # equipment: 2 floppies, 80x25 colour
     # Full 640 KB. The fixed-disk block buffer used to live at 0x9E000 and cost
     # 8 KB of this; it now sits in on-chip M9K at 0xE0000 (see HDBUF_SEG), which
     # DOS never sees. Keep this in step with b_mem below.
     mov word ptr es:[0x13], 640      # base memory size in KB
-    # Fixed-disk count deliberately 0 for now. INT 13h AH>=0x80 works and
-    # HDTEST.COM exercises it, but the flash holds no partition table yet, so
-    # advertising a disk only makes DOS probe an empty device during startup --
-    # which is what broke booting. Set this to 1 once the disk is partitioned
-    # and HDTEST passes.
-    mov byte ptr es:[0x75], 1        # fixed disks visible to DOS
+    # Fixed disks: 0 until the USB mass-storage stack lands and enumeration
+    # actually succeeds. Advertising a disk that is not there is what broke the
+    # boot once already -- see hd_int13 and docs/gotchas.md.
+    mov byte ptr es:[0x75], 0        # set below, only if USB enumeration works
+    mov byte ptr es:[0xE0], 0        # B: present flag, set by hd_detect below
+    mov byte ptr es:[0xC0], 0        # USB enumeration stage
+    mov byte ptr es:[0xC1], 0        # USB disk present
+    mov byte ptr es:[0xDB], 0        # BUSY stall count
+    mov byte ptr es:[0xD5], 0        # 1 once the stall state has been latched
     mov word ptr es:[0x1A], KBBUF    # kbd buffer head
     mov word ptr es:[0x1C], KBBUF    # kbd buffer tail
     mov word ptr es:[0x80], KBBUF    # buffer start
@@ -175,6 +180,18 @@ _post:
     mov ax, BDA
     mov ds, ax
     call hd_detect
+
+## ---- USB mass storage: enumerate, and advertise C: only if it worked ----
+##  Enumeration is allowed to fail. If it does, BDA 40:75 stays 0, INT 13h
+##  answers "invalid drive" for DL >= 0x80, INT 19h skips C: in the boot order,
+##  and the machine behaves exactly like one with no fixed disk. BDA 0xC0 keeps
+##  the stage it reached so USBHD.COM can say WHERE it stopped.
+    call u_enum
+    call usb_report
+    mov ax, BDA
+    mov es, ax
+    mov al, es:[0xC1]
+    mov es:[0x75], al               # 1 = C: exists, 0 = it does not
 
 ## ---- boot (disk read is polled, so interrupts stay off for now) -----
     mov ax, BDA
@@ -1415,20 +1432,43 @@ _int16:
 ## the floppy, which is exactly the kind of thing that stops a boot part way.
 ## Flipping this to 0 removes that possibility without removing the disk code.
 .equ HD_ENABLE, 1
+
+##  HD_DRIVE must be defined BEFORE _int13 references it, a few lines below.
+##  GNU as treats a symbol used ahead of its .equ as a forward LABEL reference,
+##  so "cmp dl, HD_DRIVE" silently assembled as "cmp dl, [0x0001]" -- a compare
+##  against memory instead of an immediate. It never matched, so every B: call
+##  fell through to the serial floppy and B: showed A:'s contents. The source
+##  looked perfectly correct; only the encoding was wrong.
+.equ HD_DRIVE,  0x01     # drive B: -- the flash-backed second floppy
 ## HD_DEBUG: report fixed-disk activity on the port-0x80 7-segment display, so a
 ## hang shows WHICH INT 13h function DOS asked for. 0xAn = function n entered,
 ## 0xBn = it returned. If the display stops on 0xAn we hung inside that call; if
 ## it reaches 0xBn the call completed and the trouble is after it.
 .equ HD_DEBUG, 0
 
+##  Drive map:
+##    DL = 0x00   A:  floppy served over the serial link by the host loader
+##    DL = 0x01   B:  floppy backed by the on-board SPI flash  (hd_int13 below)
+##    DL >= 0x80  C:  USB mass storage -- not implemented yet, so it answers
+##                    "invalid drive" and DOS skips it, exactly as a machine
+##                    with no fixed disk should. BDA 40:75 stays 0 until the
+##                    USB stack lands and enumeration actually succeeds.
 _int13:
     sti
+    test dl, 0x80
+    jnz .i13_fixed
 .if HD_ENABLE
-    test dl, 0x80                # 0x80+ = fixed disk -> SPI flash
-    jz .i13_floppy
-    jmp hd_int13
-.i13_floppy:
+    cmp dl, HD_DRIVE             # B: -> the flash-backed floppy
+    je .i13_flashfd
 .endif
+    jmp .i13_floppy
+.i13_fixed:
+    jmp usb_int13
+.if HD_ENABLE
+.i13_flashfd:
+    jmp hd_int13
+.endif
+.i13_floppy:
     cmp ah, 0x02                 # read (most common) first
     jne .i13_n02
     jmp d_read
@@ -1838,6 +1878,10 @@ io_delay:
 ## =====================================================================
 ##  INT 19h - bootstrap loader  (boot floppy A:)
 ## =====================================================================
+##  Boot order: A: (serial floppy) -> C: (USB fixed disk) -> B: (flash floppy).
+##  Each is tried in turn and skipped if it will not answer or has no 0xAA55
+##  signature, so an empty slot costs one failed read rather than a dead machine.
+##  C: is skipped outright while BDA 40:75 says there are no fixed disks.
 _int19:
     cli
     xor ax, ax
@@ -1845,25 +1889,47 @@ _int19:
     mov es, ax
     mov ss, ax
     mov sp, 0x7C00
+    mov si, offset boot_order
+.boot_next:
+    push cs
+    pop es
+    mov al, cs:[si]
+    inc si
+    cmp al, 0xFF
+    je .boot_fail
+    mov bl, al                 # bl = drive under test, survives the calls below
+    # skip the fixed disk unless POST advertised one
+    test al, 0x80
+    jz .boot_try
+    push ds
+    xor cx, cx
+    mov ds, cx
+    mov cl, [0x0475]           # BDA 40:75
+    pop ds
+    test cl, cl
+    jz .boot_next
 .boot_try:
-    # reset disk
     xor ax, ax
-    xor dx, dx              # drive 0 = A:
-    int 0x13
-    # read boot sector: 1 sector, C0 H0 S1 -> 0000:7C00
-    mov ax, 0x0201         # AH=02 read, AL=1 sector
-    mov cx, 0x0001         # cyl 0, sector 1
-    xor dh, dh             # head 0
-    xor dl, dl             # drive A:
+    mov dl, bl
+    int 0x13                   # reset this drive
+    mov ax, 0x0201             # AH=02 read, AL=1 sector
+    mov cx, 0x0001             # cyl 0, sector 1
+    xor dh, dh                 # head 0
+    mov dl, bl
     mov bx, 0x7C00
     xor di, di
     mov es, di
     int 0x13
-    jc .boot_fail
+    mov bl, dl                 # INT 13h may have altered DL; keep our drive
+    jc .boot_next
     # check signature 0xAA55
     mov ax, [0x7DFE]
     cmp ax, 0xAA55
-    jne .boot_fail
+    jne .boot_next
+    # A fixed disk's first sector is a partition table, not a BPB, so only
+    # capture geometry when booting a floppy.
+    test bl, 0x80
+    jnz .geo_done
     # ---- capture BPB geometry for INT 13h AH=08 (DS=0, boot sec @ 7C00) ----
     #   spt   = word [7C18], heads = word [7C1A], total = word [7C13]
     #   maxcyl = total/(spt*heads) - 1
@@ -1891,7 +1957,7 @@ _int19:
     mov [0x04B2], al       # BDA 40:B2 = DH (max head)
 .geo_done:
     # read OK -> launch the boot sector with interrupts enabled
-    mov dl, 0              # boot drive in DL
+    mov dl, bl             # boot drive we actually loaded from
     xor ax, ax
     mov ds, ax
     sti
@@ -2110,6 +2176,16 @@ hd_detect:
     pop cx
 .hd_sz_done:
     mov [0xE4], dx
+    # dx = decoded size, non-zero only if the JEDEC ID read answered. That is
+    # what makes B: real, so record it where hd_int13's presence gate reads it.
+    push ax
+    xor al, al
+    test dx, dx
+    jz .hd_nopresent
+    mov al, 1
+.hd_nopresent:
+    mov [0xE0], al
+    pop ax
 
     # ---- report on POST row 9 ----
     # NB: the strings live in the ROM segment, so DS must point at CS here --
@@ -2190,10 +2266,15 @@ dbg_spc:
 ##  holds the BIOS image the boot ROM falls back to when no serial host answers,
 ##  and 31 cylinders stops exactly at 0x1F0000 so DOS can never overwrite it.
 ## =====================================================================
-.equ HD_SPT,    32
-.equ HD_HEADS,  4
-.equ HD_CYLS,   31       # REPORTED geometry: DOS never sees cylinder 31
-.equ HD_PHYS_SECTORS, 32*4*32   # the chip really holds 4096 sectors (2 MB)
+.equ HD_SPT,    18
+.equ HD_HEADS,  2
+.equ HD_CYLS,   80       # REPORTED: a standard 1.44 MB floppy, 80x2x18
+.equ HD_PHYS_SECTORS, 4096      # the chip really holds 4096 sectors (2 MB)
+
+##  1.44 MB is the largest format every DOS from 3.3 onward knows, and 80x2x18
+##  = 2880 sectors = 1440 KB fits inside the 1984 KB of flash the disk region
+##  has, leaving the BIOS copy at 0x1F0000 untouched. 2.88 MB would fit the CHS
+##  but not the flash, and DOS 3.3 does not know it anyway.
 
 ## ---- SPI helpers on top of spi_xfer --------------------------------
 ## hd_send_lba: BX = LBA -> the 3 flash address bytes for LBA*512
@@ -2458,11 +2539,14 @@ hd_int13:
     # which is self-contradictory, and DOS took the success at face value and went
     # on to act on a device that is not really there. A real machine with no hard
     # disk fails the call, and DOS then simply skips the drive.
+    # B: is soldered to the board, so unlike a fixed disk it is either present
+    # or the chip is dead. POST sets BDA 0xE0 from the JEDEC ID read; if that
+    # failed there is no point pretending the drive exists.
     push ds
     push ax
     mov ax, BDA
     mov ds, ax
-    cmp byte ptr [0x75], 0
+    cmp byte ptr [0xE0], 0
     pop ax                       # pop does not disturb the flags from cmp
     pop ds
     jne .hd_present
@@ -2508,6 +2592,16 @@ hd_int13:
     je .h_ok
     cmp ah, 0x01             # last status
     je .h_status
+    # ---- the FORMAT group. Without these, FORMAT B: reports
+    # ---- "Invalid media or Track 0 bad - disk unusable".
+    cmp ah, 0x05             # format track
+    je .h_fmtok
+    cmp ah, 0x16             # detect disk change
+    je .h_nochange
+    cmp ah, 0x17             # set disk type for format
+    je .h_ok
+    cmp ah, 0x18             # set media type for format
+    je .h_setmedia
     # unsupported
     push ds
     mov ax, BDA
@@ -2523,6 +2617,47 @@ hd_int13:
     mov ah, 0x01
     stc
     retf 2                   # replace the caller's flags (CF set)
+
+##  AH=05 -- format track.
+##  There are no physical tracks on a flash chip, so there is nothing to lay
+##  down. Report success and let FORMAT get on with writing the boot sector,
+##  FATs and root directory through ordinary AH=03 writes. Actually erasing the
+##  whole 1.44 MB here would cost ~360 block erases and wear the part for no
+##  benefit -- the FAT marks the data area free either way.
+.h_fmtok:
+    jmp .h_ok
+
+##  AH=16 -- detect disk change.
+##  The medium is soldered to the board, so it never changes. Answering
+##  "changed", or failing outright, makes DOS re-read the BPB constantly and is
+##  one of the ways FORMAT decides a disk is unusable.
+.h_nochange:
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0x74], 0
+    pop ds
+    xor ah, ah               # 00 = no change since the last call
+    clc
+    retf 2
+
+##  AH=18 -- set media type for format.
+##  DOS asks "can you format this geometry?" and expects the drive parameter
+##  table back in ES:DI. Refusing is reported as "Invalid media". The geometry
+##  is fixed by the flash layout, so accept and hand back the 1.44 MB table
+##  regardless of what was requested.
+.h_setmedia:
+    push cs
+    pop es
+    mov di, offset _floppy_dpt
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0x74], 0
+    pop ds
+    xor ah, ah
+    clc
+    retf 2
 
 .h_ok:
     push ds
@@ -2556,14 +2691,36 @@ hd_int13:
     clc
     retf 2
 
-.h_dtype:                    # AH=03 -> fixed disk, CX:DX = total sectors
+.h_dtype:
+    mov ah, 0x01                 # 01 = floppy without change-line support
+    clc
+    retf 2
+.h_dtype_old:                    # AH=03 -> fixed disk, CX:DX = total sectors
     mov ah, 0x03
     mov cx, 0
     mov dx, HD_CYLS * HD_HEADS * HD_SPT
     clc
     retf 2
 
-.h_params:                   # AH=08 -> geometry
+.h_params:
+    # Floppy AH=08 differs from the fixed-disk form: DL is the number of FLOPPY
+    # drives, BL is the drive type, and ES:DI points at the parameter table.
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov dl, 2                    # two floppies: A: and B:
+    pop ds
+    mov bl, 0x04                 # type 4 = 1.44 MB, 3.5"
+    mov ch, HD_CYLS-1            # 79
+    mov cl, HD_SPT               # 18, high cylinder bits are 0 for 80 cyl
+    mov dh, HD_HEADS-1           # 1
+    push cs
+    pop es
+    mov di, offset _floppy_dpt
+    xor ah, ah
+    clc
+    retf 2
+.h_params_old:                   # AH=08 -> geometry
 .if HD_DEBUG
     push ax                  # D8 = dispatch landed in .h_params
     mov al, 0xD8
@@ -2813,6 +2970,1897 @@ scancode_uc:
 
 # ---- boot screen strings (Philips P3105 visual style) ---------------
 # ---- banner shown directly to video during POST (no CRLF) ----------
+## =====================================================================
+##  USB MASS STORAGE -- drive C: (INT 13h, DL = 0x80)
+##
+##  Sits on top of the usb_host controller at I/O 0xE8..0xEF, which does the
+##  bit-level work (NRZI, stuffing, CRC, SOF, timeouts). Everything here is
+##  protocol: enumeration, Bulk-Only Transport, and enough SCSI to be a disk.
+##
+##  LAYERS, bottom up
+##    u_txn        one transaction, with NAK retry and a bounded wait
+##    u_ctl_*      control transfers (SETUP / data / status)
+##    u_benq       bulk IN and OUT, 64 bytes at a time, with data toggles
+##    u_bot        Bulk-Only Transport: CBW -> data -> CSW
+##    u_scsi_*     the handful of SCSI commands a BIOS disk needs
+##    usb_int13    the INT 13h face DOS sees
+##
+##  DIAGNOSABILITY: BDA 0xC0 records how far enumeration got. If C: does not
+##  appear, that byte says which step failed rather than leaving a silent
+##  absence. USBHD.COM prints it. Every stage number is listed at u_enum.
+##
+##  BDA MAP (0xC0..0xDF, otherwise unused)
+##    C0 b  stage reached       C1 b  present (1 = usable)
+##    C2 b  device address      C3 b  bulk IN endpoint
+##    C4 b  bulk OUT endpoint   C5 b  toggle IN     C6 b  toggle OUT
+##    C7 b  ep0 max packet      C8 d  last LBA (32-bit)
+##    CC w  cylinders           CE b  heads         CF b  sectors/track
+##    D0 d  CBW tag             D4 b  bConfigurationValue
+## =====================================================================
+
+##  U_BUFSZ must be defined BEFORE u_findep compares against it. Declared down
+##  with the buffers, it was a forward reference, and GNU as turns those into
+##  memory operands: "cmp bx, U_BUFSZ" assembled as "cmp bx, [0x0040]", i.e. a
+##  compare against the BDA's floppy motor counter. Same trap as HD_DRIVE.
+.equ U_BUFSZ,  64            # size of u_buf, and the descriptor request length
+
+.equ U_CMD,    0xE8
+.equ U_ADDR,   0xE9
+.equ U_ENDP,   0xEA          # W endpoint / R last received PID
+.equ U_LEN,    0xEB
+.equ U_DATA,   0xEC
+.equ U_PTR,    0xED
+.equ U_CTRL,   0xEE
+.equ U_FRAME,  0xEF
+
+.equ UOP_SETUP, 1
+.equ UOP_IN,    2
+.equ UOP_OUT,   3
+.equ UGO,       0x80
+.equ UD1,       0x08         # send DATA1 instead of DATA0
+
+.equ UST_BUSY,  0x01
+.equ UST_ACK,   0x02
+.equ UST_NAK,   0x04
+.equ UST_STALL, 0x08
+.equ UST_TMO,   0x10
+.equ UST_ERR,   0x20
+.equ UST_RXD1,  0x40
+.equ UST_RXV,   0x80
+
+.equ UC_RESET,  0x02
+.equ UC_SOFEN,  0x04
+.equ UL_FS,     0x04
+.equ UL_LOCK,   0x20
+
+## ---------------------------------------------------------------------
+##  u_txn -- run one transaction and wait for it to finish.
+##    AL = command byte (op | UGO | toggle)
+##    returns AL = status, CF set if the engine never went idle
+##  Retries on NAK, which is a device saying "not yet", not an error. The
+##  budget is deliberately large: a stick can NAK for milliseconds while its
+##  controller thinks, and giving up early looks exactly like a dead device.
+## ---------------------------------------------------------------------
+##  The command is kept in BL, NOT in DL. DX is the port register for every
+##  IN/OUT below, so "mov dx, U_CMD" overwrites DL a few instructions after it
+##  would have been saved there. The first attempt still works, because AL is
+##  loaded before the clobber -- only the RETRY path reissues garbage (0xE8,
+##  which is op 0 with GO set: a NOP transaction that sends a token and waits
+##  for a reply that never comes).
+##
+##  That made enumeration fail at the device descriptor while USBTEST.COM,
+##  whose retry loop reissues the command literally, sailed through the same
+##  transfer. Devices legitimately NAK the data stage of GET_DESCRIPTOR while
+##  they prepare it, so the retry path is not an edge case -- it is the norm.
+##  Three kinds of "no" need three different responses:
+##    NAK      the device is busy -- reissue immediately, many times
+##    ERR/TMO  a packet was corrupted or lost -- USB expects the HOST to retry,
+##             and with no series resistors on D+/D- that is not rare here
+##    STALL    a real refusal -- report it, retrying would be wrong
+##  Only retrying NAK meant a single corrupted packet aborted the whole transfer
+##  and left the device out of step, which is the instability seen on hardware.
+u_txn:
+    push bx
+    push cx
+    push dx
+    push si
+    mov bl, al                   # command, in a register DX cannot touch
+    mov bh, 3                    # attempts left after a corrupted packet
+    mov si, 16                   # outer NAK budget -- see .ut_attempt
+.ut_attempt:
+    # NAK budget: 16 rounds of 4096. An earlier version gave up after ONE
+    # round (~70 ms) on the theory that the command-level retry above would
+    # cover anything slower. The write soak disproved it: a flash stick
+    # programming a sector NAKs the next packet for hundreds of milliseconds,
+    # the phase NAK counts came out in exact multiples of 4096, and every
+    # "failed" write was a merely-busy device being abandoned mid-command --
+    # after which the device padded the sector from its stale internal buffer
+    # and reported success. NAK is flow control, not failure: keep asking,
+    # and only seconds of continuous NAK means the endpoint is truly wedged.
+    mov cx, 4096
+.ut_try:
+    push cx
+    mov al, bl
+    mov dx, U_CMD
+    out dx, al
+    # Bound the wait for BUSY to clear. This used to be 65536 iterations at
+    # ~7 us -- 0.46 s -- and 64 sectors took 30 s, which is 64 x 0.46 s almost
+    # exactly. One stalled transaction per sector was costing half a second
+    # each. No transaction can legitimately take more than about a millisecond,
+    # so 4096 (~30 ms) is still enormously generous, and BDA 0xDB counts how
+    # often it happens so the stall can be measured rather than guessed at.
+    mov cx, 4096
+.ut_wait:
+    mov dx, U_CMD
+    in al, dx
+    test al, UST_BUSY
+    jz .ut_done
+    loop .ut_wait
+    pop cx
+    push ds                      # count it: BUSY never cleared
+    push bx
+    push ax
+    mov bx, BDA
+    mov ds, bx
+    inc byte ptr [0xDB]
+    # Latch the controller's state at the FIRST stall only. By the time POST
+    # prints anything the machine has moved on, so a live read tells us nothing.
+    cmp byte ptr [0xD5], 0       # D2/D3/D5 are free; D4 and DC are not
+    jne .ut_nosnap
+    mov byte ptr [0xD5], 1
+    mov dx, 0xEF
+    mov al, 0x0C                 # tx state | sequencer state
+    out dx, al
+    in al, dx
+    mov [0xD2], al
+    mov al, 0x0D                 # LOCKED, go_pend, tx_req, BUSY, sof, rst, rx
+    out dx, al
+    in al, dx
+    mov [0xD3], al
+.ut_nosnap:
+    pop ax
+    pop bx
+    pop ds
+    stc                          # engine wedged -- a different fault entirely
+    jmp short .ut_out
+.ut_done:
+    pop cx
+    test al, UST_NAK
+    jz .ut_chkerr
+    loop .ut_try
+    dec si                       # one round of 4096 NAKs spent; the device
+    jz .ut_nakout                # is busy, not broken -- re-arm and keep on
+    jmp .ut_attempt
+.ut_nakout:
+    jmp .ut_ok                   # ~16 rounds of nothing but NAK: report it
+.ut_chkerr:
+    test al, UST_ERR | UST_TMO
+    jz .ut_ok
+    dec bh
+    jz .ut_ok                    # out of attempts; report what we got
+    jmp short .ut_attempt
+.ut_ok:
+    clc
+.ut_out:
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    ret
+
+## ---------------------------------------------------------------------
+##  u_setptr -- buffer pointer to 0
+## ---------------------------------------------------------------------
+u_setptr:
+    push ax
+    push dx
+    xor al, al
+    mov dx, U_PTR
+    out dx, al
+    pop dx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  u_ctl -- a complete control transfer.
+##    DS:SI = 8-byte setup packet
+##    ES:DI = data buffer (may be unused)
+##    CX    = data length wanted (0 = no data stage)
+##    direction comes from bit 7 of the setup packet's first byte
+##  Returns CF set on failure, CX = bytes actually transferred.
+##
+##  The status stage matters even though it moves no data: skipping it leaves
+##  the device's control endpoint mid-transfer, and the NEXT request stalls.
+## ---------------------------------------------------------------------
+u_ctl:
+    push bx
+    push dx
+    push si
+    push di
+    push bp
+    # Control transfers go to endpoint 0, and the endpoint register still holds
+    # whatever bulk endpoint the last transfer used. Harmless during enumeration,
+    # where it was 0 throughout, but any control request issued after bulk
+    # traffic -- such as the recovery below -- would go to the wrong endpoint.
+    push ax
+    push dx
+    xor al, al
+    mov dx, U_ENDP
+    out dx, al
+    pop dx
+    pop ax
+    mov bp, cx                   # bp = requested length
+    # The status stage direction depends on bmRequestType, which is the first
+    # byte of the packet. SI has advanced by the time we need it, so stash it
+    # now. CS is PSRAM here (the BIOS lives in RAM), so it is writable scratch.
+    mov al, [si]
+    mov byte ptr cs:[u_reqtype], al
+    # ---- SETUP stage, always DATA0 ----
+    call u_setptr
+    mov cx, 8
+    mov dx, U_DATA
+.uc_fill:
+    lodsb
+    out dx, al
+    loop .uc_fill
+    mov al, 8
+    mov dx, U_LEN
+    out dx, al
+    mov al, UOP_SETUP | UGO
+    call u_txn
+    jc .uc_bad
+    test al, UST_ACK
+    jz .uc_bad
+    # ---- data stage ----
+    xor bx, bx                   # bx = bytes moved so far
+    test bp, bp
+    jz .uc_status
+.uc_data:
+    call u_setptr
+    mov al, UOP_IN | UGO
+    call u_txn
+    jc .uc_bad
+    test al, UST_RXV
+    jz .uc_bad
+    push ax
+    mov dx, U_LEN
+    in al, dx
+    xor ah, ah
+    mov cx, ax                   # cx = bytes in this packet
+    pop ax
+    jcxz .uc_status              # zero-length packet ends the stage
+    push cx
+    call u_setptr
+    mov dx, U_DATA
+.uc_copy:
+    in al, dx
+    stosb
+    inc bx
+    loop .uc_copy
+    pop cx
+    cmp cx, 64                   # a short packet ends the stage
+    jb .uc_status
+    cmp bx, bp
+    jb .uc_data
+.uc_status:
+    # status stage: OUT zero-length DATA1 for a control READ,
+    #               IN  zero-length DATA1 for a control WRITE
+    push bx
+    call u_setptr
+    xor al, al
+    mov dx, U_LEN
+    out dx, al                   # zero-length
+    mov al, byte ptr cs:[u_reqtype]
+    test al, 0x80
+    jz .uc_st_in
+    mov al, UOP_OUT | UGO | UD1
+    jmp short .uc_st_go
+.uc_st_in:
+    mov al, UOP_IN | UGO | UD1
+.uc_st_go:
+    call u_txn
+    pop bx
+    jc .uc_bad
+    mov cx, bx
+    clc
+    jmp short .uc_out
+.uc_bad:
+    xor cx, cx
+    stc
+.uc_out:
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop bx
+    ret
+
+## ---------------------------------------------------------------------
+##  u_bulk_out -- send CX bytes from DS:SI on the bulk OUT endpoint.
+##  u_bulk_in  -- receive CX bytes into ES:DI on the bulk IN endpoint.
+##  Both keep the endpoint's data toggle in the BDA and flip it per packet;
+##  getting that wrong makes the device silently drop everything after the
+##  first packet.
+## ---------------------------------------------------------------------
+u_bulk_out:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+.ubo_pkt:
+    jcxz .ubo_done
+    mov bx, cx
+    cmp bx, 64
+    jbe .ubo_sz
+    mov bx, 64
+.ubo_sz:
+    push cx
+    call u_setptr
+    mov cx, bx
+    mov dx, U_DATA
+.ubo_fill:
+    lodsb
+    out dx, al
+    loop .ubo_fill
+    mov al, bl
+    mov dx, U_LEN
+    out dx, al
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xC4]               # bulk OUT endpoint
+    mov dx, U_ENDP
+    out dx, al
+    mov al, UOP_OUT | UGO
+    cmp byte ptr [0xC6], 0       # toggle
+    je .ubo_t0
+    or al, UD1
+.ubo_t0:
+    pop ds
+    call u_txn
+    pop cx
+    jc .ubo_bad
+    test al, UST_ACK
+    jz .ubo_bad
+    # Advance the stored toggle only now, on the device's ACK. It used to be
+    # flipped BEFORE the transaction, so any abandoned transfer left the host
+    # one toggle ahead of the device -- and the next data phase had its first
+    # packet ACKed-and-discarded as a duplicate. Sixty-four bytes silently
+    # gone, every status success. (The ACK-lost case still works: the device
+    # ACKs the retransmission as a duplicate, and we advance exactly once.)
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    xor byte ptr [0xC6], 1
+    pop ax
+    pop ds
+    sub cx, bx
+    jmp short .ubo_pkt
+.ubo_done:
+    clc
+    jmp short .ubo_out
+.ubo_bad:
+    push ds                      # publish WHY: 10 timeout, 08 stall,
+    push bx                      # 04 NAK exhausted, 20 CRC/PID error
+    mov bx, BDA
+    mov ds, bx
+    mov [0xDF], al
+    pop bx
+    pop ds
+    stc
+.ubo_out:
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+u_bulk_in:
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    push si
+    xor si, si                   # duplicate-packet counter
+.ubi_pkt:
+    jcxz .ubi_done
+    push cx
+    call u_setptr
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xC3]               # bulk IN endpoint
+    mov dx, U_ENDP
+    out dx, al
+    pop ds
+    mov al, UOP_IN | UGO
+    call u_txn
+    pop cx
+    jc .ubi_bad
+    test al, UST_RXV
+    jz .ubi_bad
+    # ---- data toggle ----
+    # A packet arriving with the toggle we are NOT expecting is a retransmission
+    # of one we already took: our ACK was lost, so the device sent it again.
+    # Counting it as new data shifts the whole stream by 64 bytes, and the first
+    # thing that notices is the CSW signature. Discard it and read again.
+    mov bh, 0
+    test al, UST_RXD1
+    jz .ubi_t0
+    mov bh, 1
+.ubi_t0:
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xC5]
+    cmp al, bh
+    pop ax                       # POP does not disturb the flags
+    pop ds
+    je .ubi_togok
+    inc si                       # bounded: a device that only ever repeats
+    cmp si, 8                    # itself must not wedge us
+    ja .ubi_bad
+    jmp short .ubi_pkt
+.ubi_togok:
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    xor byte ptr [0xC5], 1
+    pop ax
+    pop ds
+    push cx
+    mov dx, U_LEN
+    in al, dx
+    xor ah, ah
+    mov bx, ax                   # bx = bytes this packet
+    call u_setptr
+    mov cx, bx
+    jcxz .ubi_short
+    mov dx, U_DATA
+.ubi_copy:
+    in al, dx
+    stosb
+    loop .ubi_copy
+.ubi_short:
+    pop cx
+    sub cx, bx
+    jbe .ubi_done
+    cmp bx, 64                   # short packet means the device is done
+    jb .ubi_done
+    jmp short .ubi_pkt
+.ubi_done:
+    clc
+    jmp short .ubi_out
+.ubi_bad:
+    push ds
+    push bx
+    mov bx, BDA
+    mov ds, bx
+    mov [0xDF], al
+    pop bx
+    pop ds
+    stc
+.ubi_out:
+    pop si
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  u_chs2lba -- CHS to LBA.
+##    CH = cylinder low 8, CL = sector | cylinder high 2, DH = head
+##    returns DX:AX = LBA
+##
+##  LBA = (cyl * heads + head) * spt + sector - 1
+##
+##  MUL clobbers DX, and DH is the head, so the head and sector are copied to
+##  BDA scratch before any multiply runs -- the same reason hd_chs2lba does it.
+##  Both products need care about width: cyl <= 1023 and heads <= 16 gives at
+##  most 16368, so the first MUL leaves DX = 0 and the second can safely use the
+##  full 32-bit result.
+## ---------------------------------------------------------------------
+u_chs2lba:
+    push bx
+    push cx
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    pop ax
+
+    mov al, cl
+    and al, 0x3F
+    mov [0xD6], al               # sector, 1-based
+    mov [0xD7], dh               # head
+
+    # cylinder = CH | ((CL & 0xC0) << 2)
+    mov bl, ch
+    mov bh, cl
+    and bh, 0xC0
+    push cx
+    mov cl, 6
+    shr bh, cl                   # 8086: shift by CL, never by an immediate
+    pop cx
+    mov ax, bx                   # ax = cylinder (0..1023)
+
+    xor bh, bh
+    mov bl, [0xCE]               # heads
+    mul bx                       # dx:ax = cyl * heads  (<= 16368, so dx = 0)
+    xor bh, bh
+    mov bl, [0xD7]
+    add ax, bx                   # + head  (<= 16383, still fits ax)
+
+    xor bh, bh
+    mov bl, [0xCF]               # sectors per track
+    mul bx                       # dx:ax = (cyl*heads + head) * spt
+
+    xor bh, bh
+    mov bl, [0xD6]
+    dec bx                       # sector - 1
+    add ax, bx
+    adc dx, 0
+
+    pop ds
+    pop cx
+    pop bx
+    ret
+
+## ---------------------------------------------------------------------
+##  u_rw10 -- READ(10) / WRITE(10).
+##    DX:AX = LBA        BL = sector count (1..127)      ES:DI = buffer
+##    direction from BDA 0xD8: 0 = read, 1 = write
+##  SCSI operands are BIG-endian; the byte order below is deliberate.
+## ---------------------------------------------------------------------
+u_rw10:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push bp
+    push ds
+
+    # Pick the opcode from the direction flag, read fresh out of the BDA.
+    #
+    # An earlier version carried the direction in AH and then popped the LBA
+    # back into AX, which destroyed it -- so "test ah, ah" tested the LBA's HIGH
+    # BYTE instead. For any LBA below 256 that byte is zero, so every write was
+    # issued as READ(10) while the CBW correctly said "OUT, 512 bytes". The
+    # device sees a read command with a write data phase, calls it a phase error
+    # and rejects it: writes failed at sector 0, every time, forever.
+    #
+    # MOV does not touch the flags, so the JZ below still tests the direction.
+    push ax
+    push dx
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xD8]
+    test al, al
+    mov al, 0x28                 # READ(10)
+    jz .urw_op
+    mov al, 0x2A                 # WRITE(10)
+.urw_op:
+    mov byte ptr cs:[u_cdb_rw+0], al
+    pop dx
+    pop ax
+
+    mov byte ptr cs:[u_cdb_rw+1], 0
+    mov byte ptr cs:[u_cdb_rw+2], dh    # LBA, big-endian
+    mov byte ptr cs:[u_cdb_rw+3], dl
+    mov byte ptr cs:[u_cdb_rw+4], ah
+    mov byte ptr cs:[u_cdb_rw+5], al
+    mov byte ptr cs:[u_cdb_rw+6], 0
+    mov byte ptr cs:[u_cdb_rw+7], 0
+    mov byte ptr cs:[u_cdb_rw+8], bl    # transfer length, big-endian
+    mov byte ptr cs:[u_cdb_rw+9], 0
+
+    # data length = count * 512
+    xor ax, ax
+    mov al, bl
+    mov cl, 9
+    shl ax, cl
+    mov bp, ax
+
+    # direction flag for the CBW
+    mov ax, BDA
+    mov ds, ax
+    mov ch, 0x80                 # IN
+    cmp byte ptr [0xD8], 0
+    je .urw_dir
+    mov ch, 0x00                 # OUT
+.urw_dir:
+    mov cl, 10
+    push cs
+    pop ds
+    mov si, offset u_cdb_rw
+    call u_bot
+
+    pop ds
+    pop bp
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  u_mark -- record where a transport command failed, in BDA 0xDD, whatever
+##  DS happens to be. Same idea as the enumeration stage byte: a failure that
+##  says WHERE beats one that only says "no".
+##    1 CBW out failed         2 data phase failed
+##    3 CSW in failed          4 CSW signature wrong
+##    5 CSW reported a non-zero status (the status itself goes to 0xDE)
+## ---------------------------------------------------------------------
+u_mark:
+    push ds
+    push bx
+    mov bx, BDA
+    mov ds, bx
+    mov [0xDD], al
+    pop bx
+    pop ds
+    ret
+
+## ---------------------------------------------------------------------
+##  u_bot -- one Bulk-Only Transport command: CBW, data, CSW.
+##    DS:SI = command block (16 bytes are always copied, so every CDB table
+##            below is padded to 16)
+##    CL    = CB length      CH = 0x80 for data IN, 0x00 for OUT/none
+##    ES:DI = data buffer    BP = data length
+##  Returns CF set on failure.
+##
+##  All three phases must complete. If the data phase fails, the CSW is still
+##  collected -- leaving it on the wire desynchronises the device and every
+##  later command fails in a way that looks like a dead disk.
+## ---------------------------------------------------------------------
+u_bot:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+    push ds
+    push es
+
+    push ax
+    xor al, al
+    call u_mark                  # clear any previous failure point
+    pop ax
+
+    push es                      # the caller's data buffer, needed twice below
+    push di
+
+    # ---- build the 31-byte CBW at CS:u_cbw ----
+    push cs
+    pop es
+    mov di, offset u_cbw
+    cld
+    mov ax, 0x5355               # 'U','S'
+    stosw
+    mov ax, 0x4342               # 'B','C'
+    stosw
+    push ds                      # dCBWTag -- any value, echoed in the CSW
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    inc word ptr [0xD0]
+    mov ax, [0xD0]
+    mov bx, ax
+    pop ax
+    pop ds
+    mov ax, bx
+    stosw
+    xor ax, ax
+    stosw
+    mov ax, bp                   # dCBWDataTransferLength
+    stosw
+    xor ax, ax
+    stosw
+    mov al, ch                   # bmCBWFlags
+    stosb
+    xor al, al                   # bCBWLUN
+    stosb
+    mov al, cl                   # bCBWCBLength
+    stosb
+    push cx                      # the command block itself
+    mov cx, 16
+    rep movsb
+    pop cx
+
+    # ---- CBW out ----
+    push ds
+    push si
+    push cx
+    push cs
+    pop ds
+    mov si, offset u_cbw
+    mov cx, 31
+    call u_bulk_out
+    pop cx
+    pop si
+    pop ds
+    jnc .ub_cbw_ok
+    push ax
+    mov al, 1
+    call u_mark
+    pop ax
+    jmp .ub_fail_pop
+.ub_cbw_ok:
+
+    # ---- data phase ----
+    pop di                       # restore the caller's buffer
+    pop es
+    push es
+    push di
+    test bp, bp
+    jz .ub_csw
+    test ch, 0x80
+    jz .ub_dout
+    push cx
+    mov cx, bp
+    call u_bulk_in
+    pop cx
+    jnc .ub_din_ok
+    push ax
+    mov al, 2                    # noted, but we still collect the CSW
+    call u_mark
+    pop ax
+.ub_din_ok:
+    jmp short .ub_csw
+.ub_dout:
+    push cx
+    push ds
+    push si
+    mov ax, es
+    mov ds, ax
+    mov si, di
+    mov cx, bp
+    call u_bulk_out
+    pop si
+    pop ds
+    pop cx
+    # A failed data phase still falls through to collect the CSW -- abandoning
+    # a command mid-flight is what put the device out of step before -- but
+    # the failure is RECORDED, and the command fails once the CSW is in hand.
+    # It used to be dropped entirely: the device padded the sector from its
+    # stale internal buffer, answered PASS, and a write that lost 64 bytes
+    # reported success all the way up to DOS. tmo+03 with wf 0 in the soak
+    # was precisely this hole.
+    jnc .ub_dout_ok
+    push ax
+    mov al, 6
+    call u_mark
+    pop ax
+.ub_dout_ok:
+
+.ub_csw:
+    push cs
+    pop es
+    mov di, offset u_csw
+    push cx
+    mov cx, 13
+    call u_bulk_in
+    pop cx
+    jnc .ub_csw_in_ok
+    push ax
+    mov al, 3
+    call u_mark
+    pop ax
+    jmp .ub_fail_pop
+.ub_csw_in_ok:
+    cmp word ptr cs:[u_csw+0], 0x5355     # 'U','S'
+    jne .ub_sigbad
+    cmp word ptr cs:[u_csw+2], 0x5342     # 'B','S'
+    je .ub_sigok
+.ub_sigbad:
+    push ax
+    mov al, 4
+    call u_mark
+    pop ax
+    jmp .ub_fail_pop
+.ub_sigok:
+    # dCSWTag must echo the CBW's tag. Unchecked, a stale CSW left over from
+    # an aborted command satisfies the NEXT command -- a retry can "succeed"
+    # without moving a single byte.
+    push ax
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov ax, [0xD0]
+    cmp ax, word ptr cs:[u_csw+4]
+    pop ds
+    pop ax
+    jne .ub_tagbad
+    cmp word ptr cs:[u_csw+6], 0
+    je .ub_tagok
+.ub_tagbad:
+    push ax
+    mov al, 7
+    call u_mark
+    pop ax
+    jmp .ub_fail_pop
+.ub_tagok:
+    cmp byte ptr cs:[u_csw+12], 0         # bCSWStatus: 0 pass
+    je .ub_statok
+    push ax
+    push ds
+    push bx
+    mov bx, BDA
+    mov ds, bx
+    mov al, byte ptr cs:[u_csw+12]
+    mov [0xDE], al                        # publish the actual status
+    pop bx
+    pop ds
+    mov al, 5
+    call u_mark
+    pop ax
+    jmp .ub_fail_pop
+.ub_statok:
+    # The device says PASS. Believe it only if OUR side of the transfer was
+    # complete: a recorded data-phase failure, or residue on an OUT, means
+    # bytes never arrived -- whatever the status byte claims. The status
+    # answers "did I succeed at what I received", never "did you deliver
+    # everything".
+    push ax
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    cmp byte ptr [0xDD], 0
+    pop ds
+    pop ax
+    jne .ub_lied
+    test bp, bp
+    jz .ub_honest
+    test ch, 0x80
+    jnz .ub_honest               # short IN data can be legal (short sense)
+    cmp word ptr cs:[u_csw+8], 0          # dCSWDataResidue, low word
+    jne .ub_resbad
+    cmp word ptr cs:[u_csw+10], 0         # high word
+    je .ub_honest
+.ub_resbad:
+    push ax
+    mov al, 8
+    call u_mark
+    pop ax
+.ub_lied:
+    jmp .ub_fail_pop
+.ub_honest:
+    pop di
+    pop es
+    clc
+    jmp .ub_out
+.ub_fail_pop:
+    pop di
+    pop es
+    stc
+.ub_out:
+    pop es
+    pop ds
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  u_busreset -- drive SE0 long enough to be a real bus reset, then let the
+##  device recover with SOF running so it does not immediately suspend.
+##  The 10 ms minimum is a minimum; 40 ms costs nothing at POST.
+## ---------------------------------------------------------------------
+u_busreset:
+    push ax
+    push cx
+    push dx
+    mov dx, U_CTRL
+    mov al, UC_RESET
+    out dx, al
+    mov cx, 30
+.ubr_hold:
+    call u_delay
+    loop .ubr_hold
+    mov al, UC_SOFEN
+    out dx, al
+    mov cx, 60                   # devices are allowed 10 ms; be generous
+.ubr_rec:
+    call u_delay
+    loop .ubr_rec
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  u_drain -- read and throw away anything the device is still trying to send.
+##
+##  A device NAKs a bulk OUT when it is not ready for a new command, and in
+##  Bulk-Only Transport that usually means it is holding data or a CSW that
+##  nobody collected. Resetting without draining leaves it in the same place, so
+##  a CBW gets NAKed for ever -- 65536 retries and status 04, which is what the
+##  hardware reported. Bounded at 20 packets: this runs on a device that is
+##  already misbehaving, so it must not be able to spin.
+## ---------------------------------------------------------------------
+u_drain:
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    push ds
+    push es
+    push cs
+    pop es
+    mov di, offset u_buf
+    mov cx, 20
+.udr_pkt:
+    push cx
+    call u_setptr
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xC3]
+    mov dx, U_ENDP
+    out dx, al
+    mov al, UOP_IN | UGO
+    call u_txn
+    pop cx
+    jc .udr_done                 # engine wedged
+    test al, UST_RXV
+    jz .udr_done                 # NAK / timeout / stall: nothing left to take
+    mov dx, U_LEN
+    in al, dx
+    xor ah, ah
+    mov bx, ax
+    test bx, bx
+    jz .udr_done                 # zero-length packet ends it
+    call u_setptr
+    push cx
+    mov cx, bx
+    mov dx, U_DATA
+.udr_rd:
+    in al, dx                    # read and discard
+    loop .udr_rd
+    pop cx
+    cmp bx, 64
+    jb .udr_done                 # short packet ends it
+    loop .udr_pkt
+.udr_done:
+    pop es
+    pop ds
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  u_botreset -- Bulk-Only Mass Storage Reset, then clear both endpoint halts.
+##
+##  Without this, a single failed transfer is permanent. The device is left
+##  holding data it could not deliver, or a CSW nobody collected, and every
+##  command after it reads those stale bytes -- which shows up as "CSW signature
+##  wrong" for ever after, surviving a warm boot and clearing only on a power
+##  cycle. That is exactly the intermittent-then-stuck behaviour seen on
+##  hardware: the transfer works, then one hiccup poisons everything.
+##
+##  The sequence is the one the Bulk-Only Transport spec prescribes: class
+##  request 0xFF to the interface, then CLEAR_FEATURE(ENDPOINT_HALT) on the bulk
+##  IN and bulk OUT endpoints. A reset also returns both endpoints to DATA0, so
+##  the toggles are cleared here to match.
+## ---------------------------------------------------------------------
+u_botreset:
+    push ax
+    push cx
+    push si
+    push di
+    push ds
+    push es
+    push cs
+    pop es
+    mov di, offset u_buf
+    push cs
+    pop ds
+
+    call u_drain                 # take back whatever it was holding first
+    push cs
+    pop ds
+
+    mov si, offset u_rq_botrst   # class reset
+    xor cx, cx
+    call u_ctl
+
+    push ds                      # clear halt on the bulk IN endpoint
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xC3]
+    pop ds
+    mov byte ptr cs:[u_rq_clrhalt+4], al
+    mov si, offset u_rq_clrhalt
+    xor cx, cx
+    call u_ctl
+
+    push ds                      # and on the bulk OUT endpoint
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xC4]
+    pop ds
+    mov byte ptr cs:[u_rq_clrhalt+4], al
+    mov si, offset u_rq_clrhalt
+    xor cx, cx
+    call u_ctl
+
+    push ds                      # a reset puts both endpoints back to DATA0
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0xC5], 0
+    mov byte ptr [0xC6], 0
+    pop ds
+
+    call u_delay
+    pop es
+    pop ds
+    pop di
+    pop si
+    pop cx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  u_findep -- walk the configuration descriptor for the mass-storage
+##  interface and its bulk endpoints.
+##
+##  Descriptors are a chain of {bLength, bDescriptorType, ...}, so the walk
+##  steps by bLength rather than assuming any layout. Endpoints are only
+##  accepted once a mass-storage interface (class 08) has been seen, otherwise
+##  a composite device's other interface could donate the wrong pair.
+##
+##  Entry: DS = BDA, u_buf holds the descriptor, u_cfglen its valid length.
+##  Sets BDA 0xC3 (bulk IN) and 0xC4 (bulk OUT); CF set if either is missing.
+## ---------------------------------------------------------------------
+u_findep:
+    push ax
+    push bx
+    push cx
+    push si
+    mov byte ptr [0xC3], 0
+    mov byte ptr [0xC4], 0
+    mov byte ptr [0xD9], 0       # 1 once a mass-storage interface is seen
+    mov bx, cs:[u_cfglen]
+    cmp bx, U_BUFSZ
+    jbe .fe_len
+    mov bx, U_BUFSZ
+.fe_len:
+    xor cx, cx
+.fe_walk:
+    cmp cx, bx
+    jae .fe_done
+    mov si, cx
+    add si, offset u_buf
+    mov al, cs:[si]              # bLength
+    cmp al, 2
+    jb .fe_done                  # malformed chain, stop rather than loop
+    mov ah, cs:[si+1]            # bDescriptorType
+    cmp ah, 0x04
+    je .fe_iface
+    cmp ah, 0x05
+    je .fe_endp
+    jmp short .fe_next
+.fe_iface:
+    mov byte ptr [0xD9], 0
+    cmp byte ptr cs:[si+5], 0x08 # bInterfaceClass = mass storage
+    jne .fe_next
+    mov byte ptr [0xD9], 1
+    jmp short .fe_next
+.fe_endp:
+    cmp byte ptr [0xD9], 0
+    je .fe_next                  # not our interface
+    mov ah, cs:[si+3]            # bmAttributes
+    and ah, 0x03
+    cmp ah, 0x02                 # bulk?
+    jne .fe_next
+    mov ah, cs:[si+2]            # bEndpointAddress
+    test ah, 0x80
+    jz .fe_out
+    cmp byte ptr [0xC3], 0
+    jne .fe_next
+    mov [0xC3], ah
+    jmp short .fe_next
+.fe_out:
+    cmp byte ptr [0xC4], 0
+    jne .fe_next
+    mov [0xC4], ah
+.fe_next:
+    xor ah, ah
+    add cx, ax
+    jmp short .fe_walk
+.fe_done:
+    cmp byte ptr [0xC3], 0
+    je .fe_bad
+    cmp byte ptr [0xC4], 0
+    je .fe_bad
+    clc
+    jmp short .fe_out2
+.fe_bad:
+    stc
+.fe_out2:
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  u_geometry -- capacity to CHS that DOS 3.3 through 6 can address.
+##
+##  INT 13h carries 10 bits of cylinder, and the BIOS convention caps heads at
+##  16 and sectors at 63: 1024 x 16 x 63 = 1,032,192 sectors = 504 MB. That is
+##  a hard ceiling, so a larger stick is reported as 504 MB and the remainder
+##  is simply unreachable. Every DOS of the era is happy inside it.
+##
+##  The clamp has to happen BEFORE the divide, not after: a 32 GB stick is
+##  67 million sectors, and 67e6 / 1008 does not fit in 16 bits, so DIV would
+##  raise a divide-overflow interrupt rather than return a wrong answer.
+## ---------------------------------------------------------------------
+u_geometry:
+    push ax
+    push cx
+    push dx
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0xCE], 16
+    mov byte ptr [0xCF], 63
+
+    mov ax, [0xC8]               # last LBA, low word
+    mov dx, [0xCA]               # high word
+    add ax, 1                    # total sectors = last + 1
+    adc dx, 0
+
+    cmp dx, 0x000F               # clamp to 0x000FC000 = 1,032,192
+    jb .ug_div
+    ja .ug_clamp
+    cmp ax, 0xC000
+    jbe .ug_div
+.ug_clamp:
+    mov ax, 0xC000
+    mov dx, 0x000F
+.ug_div:
+    mov cx, 1008                 # heads * spt
+    div cx                       # dx:ax / cx -> ax = cylinders
+    cmp ax, 1024
+    jbe .ug_have
+    mov ax, 1024
+.ug_have:
+    test ax, ax
+    jz .ug_bad
+    mov [0xCC], ax
+    clc
+    jmp short .ug_out
+.ug_bad:
+    stc
+.ug_out:
+    pop ds
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  usb_int13 read/write.
+##
+##  ES:BX is the caller's buffer, so BX is NOT available as a direction flag --
+##  an earlier draft used BH for it and quietly corrupted the buffer pointer.
+##  The direction goes in BDA 0xD8 instead.
+## ---------------------------------------------------------------------
+.ui_read:
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0xD8], 0
+    pop ax
+    pop ds
+    jmp short .ui_rw
+.ui_write:
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0xD8], 1
+    pop ax
+    pop ds
+.ui_rw:
+    test al, al
+    jz .ui_ok                    # zero sectors is a no-op, not an error
+    cmp al, 127                  # one CBW carries at most 127 x 512 bytes
+    ja .ui_err
+    push ds
+    push es
+    push si
+    push di
+    push bp
+    push bx
+    push cx
+    push dx
+    mov di, bx                   # ES:DI = caller's buffer
+    mov bl, al                   # BL = sector count
+    push bx
+    call u_chs2lba               # DX:AX = LBA, from the caller's CH/CL/DH
+    pop bx
+    # Retry the whole command, recovering the transport between attempts.
+    #
+    # 38 consecutive 512-byte writes -- some 380 packets -- succeeded before the
+    # first failure, so this is not a broken code path but an occasional lost or
+    # corrupted packet. One retry was not enough: the recovery itself moves
+    # packets, so it can meet the same error. Four attempts makes a single
+    # glitch invisible while still failing promptly on a genuinely dead device.
+    #
+    # Reissuing a write is safe: the same sector is written with the same data,
+    # so a partially-applied attempt is simply overwritten.
+    mov si, 4
+.ui_try:
+    push ax
+    push dx
+    push bx
+    push si
+    call u_rw10
+    pop si
+    pop bx
+    pop dx
+    pop ax
+    jnc .ui_rw_ok
+    dec si
+    jz .ui_rw_bad
+    call u_botreset
+    jmp short .ui_try
+.ui_rw_bad:
+    stc
+    jmp short .ui_rw_done
+.ui_rw_ok:
+    clc
+.ui_rw_done:                     # POP does not disturb CF
+    pop dx
+    pop cx
+    pop bx
+    pop bp
+    pop di
+    pop si
+    pop es
+    pop ds
+    jc .ui_err
+    xor ah, ah
+    clc
+    retf 2
+
+## TEST UNIT READY -- no data. CF set means "not ready", which during spin-up
+## is normal rather than an error.
+u_scsi_tur:
+    push cx
+    push si
+    push di
+    push bp
+    push es
+    push ds                      # MUST be saved: "push cs / pop ds" below
+    push cs                      # overwrites the caller's DS, and u_enum runs
+    pop es                       # with DS = BDA. Without this the stage byte
+    push cs                      # and the present flag were written to
+    pop ds                       # F000:00Cx instead of 0040:00Cx.
+    mov si, offset u_cdb_tur
+    mov cl, 6
+    mov ch, 0
+    xor bp, bp
+    xor di, di
+    call u_bot
+    pop ds
+    pop es
+    pop bp
+    pop di
+    pop si
+    pop cx
+    ret
+
+## REQUEST SENSE -- clears a pending check condition. Skipping this after a
+## failure leaves the device refusing everything with the same sense data.
+u_scsi_sense:
+    push cx
+    push si
+    push di
+    push bp
+    push es
+    push ds                      # MUST be saved: "push cs / pop ds" below
+    push cs                      # overwrites the caller's DS, and u_enum runs
+    pop es                       # with DS = BDA. Without this the stage byte
+    push cs                      # and the present flag were written to
+    pop ds                       # F000:00Cx instead of 0040:00Cx.
+    mov si, offset u_cdb_sense
+    mov cl, 6
+    mov ch, 0x80
+    mov bp, 18
+    mov di, offset u_buf
+    call u_bot
+    pop ds
+    pop es
+    pop bp
+    pop di
+    pop si
+    pop cx
+    ret
+
+## READ CAPACITY(10) -- returns the LAST LBA and the block size, both
+## big-endian. A 512-byte block size is assumed everywhere else in the BIOS;
+## anything else is rejected rather than silently mis-addressed.
+u_scsi_capacity:
+    push ax
+    push bx
+    push cx
+    push si
+    push di
+    push bp
+    push ds
+    push es
+    push cs
+    pop es
+    push cs
+    pop ds
+    mov si, offset u_cdb_cap
+    mov cl, 10
+    mov ch, 0x80
+    mov bp, 8
+    mov di, offset u_buf
+    call u_bot
+    jc .usc_bad
+    # last LBA, big-endian in bytes 0..3 -> little-endian 32-bit in the BDA
+    mov ax, BDA
+    mov ds, ax
+    mov al, byte ptr cs:[u_buf+3]
+    mov ah, byte ptr cs:[u_buf+2]
+    mov [0xC8], ax
+    mov al, byte ptr cs:[u_buf+1]
+    mov ah, byte ptr cs:[u_buf+0]
+    mov [0xCA], ax
+    # block size must be 512
+    cmp byte ptr cs:[u_buf+6], 0x02
+    jne .usc_bad
+    cmp byte ptr cs:[u_buf+7], 0x00
+    jne .usc_bad
+    clc
+    jmp short .usc_out
+.usc_bad:
+    stc
+.usc_out:
+    pop es
+    pop ds
+    pop bp
+    pop di
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+## ---------------------------------------------------------------------
+##  u_enum -- reset, address, configure, and find the bulk endpoints.
+##  Records progress in BDA 0xC0 so a failure says WHERE it failed:
+##    01 no 48 MHz PLL lock       02 no device on the port
+##    03 device descriptor failed 04 SET_ADDRESS failed
+##    05 config descriptor failed 06 no mass-storage interface
+##    07 SET_CONFIGURATION failed 08 unit never became ready
+##    09 READ CAPACITY failed     0A geometry unusable
+##    FF success
+## ---------------------------------------------------------------------
+u_enum:
+    push ds
+    push es
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0xC1], 0
+    mov byte ptr [0xC0], 1
+    mov byte ptr [0xD0], 0
+    mov byte ptr [0xD1], 0
+
+    # Is the logic in the FPGA the logic this driver was written against? The
+    # registers answer either way -- an older image still returns plausible
+    # counters -- so without this the wrong bitstream reads as a USB failure,
+    # and it has twice sent us chasing a fault that was not there.
+    mov dx, 0xEF
+    mov al, 0x0F
+    out dx, al
+    in al, dx
+    cmp al, 0xA5
+    je .ue_sig_ok
+    mov byte ptr [0xC0], 0xF0    # not a USB fault at all
+    jmp .ue_out
+.ue_sig_ok:
+
+    mov dx, U_CTRL
+    in al, dx
+    test al, UL_LOCK
+    jz .ue_out                   # stage 1: no PLL, nothing can work
+
+    mov byte ptr [0xC0], 2
+    xor al, al
+    out dx, al                   # port 0, no reset, no SOF
+    call u_delay
+    in al, dx
+    test al, UL_FS
+    jz .ue_out                   # stage 2: no full-speed device
+
+    # USB 2.0 7.1.7.3: once attach is detected, leave the device alone for
+    # 100 ms before resetting it. The pull-up appears as soon as the device has
+    # power, well before its controller is ready to answer, so resetting the
+    # moment we see full speed hits a half-awake device -- which is exactly the
+    # "replug the stick and it fails at some random stage" behaviour.
+    mov cx, 70
+.ue_settle:
+    call u_delay
+    loop .ue_settle
+
+    call u_busreset
+
+    # ---- device descriptor at address 0 ----
+    ##  Retried, with a fresh bus reset between attempts. Reflashing the FPGA
+    ##  resets this controller but NOT the stick: 5 V comes straight off the
+    ##  board, so the device keeps its address and configuration and ignores
+    ##  requests to address 0. One reset should undo that, but a device left
+    ##  mid-transaction can need more than one, and the failure looks identical
+    ##  to "no device" -- which is what stage 03 was reporting after a reflash.
+    mov byte ptr [0xC0], 3
+    mov cx, 4
+.ue_dev_try:
+    push cx
+    xor al, al
+    mov dx, U_ADDR
+    out dx, al
+    mov dx, U_ENDP
+    out dx, al
+    push cs
+    pop es
+    mov di, offset u_buf
+    push ds
+    push cs
+    pop ds
+    mov si, offset u_rq_dev8
+    mov cx, 8
+    call u_ctl
+    pop ds
+    pop cx
+    jnc .ue_dev_ok
+    call u_busreset
+    loop .ue_dev_try
+    jmp .ue_out
+.ue_dev_ok:
+    mov al, byte ptr cs:[u_buf+7]
+    mov [0xC7], al               # bMaxPacketSize0
+
+    # ---- SET_ADDRESS(1) ----
+    mov byte ptr [0xC0], 4
+    push ds
+    push cs
+    pop ds
+    mov si, offset u_rq_setaddr
+    xor cx, cx
+    call u_ctl
+    pop ds
+    jc .ue_out
+    call u_delay
+    call u_delay
+    mov al, 1
+    mov [0xC2], al
+    mov dx, U_ADDR
+    out dx, al
+
+    # ---- configuration descriptor: header, then the whole thing ----
+    mov byte ptr [0xC0], 5
+    push ds
+    push cs
+    pop ds
+    mov si, offset u_rq_cfg
+    mov cx, 64
+    call u_ctl
+    pop ds
+    jc .ue_out
+    # Publish where the descriptor landed and how much of it arrived, so
+    # USBHD.COM can dump the actual bytes. u_buf is in the BIOS segment, whose
+    # offset a DOS program has no other way to know.
+    mov word ptr [0xDA], offset u_buf
+    mov [0xDC], cx               # bytes the device actually returned
+    mov al, byte ptr cs:[u_buf+5]
+    mov [0xD4], al               # bConfigurationValue
+    mov ax, word ptr cs:[u_buf+2]
+    mov word ptr cs:[u_cfglen], ax   # wTotalLength, clamped inside u_findep
+
+    # ---- find the bulk endpoints of the mass-storage interface ----
+    mov byte ptr [0xC0], 6
+    call u_findep
+    jc .ue_out
+
+    # ---- SET_CONFIGURATION ----
+    mov byte ptr [0xC0], 7
+    mov al, [0xD4]
+    mov byte ptr cs:[u_rq_setcfg+2], al
+    push ds
+    push cs
+    pop ds
+    mov si, offset u_rq_setcfg
+    xor cx, cx
+    call u_ctl
+    pop ds
+    jc .ue_out
+    mov byte ptr [0xC5], 0       # fresh data toggles after configuring
+    mov byte ptr [0xC6], 0
+
+    # ---- TEST UNIT READY, retried: sticks report not-ready while spinning up ----
+    mov byte ptr [0xC0], 8
+    mov cx, 40
+.ue_tur:
+    push cx
+    call u_scsi_tur
+    pop cx
+    jnc .ue_ready
+    push cx
+    call u_scsi_sense            # a check condition must be cleared or the
+    call u_delay                 # next command fails for the same reason
+    pop cx
+    loop .ue_tur
+    jmp short .ue_out
+.ue_ready:
+
+    # ---- READ CAPACITY, then a DOS-safe geometry ----
+    mov byte ptr [0xC0], 9
+    call u_scsi_capacity
+    jc .ue_out
+    mov byte ptr [0xC0], 0x0A
+    call u_geometry
+    jc .ue_out
+
+    mov byte ptr [0xC0], 0xFF
+    mov byte ptr [0xC1], 1       # C: is real
+.ue_out:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop es
+    pop ds
+    ret
+
+## ---------------------------------------------------------------------
+
+## ---------------------------------------------------------------------
+##  usb_int13 -- INT 13h for DL >= 0x80 (drive C:)
+## ---------------------------------------------------------------------
+usb_int13:
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    cmp byte ptr [0xC1], 0
+    pop ax
+    pop ds
+    jne .ui_present
+    mov ah, 0x01                 # no such drive -- DOS then skips it
+    stc
+    retf 2
+.ui_present:
+    cmp ah, 0x02
+    je .ui_read
+    cmp ah, 0x03
+    je .ui_write
+    cmp ah, 0x08
+    je .ui_params
+    cmp ah, 0x15
+    je .ui_dtype
+    cmp ah, 0x00
+    je .ui_ok
+    cmp ah, 0x01
+    je .ui_status
+    cmp ah, 0x04
+    je .ui_ok
+    cmp ah, 0x09
+    je .ui_ok
+    cmp ah, 0x0C
+    je .ui_ok
+    cmp ah, 0x0D
+    je .ui_ok
+    cmp ah, 0x10
+    je .ui_ok
+    cmp ah, 0x11
+    je .ui_ok
+    cmp ah, 0x14
+    je .ui_ok
+    mov ah, 0x01
+    stc
+    retf 2
+
+.ui_ok:
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0x74], 0
+    pop ax
+    pop ds
+    xor ah, ah
+    clc
+    retf 2
+
+.ui_status:
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov ah, [0x74]
+    pop ds
+    clc
+    retf 2
+
+.ui_dtype:
+    mov ah, 0x03                 # 03 = fixed disk present
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov dx, [0xC8]               # total sectors, low word
+    mov cx, [0xCA]               # high word
+    pop ds
+    clc
+    retf 2
+
+.ui_params:
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov ax, [0xCC]               # cylinders
+    dec ax                       # max cylinder
+    mov ch, al                   # low 8 bits
+    mov cl, ah
+    ror cl, 1
+    ror cl, 1                    # high 2 bits into CL bits 7:6
+    and cl, 0xC0
+    or cl, [0xCF]                # sectors per track
+    mov dh, [0xCE]
+    dec dh                       # max head
+    mov dl, 1                    # one fixed disk
+    pop ds
+    xor ah, ah
+    clc
+    retf 2
+
+
+.ui_err:
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    mov byte ptr [0x74], 0x04    # sector not found / general failure
+    pop ax
+    pop ds
+    mov ah, 0x04
+    stc
+    retf 2
+
+## ---------------------------------------------------------------------
+##  u_delay -- about a millisecond at 5 MHz. Every USB delay here is a
+##  minimum with margin, so precision does not matter.
+## ---------------------------------------------------------------------
+u_delay:
+    push cx
+    mov cx, 300
+.ud_l:
+    nop
+    nop
+    loop .ud_l
+    pop cx
+    ret
+
+## ---------------------------------------------------------------------
+##  USB scratch and constant tables.
+##
+##  These live in the F-segment, which is PSRAM rather than ROM on this
+##  machine, so the buffers below really are writable. Every CDB table is
+##  padded to 16 bytes because u_bot always copies 16 into the CBW.
+## ---------------------------------------------------------------------
+u_cbw:      .space 31            # Command Block Wrapper
+u_csw:      .space 13            # Command Status Wrapper
+u_buf:      .space U_BUFSZ       # descriptors, sense data, capacity
+u_cfglen:   .word 0              # wTotalLength of the configuration
+u_reqtype:  .byte 0              # bmRequestType of the control transfer in flight
+
+u_cdb_tur:   .byte 0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+u_cdb_sense: .byte 0x03,0,0,0,18,0,0,0,0,0,0,0,0,0,0,0
+u_cdb_cap:   .byte 0x25,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+u_cdb_rw:    .space 16
+
+u_rq_dev8:    .byte 0x80,0x06,0x00,0x01,0x00,0x00,0x08,0x00
+u_rq_cfg:     .byte 0x80,0x06,0x00,0x02,0x00,0x00,U_BUFSZ,0x00
+u_rq_setaddr: .byte 0x00,0x05,0x01,0x00,0x00,0x00,0x00,0x00
+u_rq_setcfg:  .byte 0x00,0x09,0x01,0x00,0x00,0x00,0x00,0x00
+##  Bulk-Only Mass Storage Reset: class request to the interface, no data.
+u_rq_botrst:  .byte 0x21,0xFF,0x00,0x00,0x00,0x00,0x00,0x00
+##  CLEAR_FEATURE(ENDPOINT_HALT); byte 4 is patched with the endpoint address.
+u_rq_clrhalt: .byte 0x02,0x01,0x00,0x00,0x00,0x00,0x00,0x00
+
+## ---------------------------------------------------------------------
+##  usb_report -- one POST line for C:, in the original BIOS's register.
+## ---------------------------------------------------------------------
+usb_report:
+    push ax
+    push bx
+    push ds
+    push es
+    push di
+    push si
+    mov ax, VID
+    mov es, ax
+    mov di, 11*160
+    mov ax, BDA
+    mov ds, ax
+    mov bl, [0xC1]
+    mov bh, [0xC0]
+    push cs
+    pop ds
+    mov si, offset b_usb
+    call dbg_str
+    test bl, bl
+    jz .ur_absent
+    mov si, offset b_usb_ok
+    call dbg_str
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov ax, [0xCC]               # cylinders
+    pop ds
+    call dbg_dec
+    mov si, offset b_usb_x
+    call dbg_str
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    xor ah, ah
+    mov al, [0xCE]
+    pop ds
+    call dbg_dec
+    mov si, offset b_usb_x
+    call dbg_str
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    xor ah, ah
+    mov al, [0xCF]
+    pop ds
+    call dbg_dec
+    jmp short .ur_out
+.ur_absent:
+    cmp bh, 0xF0
+    jne .ur_stage
+    mov si, offset b_usb_old
+    call dbg_str
+    jmp .ur_out
+.ur_stage:
+    mov si, offset b_usb_no
+    call dbg_str
+    mov al, bh                   # the stage it stopped at
+    call dbg_byte
+    # Show WHY, right here. A stage number says which step failed; these say
+    # whether packets were being corrupted, ignored, or refused -- which is the
+    # difference between a logic bug and a signalling problem, and there is no
+    # way to run a DOS tool when the failure happens at POST.
+    mov si, offset b_usb_sig
+    call dbg_str
+    mov al, 0x0F
+    mov dx, 0xEF
+    out dx, al
+    in al, dx
+    call dbg_byte
+    mov si, offset b_usb_ev
+    call dbg_str
+    mov al, 1                    # diag index 1 = CRC/PID errors
+    mov dx, 0xEF
+    out dx, al
+    in al, dx
+    call dbg_byte
+    mov al, 2                    # 2 = timeouts
+    out dx, al
+    in al, dx
+    call dbg_byte
+    mov al, 3                    # 3 = NAKs, low byte
+    out dx, al
+    in al, dx
+    call dbg_byte
+    mov al, 4                    # 4 = STALLs
+    out dx, al
+    in al, dx
+    call dbg_byte
+    # BUSY stalls: transactions the controller accepted and never finished.
+    # With crc and tmo both zero, this and STALL are the only two ways a
+    # transfer can fail, so they are the two worth showing.
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xDB]
+    pop ds
+    call dbg_byte                # dbg_byte preserves AX; only AL matters here
+    # txn counts commands the sequencer ACCEPTED; frm counts 1 ms frames. With
+    # every event counter at zero these separate the three possibilities that
+    # look identical from DOS: the 48 MHz domain is dead (frm 00), the domain
+    # runs but no command ever arrives (frm counts, txn 0000), or commands are
+    # accepted and complete silently (both count).
+    mov si, offset b_usb_txn
+    call dbg_str
+    mov dx, 0xEF
+    mov al, 0x0B                 # transactions, high byte
+    out dx, al
+    in al, dx
+    call dbg_byte
+    mov al, 0x0A                 # transactions, low byte
+    out dx, al
+    in al, dx
+    call dbg_byte
+    mov si, offset b_usb_frm
+    call dbg_str
+    xor al, al                   # index 0 = frame counter
+    out dx, al
+    in al, dx
+    call dbg_byte
+    # The state below is latched only when a stall occurs. Printing it anyway
+    # showed uninitialised bytes as though they were a reading, which is worse
+    # than showing nothing.
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xD5]
+    pop ax
+    pop ds
+    test al, al
+    jz .ur_out
+    mov si, offset b_usb_st
+    call dbg_str
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xD2]
+    pop ds
+    call dbg_byte
+    call dbg_spc
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xD3]
+    pop ds
+    call dbg_byte
+.ur_out:
+    pop si
+    pop di
+    pop es
+    pop ds
+    pop bx
+    pop ax
+    ret
+
+boot_order: .byte 0x00, 0x80, 0x01, 0xFF   # A:, C:, B:, end
+
 b_ver:    .asciz "Philips ROM BIOS Version 1.00"
 b_model:  .asciz "Gertieboard BIOS Retirement Edition"
 b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"
@@ -2821,6 +4869,16 @@ b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
 b_drv:    .asciz "Using Diskette Drive A:"
 b_boot:   .asciz "Booting..."
+b_usb:     .asciz "USB Hard Disk      : "
+b_usb_ok:  .asciz "Ready  "
+b_usb_x:   .asciz " x "
+b_usb_no:  .asciz "None stage "
+b_usb_ev:  .asciz " c/t/n/s/b "
+b_usb_sig: .asciz " fpga "
+b_usb_txn: .asciz " txn "
+b_usb_frm: .asciz " frm "
+b_usb_st:  .asciz "  txseq/flags "
+b_usb_old: .asciz "FPGA image is older than this BIOS - reprogram it"
 b_hd:      .asciz "Internal Hard Disk : "
 b_hd_ready:.asciz "Ready"
 b_hd_no:   .asciz "NOT READY"
