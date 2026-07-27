@@ -210,6 +210,13 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL req_total  : std_logic_vector(6 DOWNTO 0) := (OTHERS => '0');
   SIGNAL req_crc16  : std_logic := '0';
   SIGNAL tx_go      : std_logic := '0';
+  -- tx_go is a one-cycle pulse from the sequencer. If the transmitter is not in
+  -- T_IDLE at that exact cycle the pulse is LOST, and the sequencer then waits
+  -- for a tx_done that will never come -- BUSY stays high until the CPU's poll
+  -- times out. That is the third single-cycle handshake in this module to bite
+  -- (after GO and BUSY-during-SOF), and it accounted for 227 stalls in one
+  -- enumeration. Latch it, like everything else here should have been.
+  SIGNAL tx_req     : std_logic := '0';
   SIGNAL tx_done    : std_logic := '0';
 
   -- ---- receiver -------------------------------------------------------------
@@ -229,16 +236,64 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL rx_arm     : std_logic := '0';
   SIGNAL rx_to_cnt  : integer RANGE 0 TO RX_TO := 0;
   SIGNAL rx_gcnt   : integer RANGE 0 TO RX_GUARD := 0;
+  -- Debounced SE0. D+ and D- do not switch at the same instant: on every J<->K
+  -- transition there is a window of a few nanoseconds where D+ has already
+  -- fallen and D- has not yet risen, and BOTH READ LOW. Treating that as SE0
+  -- ends the packet mid-data, truncating it and failing the CRC -- randomly, and
+  -- more often the more transitions a packet contains. That is why small control
+  -- transfers and large bulk transfers were failing at similar rates.
+  --
+  -- A real EOP is 2 bit times of SE0 = 8 cycles at 48 MHz. Requiring 3 cycles
+  -- (~62 ns) is far longer than any plausible D+/D- skew and far shorter than a
+  -- genuine EOP, so it filters the glitch without ever missing a real one.
+  SIGNAL se0_cnt   : integer RANGE 0 TO 7 := 0;
+  SIGNAL se0_st    : std_logic := '0';
 
   -- ---- sequencer ------------------------------------------------------------
   TYPE se_t IS (S_IDLE, S_TOKEN, S_TOKW, S_TXDATA, S_TXDW, S_RXWAIT, S_RXEND,
-                S_ACK, S_ACKW, S_FIN);
+                S_ACK, S_ACKW, S_SOFW, S_FIN);
   SIGNAL se        : se_t := S_IDLE;
   SIGNAL se_op     : std_logic_vector(2 DOWNTO 0) := (OTHERS => '0');
   SIGNAL se_d1     : std_logic := '0';
   SIGNAL sof_cnt   : integer RANGE 0 TO SOF_DIV-1 := 0;
   SIGNAL sof_req   : std_logic := '0';
+  -- GO must be LATCHED, not edge-detected in place. "go_m3 /= go_m2" is true
+  -- for exactly one 48 MHz cycle as the toggle walks the synchroniser, so a
+  -- command issued while the sequencer was busy -- sending a SOF, for instance,
+  -- which happens every 1 ms -- was dropped on the floor. BUSY then never rose,
+  -- the CPU's poll saw it clear immediately and read the PREVIOUS
+  -- transaction's status, so a packet that never went looked like an ACK.
+  -- That desynchronises the bulk stream and shows up much later as a CSW
+  -- signature error or an endlessly NAKed CBW. sof_req was always a latch;
+  -- this makes GO behave the same way.
+  SIGNAL go_pend   : std_logic := '0';
+
+  -- ---- diagnostic counters -------------------------------------------------
+  -- Read through a window at 0xEF: write an index, read the value. They wrap;
+  -- software takes differences. Without these there is no way to tell "the link
+  -- is losing packets" from "the driver has a bug", and this stack has produced
+  -- both symptoms from four different causes already.
+  SIGNAL c_crcerr  : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL c_tmo     : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL c_nak     : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL c_txn     : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL c_stall   : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL c_pktin   : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL c_pktout  : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL diag_sel  : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL diag_q    : std_logic_vector(7 DOWNTO 0);
+  -- Where the machine actually is. I have guessed wrong twice about which state
+  -- wedges; reading it costs a few LUTs and ends the argument.
+  SIGNAL se_code   : std_logic_vector(3 DOWNTO 0);
+  SIGNAL tx_code   : std_logic_vector(3 DOWNTO 0);
+  SIGNAL rx_code   : std_logic_vector(1 DOWNTO 0);
   SIGNAL turn      : integer RANGE 0 TO 63 := 0;
+  -- Backstop for the four states that wait on tx_done. The longest legal packet
+  -- is a 64-byte DATA (~600 bit times, 2400 cycles), so 8192 cycles (~170 us)
+  -- cannot cut a real transmission short. Bounding the whole operation rather
+  -- than trusting every handshake is the lesson from docs/gotchas.md, and it
+  -- turns any future missed pulse into a reported error instead of a stall.
+  SIGNAL tx_wcnt   : integer RANGE 0 TO 8191 := 0;
 
   -- CRC5 over the 11-bit token field
   FUNCTION crc5(d : std_logic_vector(10 DOWNTO 0)) RETURN std_logic_vector IS
@@ -270,6 +325,58 @@ BEGIN
   dp_in <= USB1_DP WHEN ctrl_m(0) = '1' ELSE USB0_DP;
   dm_in <= USB1_DM WHEN ctrl_m(0) = '1' ELSE USB0_DM;
 
+  se_code <= x"0" WHEN se = S_IDLE   ELSE
+             x"1" WHEN se = S_TOKEN  ELSE
+             x"2" WHEN se = S_TOKW   ELSE
+             x"3" WHEN se = S_TXDATA ELSE
+             x"4" WHEN se = S_TXDW   ELSE
+             x"5" WHEN se = S_RXWAIT ELSE
+             x"6" WHEN se = S_RXEND  ELSE
+             x"7" WHEN se = S_ACK    ELSE
+             x"8" WHEN se = S_ACKW   ELSE
+             x"9" WHEN se = S_SOFW   ELSE
+             x"A";                                    -- S_FIN
+
+  tx_code <= x"0" WHEN tx_st = T_IDLE ELSE
+             x"1" WHEN tx_st = T_SYNC ELSE
+             x"2" WHEN tx_st = T_BYTE ELSE
+             x"3" WHEN tx_st = T_CRC  ELSE
+             x"4" WHEN tx_st = T_TAIL ELSE
+             x"5" WHEN tx_st = T_EOP1 ELSE
+             x"6" WHEN tx_st = T_EOP2 ELSE
+             x"7" WHEN tx_st = T_EOPJ ELSE
+             x"8";                                    -- T_DONE
+
+  rx_code <= "00" WHEN rx_st = R_IDLE ELSE
+             "01" WHEN rx_st = R_SYNC ELSE
+             "10" WHEN rx_st = R_DATA ELSE
+             "11";                                    -- R_EOP
+
+  -- Diagnostic window. Index 0 keeps 0xEF's original meaning (frame counter),
+  -- so anything already reading it is unaffected.
+  diag_q <= frame_cnt(7 DOWNTO 0)  WHEN diag_sel = x"00" ELSE
+            c_crcerr               WHEN diag_sel = x"01" ELSE
+            c_tmo                  WHEN diag_sel = x"02" ELSE
+            c_nak(7 DOWNTO 0)      WHEN diag_sel = x"03" ELSE
+            c_stall                WHEN diag_sel = x"04" ELSE
+            c_pktin(7 DOWNTO 0)    WHEN diag_sel = x"05" ELSE
+            c_pktin(15 DOWNTO 8)   WHEN diag_sel = x"06" ELSE
+            c_pktout(7 DOWNTO 0)   WHEN diag_sel = x"07" ELSE
+            c_pktout(15 DOWNTO 8)  WHEN diag_sel = x"08" ELSE
+            c_nak(15 DOWNTO 8)     WHEN diag_sel = x"09" ELSE
+            c_txn(7 DOWNTO 0)      WHEN diag_sel = x"0A" ELSE
+            c_txn(15 DOWNTO 8)     WHEN diag_sel = x"0B" ELSE
+            tx_code & se_code      WHEN diag_sel = x"0C" ELSE
+            (LOCKED & go_pend & tx_req & st_busy &
+             sof_req & ctrl_m(1) & rx_code)
+                                   WHEN diag_sel = x"0D" ELSE
+            -- Build signature. Twice now, a board running an older bitstream has
+            -- been diagnosed as a USB fault: the registers still answer, so the
+            -- controller looks present, and the numbers look like a real failure.
+            -- Software reads this first and refuses to blame USB if it is wrong.
+            x"A5"                  WHEN diag_sel = x"0F" ELSE
+            x"00";
+
   -- ==========================================================================
   --  CPU register interface (5 MHz domain)
   -- ==========================================================================
@@ -284,7 +391,7 @@ BEGIN
       ("00" & LOCKED & ctrl_s(2) &
        (dm_r AND NOT dp_r) & (dp_r AND NOT dm_r) & dm_r & dp_r)
                                      WHEN (RD = '0' AND ADDR = x"00EE") ELSE
-      frame_cnt(7 DOWNTO 0)          WHEN (RD = '0' AND ADDR = x"00EF") ELSE
+      diag_q                         WHEN (RD = '0' AND ADDR = x"00EF") ELSE
       "ZZZZZZZZ";
 
   CPU_REGS : PROCESS (CLK)
@@ -316,6 +423,7 @@ BEGIN
               tx_ptr <= DATAIN(6 DOWNTO 0);
               rx_ptr <= DATAIN(6 DOWNTO 0);
             WHEN x"00EE" => r_ctrl <= DATAIN;
+            WHEN x"00EF" => diag_sel <= DATAIN;   -- pick a counter to read
             WHEN OTHERS  => NULL;
           END CASE;
         END IF;
@@ -388,9 +496,15 @@ BEGIN
       tx_done <= '0';
 
       -- BUSRESET wins over everything: hold SE0 for as long as software asks
+      -- Latch the request whatever state the transmitter is in.
+      IF tx_go = '1' THEN
+        tx_req <= '1';
+      END IF;
+
       IF ctrl_m(1) = '1' THEN
         tx_oe <= '1'; tx_dp <= '0'; tx_dm <= '0';
         tx_st <= T_IDLE;
+        tx_req <= '0';                 -- a bus reset abandons any request
       ELSE
 
       CASE tx_st IS
@@ -403,7 +517,8 @@ BEGIN
           sie_txadr <= (OTHERS => '0');
           tx_src    <= '0';
           tx_crcen  <= '0';
-          IF tx_go = '1' THEN
+          IF tx_req = '1' THEN
+            tx_req   <= '0';
             tx_st    <= T_SYNC;
             tx_nbit  <= 0;
             tx_oe    <= '1';
@@ -565,7 +680,24 @@ BEGIN
         -- STALL, which is exactly what the hardware did.
         WHEN T_TAIL =>
           IF tx_ph = BIT_DIV-1 THEN
-            tx_ph <= 0; tx_st <= T_EOP1;
+            tx_ph <= 0;
+            IF tx_stuff = '1' THEN
+              -- A run of six 1s can end on the packet's very LAST bit, and the
+              -- mandatory stuffed 0 must still go out before EOP. Dropping it
+              -- makes the receiver see six 1s against EOP -- a bit-stuff
+              -- violation -- so it discards the packet and answers nothing.
+              -- Whether a packet hits this depends only on its bytes: the
+              -- write soak failed at the same three LBAs on every run, and the
+              -- Python model of this logic reproduced exactly those three from
+              -- the pattern generator alone. Emit the stuffed bit, hold it for
+              -- a full bit time by staying here, then end the packet.
+              tx_stuff <= '0';
+              tx_ones  <= 0;
+              tx_j     <= NOT tx_j;
+              tx_dp    <= NOT tx_j; tx_dm <= tx_j;
+            ELSE
+              tx_st <= T_EOP1;
+            END IF;
           ELSE
             tx_ph <= tx_ph + 1;
           END IF;
@@ -602,7 +734,7 @@ BEGIN
       END IF;
 
       IF RESET = '1' THEN
-        tx_st <= T_IDLE; tx_oe <= '0';
+        tx_st <= T_IDLE; tx_oe <= '0'; tx_req <= '0';
       END IF;
     END IF;
   END PROCESS;
@@ -623,11 +755,20 @@ BEGIN
       rx_done  <= '0';
       sie_rxwe <= '0';
 
+      -- Count consecutive SE0 samples; se0_st is the filtered result.
       IF (dp_r = '0' AND dm_r = '0') THEN
-        se0 := '1';
+        IF se0_cnt < 7 THEN
+          se0_cnt <= se0_cnt + 1;
+        END IF;
       ELSE
-        se0 := '0';
+        se0_cnt <= 0;
       END IF;
+      IF se0_cnt >= 3 THEN
+        se0_st <= '1';
+      ELSE
+        se0_st <= '0';
+      END IF;
+      se0 := se0_st;
       k := dm_r;                                    -- FS: K is D- high
 
       -- Sampling clock. The phase counter free-runs mod 4, and ANY line
@@ -749,7 +890,9 @@ BEGIN
       END CASE;
 
       IF RESET = '1' THEN
-        rx_st <= R_IDLE;
+        rx_st   <= R_IDLE;
+        se0_cnt <= 0;
+        se0_st  <= '0';
       END IF;
     END IF;
   END PROCESS;
@@ -763,6 +906,20 @@ BEGIN
   BEGIN
     IF rising_edge(CLK48) THEN
       tx_go <= '0';
+
+      -- Catch the GO toggle whenever it arrives; S_IDLE consumes it when it can.
+      --
+      -- BUSY is raised HERE, not when the sequencer actually starts the
+      -- transaction. Latching GO stopped commands being lost, but the CPU could
+      -- still poll BUSY while the sequencer was mid-SOF -- where it is 0 -- see
+      -- "not busy", conclude the transaction had already finished, and read the
+      -- PREVIOUS one's status. A stale ACK means the caller believes a packet
+      -- went out when it never did, which desynchronises the bulk stream just
+      -- as thoroughly as dropping the command did.
+      IF go_m3 /= go_m2 THEN
+        go_pend <= '1';
+        st_busy <= '1';
+      END IF;
 
       -- free-running 1 ms tick
       IF ctrl_m(2) = '1' THEN
@@ -779,10 +936,10 @@ BEGIN
       CASE se IS
 
         WHEN S_IDLE =>
-          st_busy <= '0';
           rx_arm  <= '0';
-          IF go_m3 /= go_m2 THEN                    -- CPU toggled GO
-            st_busy  <= '1';
+          IF go_pend = '1' THEN                     -- a command is waiting
+            go_pend  <= '0';
+            c_txn    <= c_txn + 1;
             st_ack   <= '0'; st_nak <= '0'; st_stall <= '0';
             st_to    <= '0'; st_err <= '0'; st_rxv <= '0';
             rx_len   <= (OTHERS => '0');
@@ -801,7 +958,8 @@ BEGIN
             req_crc16<= '0';
             req_total<= (OTHERS => '0');
             tx_go    <= '1';
-            se      <= S_ACKW;                      -- reuse: just wait for TX
+            tx_wcnt   <= 0;
+            se      <= S_SOFW;
           END IF;
 
         -- ---- token packet: PID + address/endpoint + CRC5 ----
@@ -823,9 +981,15 @@ BEGIN
           req_crc16 <= '0';
           req_total <= (OTHERS => '0');
           tx_go     <= '1';
+          tx_wcnt   <= 0;
           se        <= S_TOKW;
 
         WHEN S_TOKW =>
+          IF tx_wcnt = 8191 THEN
+            st_err <= '1'; se <= S_FIN;
+          ELSE
+            tx_wcnt <= tx_wcnt + 1;
+          END IF;
           IF tx_done = '1' THEN
             IF se_op = "010" THEN                   -- IN: listen for data
               rx_arm    <= '1';
@@ -847,9 +1011,15 @@ BEGIN
           req_crc16 <= '1';
           req_total <= txlen_s;
           tx_go     <= '1';
+          tx_wcnt   <= 0;
           se        <= S_TXDW;
 
         WHEN S_TXDW =>
+          IF tx_wcnt = 8191 THEN
+            st_err <= '1'; se <= S_FIN;
+          ELSE
+            tx_wcnt <= tx_wcnt + 1;
+          END IF;
           IF tx_done = '1' THEN
             rx_arm    <= '1';
             rx_to_cnt <= 0;
@@ -867,6 +1037,7 @@ BEGIN
             IF rx_to_cnt = RX_TO-1 THEN
               rx_arm <= '0';
               st_to  <= '1';
+              c_tmo  <= c_tmo + 1;
               se     <= S_FIN;
             ELSE
               rx_to_cnt <= rx_to_cnt + 1;
@@ -885,13 +1056,20 @@ BEGIN
         WHEN S_RXEND =>
           -- PID check: high nibble must be the complement of the low one
           IF rx_pid(7 DOWNTO 4) /= (NOT rx_pid(3 DOWNTO 0)) THEN
-            st_err <= '1';
-            se     <= S_FIN;
+            st_err   <= '1';
+            c_crcerr <= c_crcerr + 1;
+            se       <= S_FIN;
           ELSE
             CASE rx_pid IS
-              WHEN PID_ACK   => st_ack   <= '1'; se <= S_FIN;
-              WHEN PID_NAK   => st_nak   <= '1'; se <= S_FIN;
-              WHEN PID_STALL => st_stall <= '1'; se <= S_FIN;
+              WHEN PID_ACK   => st_ack <= '1';
+                                c_pktout <= c_pktout + 1;
+                                se <= S_FIN;
+              WHEN PID_NAK   => st_nak <= '1';
+                                c_nak <= c_nak + 1;
+                                se <= S_FIN;
+              WHEN PID_STALL => st_stall <= '1';
+                                c_stall <= c_stall + 1;
+                                se <= S_FIN;
               WHEN PID_DATA0 | PID_DATA1 =>
                 st_rxv  <= '1';
                 IF rx_pid = PID_DATA1 THEN
@@ -899,8 +1077,10 @@ BEGIN
                 ELSE
                   st_rxd1 <= '0';
                 END IF;
+                c_pktin <= c_pktin + 1;
                 IF rx_err = '1' THEN
-                  st_err <= '1';
+                  st_err   <= '1';
+                  c_crcerr <= c_crcerr + 1;
                 END IF;
                 -- rx_bytes counts PID + payload + 2 CRC bytes
                 IF rx_bytes > 3 THEN
@@ -910,8 +1090,9 @@ BEGIN
                 END IF;
                 se <= S_ACK;
               WHEN OTHERS =>
-                st_err <= '1';
-                se     <= S_FIN;
+                st_err   <= '1';
+                c_crcerr <= c_crcerr + 1;
+                se       <= S_FIN;
             END CASE;
           END IF;
 
@@ -924,24 +1105,45 @@ BEGIN
             req_crc16 <= '0';
             req_total <= (OTHERS => '0');
             tx_go     <= '1';
+            tx_wcnt   <= 0;
             se        <= S_ACKW;
           ELSE
             se <= S_FIN;
           END IF;
 
         WHEN S_ACKW =>
+          IF tx_wcnt = 8191 THEN
+            st_err <= '1'; se <= S_FIN;
+          ELSE
+            tx_wcnt <= tx_wcnt + 1;
+          END IF;
           IF tx_done = '1' THEN
             se <= S_FIN;
           END IF;
 
+        -- A SOF is the controller's own housekeeping, not a CPU transaction,
+        -- so it must leave BUSY exactly as it found it.
+        WHEN S_SOFW =>
+          IF tx_wcnt = 8191 THEN
+            se <= S_IDLE;            -- a lost SOF is not worth reporting
+          ELSE
+            tx_wcnt <= tx_wcnt + 1;
+          END IF;
+          IF tx_done = '1' THEN
+            se <= S_IDLE;
+          END IF;
+
         WHEN S_FIN =>
-          st_busy <= '0';
+          IF go_pend = '0' THEN                     -- do not clear a command
+            st_busy <= '0';                         -- that arrived this cycle
+          END IF;
           se      <= S_IDLE;
 
       END CASE;
 
       IF RESET = '1' THEN
         se <= S_IDLE; st_busy <= '0'; frame_cnt <= (OTHERS => '0');
+        go_pend <= '0';
       END IF;
     END IF;
   END PROCESS;
