@@ -116,6 +116,16 @@ start:
         jmp     .drain
 
 .switch:
+        ; Both load paths join here, so both can be measured identically:
+        ; checksum the CODE REGION of the image now sitting in PSRAM -- the
+        ; exact bytes about to run -- and show it on the 7-seg, high byte
+        ; then low byte, about 1.5 s each. A serial boot and a flash boot
+        ; showing the SAME pair means the same image reached memory, and any
+        ; difference in behaviour is machine state; a different pair means
+        ; the transfer corrupts, measured with no BIOS involved at all.
+        ; The range is 0xC000..0xEFFF: code only, none of the BIOS's own
+        ; runtime scratch, so the value is stable across boots.
+        call    show_sum
         MARK    7
         mov     ax, 0x0060
         mov     es, ax
@@ -181,27 +191,48 @@ spi_x:
         ret
 
 ; --- load the 64 KB BIOS image from flash 0x1F0000 -> 0xF0000 --------------
+; Read in 512-byte commands, NOT one 64 KB burst.
+;
+; This used to hold /CS low and stream the whole image in a single READ. The
+; chip is specified to allow that, and it appeared to work -- the image loaded,
+; the reset vector was intact, POST ran. But roughly a sixth of the bytes came
+; back wrong, so the BIOS misbehaved in ways that looked like anything except a
+; bad read: a signature register that would not match, a drive that reported no
+; status, a screen of debris.
+;
+; tools/spidump.com settled it by doing the identical read both ways from DOS:
+; streamed, 11256 of 65536 bytes differed; chunked into 512-byte commands, zero.
+; Same port, same command, same byte-exchange, same comparison -- the only
+; variable was the length of the burst.
+;
+; So: one command per 512 bytes, /CS released between them. The extra cost is
+; four command bytes per sector, about 1.6 ms over the whole image.
 flash_load:
         MARK    0xA
+        mov     ax, 0xF000
+        mov     es, ax
+        xor     di, di
+.fl_cmd:
         xor     al, al
         out     SPI_CTRL, al        ; /CS low
         mov     al, 0x03            ; READ
         call    spi_x
         mov     al, BIOS_OFF        ; addr[23:16]
         call    spi_x
-        xor     al, al
-        call    spi_x               ; addr[15:8]
-        call    spi_x               ; addr[7:0]
-        mov     ax, 0xF000
-        mov     es, ax
-        xor     di, di
-        xor     cx, cx              ; 65536 bytes
+        mov     ax, di
+        mov     al, ah              ; addr[15:8] = DI >> 8
+        call    spi_x
+        xor     al, al              ; addr[7:0]: always a 512-byte boundary
+        call    spi_x
+        mov     cx, 512
 .fl:    mov     al, 0xFF
         call    spi_x
         stosb
         loop    .fl
         mov     al, 1
         out     SPI_CTRL, al        ; /CS high
+        test    di, di              ; DI wraps to 0 after exactly 64 KB
+        jnz     .fl_cmd
         MARK    0xB
         ; A blank chip reads 0xFF everywhere, which would "boot" into nothing.
         ; The reset vector must start with a far jump, so check for it and stop
@@ -212,6 +243,30 @@ flash_load:
 .nobios:
         MARK    0xEF
 .hang:  jmp     .hang
+
+; --- sum ES:C000..EFFF, display on the 7-seg: high byte, low byte ---------
+show_sum:
+        mov     si, 0xC000
+        mov     cx, 0x3000
+        xor     bp, bp
+        xor     ah, ah              ; AH stays 0: lodsb writes only AL
+.ss:    es      lodsb
+        add     bp, ax
+        loop    .ss
+        mov     ax, bp
+        xchg    al, ah              ; high byte first
+        call    show_byte
+        mov     ax, bp              ; then the low byte
+        call    show_byte
+        ret
+show_byte:
+        out     POST, al
+        mov     bx, 2               ; ~0.45 s at 5 MHz: long enough to read
+.sb:    xor     cx, cx
+.sd:    loop    .sd
+        dec     bx
+        jnz     .sb
+        ret
 
 fdc_wr:
         push    dx
