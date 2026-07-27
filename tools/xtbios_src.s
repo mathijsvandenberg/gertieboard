@@ -54,6 +54,17 @@ _post:
     call vid_init           # program 6845 / CGA, clear B800  (DS=ROM)
     mov ax, 0xB800
     mov es, ax
+    # Clear the screen first. POST paints at absolute rows and never scrolls,
+    # but the boot-failure path prints through the teletype, which DOES -- so
+    # a machine that fails to boot, scrolls, and is reset leaves the next POST
+    # painting over a shifted copy of the last one. The flash-boot "garbage"
+    # photographs were partly this: several failed passes overlaid. Every
+    # screen now shows exactly one boot, in true order.
+    xor di, di
+    mov ax, 0x0720          # space on the standard attribute
+    mov cx, 2000            # 80 x 25
+    cld
+    rep stosw
     xor al, al              # row 0
     mov si, offset b_ver
     call putrow
@@ -63,6 +74,61 @@ _post:
     mov al, 2
     mov si, offset b_copy
     call putrow
+    # Sum the code region NOW, before any device is probed, and paint it at
+    # the top right. On a flash boot this is the first thing that tells the
+    # truth: if it reads the same value as a serial boot, the loaded image is
+    # intact and any strangeness below is state, not corruption -- and it
+    # appears even if a wedged device stalls the rest of POST. The region
+    # stops at u_cbw: everything past it is runtime scratch, which BIOSFLASH
+    # legitimately copies mid-life.
+    # (This block once popped one register more than it pushed. POST painted
+    # the checksum and then crashed on its own corrupted stack -- the "number
+    # appears, then everything resets" symptom. Pushes and pops below are
+    # strictly symmetric; keep them that way.)
+    push ax
+    push bx
+    push cx
+    push si
+    push di
+    push es
+    push ds
+    mov ax, VID
+    mov es, ax
+    mov di, 0*160 + 2*66
+    push cs
+    pop ds
+    mov si, offset b_sum
+    call dbg_str
+    mov si, 0xC000
+    mov cx, offset u_cbw
+    sub cx, 0xC000
+    xor ax, ax
+    xor bx, bx
+.psum:
+    mov bl, [si]
+    add ax, bx
+    inc si
+    loop .psum
+    push ds
+    mov bx, BDA
+    mov ds, bx
+    mov [0xB8], ax               # published for BIOSFLASH's pre-write check
+    mov bx, offset u_cbw
+    sub bx, 0xC000
+    mov [0xBA], bx
+    pop ds
+    push ax
+    mov al, ah
+    call dbg_byte
+    pop ax
+    call dbg_byte
+    pop ds
+    pop es
+    pop di
+    pop si
+    pop cx
+    pop bx
+    pop ax
     mov al, 4
     mov si, offset b_hdr
     call putrow
@@ -2866,22 +2932,34 @@ hd_load_block:
     call hd_flush            # evict the previous block first
     mov [0xE6], ax
     mov bx, ax
-    call spi_cs_lo
-    mov al, 0x03
-    call spi_xfer
-    xor si, si
-    call hd_send_addr
+    # 512 bytes per READ command, not one 4 KB burst.
+    #
+    # A long continuous read does not come back intact on this board: the boot
+    # ROM streamed 64 KB in a single command and a sixth of it was wrong, while
+    # the same bytes read in 512-byte commands were perfect (tools/spidump.com
+    # proved both). 4 KB is eight times the length known to be safe and has
+    # never been checked, and a bad block read here is worse than a bad boot --
+    # it feeds read-modify-write, so it would write the corruption back.
     mov ax, HDBUF_SEG
     mov es, ax
     xor di, di
-    mov cx, 4096
+    xor si, si                   # SI = byte offset within the block
     cld
+.hl_chunk:
+    call spi_cs_lo
+    mov al, 0x03
+    call spi_xfer
+    call hd_send_addr            # BX = block, SI = offset within it
+    mov cx, 512
 .hl_byte:
     mov al, 0xFF
     call spi_xfer
     stosb
     loop .hl_byte
     call spi_cs_hi
+    add si, 512
+    cmp si, 4096
+    jb .hl_chunk
 .hl_done:
     pop es
     pop di
@@ -4779,6 +4857,17 @@ u_enum:
     mov byte ptr [0xD0], 0
     mov byte ptr [0xD1], 0
 
+    # The PLL lock is tested BEFORE the build signature, deliberately: the
+    # diagnostic registers live in the 48 MHz domain, so with the PLL dead
+    # they return junk -- and junk compared against 0xA5 used to be reported
+    # as "FPGA image is older", which points at entirely the wrong thing.
+    # Order matters: stage 01 means no clock, stage F0 means a real mismatch
+    # read with a working clock.
+    mov dx, U_CTRL
+    in al, dx
+    test al, UL_LOCK
+    jz .ue_out                   # stage 1: no PLL, nothing can work
+
     # Is the logic in the FPGA the logic this driver was written against? The
     # registers answer either way -- an older image still returns plausible
     # counters -- so without this the wrong bitstream reads as a USB failure,
@@ -4792,11 +4881,9 @@ u_enum:
     mov byte ptr [0xC0], 0xF0    # not a USB fault at all
     jmp .ue_out
 .ue_sig_ok:
+    mov dx, U_CTRL               # DX still held the diag port from the check
+                                 # above; the OUT below expects the controller
 
-    mov dx, U_CTRL
-    in al, dx
-    test al, UL_LOCK
-    jz .ue_out                   # stage 1: no PLL, nothing can work
 
     mov byte ptr [0xC0], 2
     xor al, al
@@ -5275,6 +5362,7 @@ b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
 b_fd1:     .asciz "Diskette Drive A:  : "   # 21 columns, like B: and the disk
 b_boot:   .asciz "Booting..."
+b_sum:    .asciz "   code "
 b_usb:     .asciz "Internal Hard Disk : "   # the original ROM's own wording, 0x1F39
 b_usb_ok:  .asciz "Ready  "
 b_usb_mb:  .asciz " MB"
