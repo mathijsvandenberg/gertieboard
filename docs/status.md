@@ -9,7 +9,7 @@ marketing: if something is listed as working it has been run on hardware.
 |---|---|
 | **Real CPU** | NEC V20 (µPD70108C-8) on the [top board](hardware.md), FPGA as the surrounding chipset |
 | **Runs standalone** | FPGA configures from its own flash, BIOS from the on-board SPI flash, DOS from the USB disk — nothing attached but power and a monitor — [boot](boot.md) |
-| **Boots MS-DOS 4.01** | The Dutch release shipped with the Philips P2120. PC-DOS 3.30 works too and is what the tool image carries |
+| **Boots MS-DOS 4.01** | The Dutch release shipped with the Philips P2120, **installed onto `C:` from its original install floppies** — see [storage](storage.md#installing-an-operating-system-onto-it). PC-DOS 3.30 runs too, from a served floppy image |
 | **USB hard disk, `C:`** | Bulk-Only Transport and SCSI in the BIOS over the fabric host controller. `FDISK`, `FORMAT`, `CHKDSK` pass; 504 MB addressable — [storage](storage.md) |
 | **CGA text** | Modes 0–3, 80×25 and 40×25, 16 colours — [vga](modules/vga.md) |
 | **CGA graphics** | Modes 4, 5, 6 — 320×200×4 and 640×200×2 |

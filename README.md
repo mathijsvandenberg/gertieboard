@@ -39,8 +39,9 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
 - **Runs standalone.** No host, no JTAG: the FPGA configures itself from its own
   flash, the BIOS is fetched from the on-board SPI flash, and DOS boots from a USB
   hard disk. A serial host is used for BIOS development, not to run the machine.
-- Boots **MS-DOS 4.01** — the Dutch release that shipped with the Philips P2120 —
-  and **IBM PC-DOS 3.30**
+- Boots **MS-DOS 4.01** — the Dutch release that shipped with the Philips P2120,
+  installed onto the USB disk from its original three floppies. **IBM PC-DOS 3.30**
+  runs too, from a served floppy image
 - **USB hard disk** as drive `C:` — a full-speed host controller in fabric with a
   Bulk-Only Transport and SCSI stack in the BIOS. `FDISK`, `FORMAT` and `CHKDSK`
   all pass; 504 MB addressable

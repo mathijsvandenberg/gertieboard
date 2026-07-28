@@ -86,7 +86,7 @@ image the boot ROM falls back to, and DOS cannot address it because DOS is told 
 drive ends first.
 
 Bounds checks are against the **physical** 4096 sectors rather than the reported
-geometry, which is what lets [`BIOSFLSH`](tools.md#biosflsh) address the reserved region
+geometry, which is what lets [`BIOSFLSH`](tools.md#biosflsh--write-the-bios-to-flash) address the reserved region
 deliberately while DOS cannot reach it by accident.
 
 Mechanism — the 4 KB read-modify-write block buffer, the erase/program sequence, and
@@ -165,14 +165,37 @@ interrupt rather than return a wrong answer.
 One transfer is capped at **127 sectors**, because one CBW carries at most 127 × 512
 bytes. A 128 KB read from DOS therefore becomes two commands, not one.
 
+### Installing an operating system onto it
+
+**MS-DOS 4.01** — the Dutch release that shipped with the Philips P2120 — is installed
+on `C:`, put there by its own installer running from the original three 720 KB floppies
+served on `A:`:
+
+| Disk | |
+|---|---|
+| `dos401nl1.img` | Install |
+| `dos401nl2.img` | Operating system |
+| `dos401nlshell.img` | DOS Shell — the disk whose label reads *Microsoft(R) MS-DOS(R) versie 4.01* |
+
+The images are **not in the repository** — `*.img` is gitignored, and they are not ours
+to distribute.
+
+This is worth more as a test than the [soak](tools.md#usbsoak--sustained-write--read--verify)
+is. A soak proves the transport under a pattern chosen to be hostile; an installer
+proves it under a workload nobody designed for it — partitioning, formatting, thousands
+of small file writes, directory updates interleaved with data, and a reboot in the
+middle that has to find everything exactly where it was left. Period software from 1988
+has no idea it is talking to a USB stick over a host controller in an FPGA, which is
+rather the point.
+
 ## Diagnosis
 
 Every failure in this subsystem looks identical from DOS — "disk error" — and has been
 a different bug each time. The tools that tell them apart are in
-**[tools](tools.md)**: [`USBSOAK`](tools.md#usbsoak) for sustained write/read/verify
-with per-command forensics, [`USBSTAT`](tools.md#usbstat) for the controller's event
-counters, [`SPIDUMP`](tools.md#spidump) for reading the flash the way the boot ROM does,
-and [`USBHD`](tools.md#usbhd) / [`USBWIPE`](tools.md#usbwipe) for enumeration state and
+**[tools](tools.md)**: [`USBSOAK`](tools.md#usbsoak--sustained-write--read--verify) for sustained write/read/verify
+with per-command forensics, [`USBSTAT`](tools.md#usbstat--controller-event-counters) for the controller's event
+counters, [`SPIDUMP`](tools.md#spidump--read-the-flash-the-way-the-boot-rom-does) for reading the flash the way the boot ROM does,
+and [`USBHD`](tools.md#usbhd--usbwipe--enumeration-state-and-clearing-a-stick) / [`USBWIPE`](tools.md#usbhd--usbwipe--enumeration-state-and-clearing-a-stick) for enumeration state and
 clearing a GPT stick.
 
 ## Related
