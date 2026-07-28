@@ -39,11 +39,11 @@ work, which halved performance *and* silently halved the floppy link's baud rate
 because `fdc8272` computes `BAUD_DIV = CLK_FREQ / BAUD` from a generic that still said
 5 MHz.
 
-### pll2
+### The second PLL
 
-A second `pll` instance exists in the top level with **every output unconnected** — a
-leftover from the schematic era. Quartus optimises it away; the fitter reports one
-PLL in use.
+The top level once carried a second `pll` instance with **every output
+unconnected**, which Quartus simply optimised away. That slot is now
+[`pll48`](#pll48--48-mhz-for-usb), the 48 MHz source for the USB host.
 
 ## clkgen — reset stretch
 
@@ -114,8 +114,8 @@ fractional DPLL. 24 MHz (2×) leaves nowhere to sample.
 
 It is a **second PLL** rather than another `pll1` output, for the reason in
 [architecture](../architecture.md#clocks): `pll1`'s outputs all use `multiply_by => 1`
-and share a VCO that is a plain multiple of 50 MHz. It also replaces the dead `pll2`
-that the schematic conversion left behind with every output `OPEN`.
+and share a VCO that is a plain multiple of 50 MHz. It occupies the slot that used to
+hold an unconnected PLL instance.
 
 `locked` is wired through to [`usb_host`](usb_host.md) and readable from software, so a
 test program can distinguish "the PLL never came up" from "the PLL is fine but nothing

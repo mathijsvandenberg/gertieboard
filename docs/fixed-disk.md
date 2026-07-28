@@ -1,4 +1,10 @@
-# Fixed disk
+# Fixed disk — the SPI flash drive
+
+> **This is drive `B:`, a 1.44 MB floppy.** It was the fixed disk at `DL=0x80` until a
+> [USB hard disk](storage.md#drive-c--usb-mass-storage) took that role; the mechanism
+> below — the block buffer, the erase/program path, the reserved BIOS region — is
+> unchanged, but the geometry and the drive letter are not. For how the three drives fit
+> together see **[storage](storage.md)**.
 
 A 2 MB hard disk, backed by the on-board SPI FLASH (ISSI **IS25LP016D**), presented to
 DOS through `INT 13h` for `DL >= 0x80`. FDISK and FORMAT work, and partitions survive
@@ -11,32 +17,44 @@ on top of the [`flash`](modules/flash.md) SPI engine.
 
 | | Value |
 |---|---|
-| Reported | **31** cylinders × 4 heads × 32 sectors = 3968 sectors = 1984 KB |
-| Physical | **32** cylinders × 4 heads × 32 sectors = 4096 sectors = 2048 KB |
+| Reported | **80** cylinders × 2 heads × 18 sectors = 2880 sectors = 1440 KB |
+| Physical | 4096 sectors = 2048 KB |
 | Sector size | 512 bytes |
 
 ```asm
-.equ HD_CYLS,   31              ; REPORTED: DOS never sees cylinder 31
-.equ HD_PHYS_SECTORS, 32*4*32   ; the chip really holds 4096 sectors
+.equ HD_SPT,    18
+.equ HD_HEADS,  2
+.equ HD_CYLS,   80              ; REPORTED: a standard 1.44 MB floppy
+.equ HD_PHYS_SECTORS, 4096      ; the chip really holds 4096 sectors
+.equ HD_KB,     (HD_CYLS*HD_HEADS*HD_SPT)/2      ; 1440 KB
 ```
 
-That split is deliberate. `AH=08` advertises 31 cylinders so DOS keeps out of the last
-one, which holds the BIOS copy the boot ROM falls back to — but the bounds check uses
-the **physical** size, so a deliberate tool can still address cylinder 31 to write that
-copy.
+1.44 MB is the largest format every DOS from 3.3 onward knows, so `80×2×18` needs no
+driver and no partition — `FORMAT B:` is enough.
+
+That split between reported and physical is deliberate. `AH=08` advertises a drive that
+ends at 2880 sectors so DOS keeps out of everything above it, including the BIOS copy
+the boot ROM falls back to — but the bounds check uses the **physical** size, so a
+deliberate tool such as [`BIOSFLSH`](tools.md#biosflsh--write-the-bios-to-flash) can
+still address the reserved region.
 
 ## Flash layout
 
 | Range | Size | Contents |
 |---|---|---|
-| `0x000000`–`0x1EFFFF` | 1984 KB | Disk data — LBA 0 … 3967 |
+| `0x000000`–`0x167FFF` | 1440 KB | Drive `B:` — LBA 0 … 2879 |
+| `0x168000`–`0x1EFFFF` | 544 KB | Unused — beyond the reported geometry |
 | `0x1F0000`–`0x1FFFFF` | 64 KB | Reserved: BIOS image for the [boot fallback](boot.md) |
 
-`flash address = LBA × 512`, and the reserved region is exactly cylinder 31:
+`flash address = LBA × 512`, and the reserved region is the last 64 KB of the chip:
 
 ```
-C31 H0 S1  ->  LBA 3968  ->  flash 0x1F0000,  and 128 sectors = 64 KB
+LBA 3968 .. 4095  ->  flash 0x1F0000 .. 0x1FFFFF,  128 sectors = 64 KB
 ```
+
+`BIOSFLSH` derives both ends of that rather than hardcoding them — the start from the
+chip size POST detected, the CHS for each transfer from what `AH=08` reports — so a
+different part or a changed geometry keeps working.
 
 ## The write problem
 
@@ -85,25 +103,45 @@ to one erase.
 ## CHS to LBA
 
 ```
-LBA = (cylinder × 4 + head) × 32 + (sector − 1)
+LBA = (cylinder × 2 + head) × 18 + (sector − 1)
 ```
 
 `hd_chs2lba` uses BDA scratch bytes (`0xEA`, `0xEB`) rather than register gymnastics,
 because `mul` clobbers `DX` and the head has to be read before that happens.
 
+## Loading a block
+
+`hd_load_block` reads the 4 KB block in **eight 512-byte `READ` commands**, not one.
+
+That is not an optimisation, it is a correctness requirement: a long continuous SPI
+read does not come back intact on this board, and a bad block read here is worse than a
+bad boot because it feeds read-modify-write — the corruption would be written straight
+back. See [gotchas](gotchas.md#a-long-spi-read-does-not-come-back-intact).
+
 ## Visibility to DOS
 
-`hd_int13` refuses **every** function while BDA `0x40:75` is zero, returning
-`AH=01, CF=1` (invalid drive).
+The drive is presented as the **second floppy**: `INT 13h` routes `DL = 0x01` here, and
+the equipment word at BDA `40:10` reports two diskette drives. No partition table and no
+driver — `FORMAT B:` is the whole installation.
+
+`FORMAT` needs more of the floppy `INT 13h` surface than a hard disk does. `AH=05`
+(format track), `AH=16` (change-line status), `AH=17` (set media type) and `AH=18` (set
+media type for format) all have to answer; without `AH=18` in particular, `FORMAT`
+reports *"Invalid media or Track 0 bad"* and stops.
+
+Historical note, kept because the reasoning still applies to `C:`: when this was the
+fixed disk it refused **every** function while BDA `40:75` was zero, returning
+`AH=01, CF=1`.
 
 > Answering `AH=08` with `CF=0` (success) *and* `DL=0` (no drives) is contradictory,
 > and it stopped DOS booting: DOS took the success at face value and went on to act on
 > a device that was not there. A machine with no hard disk **fails** the call, and DOS
 > then simply skips the drive.
 
-POST now advertises the disk (`0x75 = 1`). Test tools that flip that byte must **leave
-it set** on exit — an earlier version of `HDTEST` cleared it, which hid the drive from
-anything run afterwards and looked exactly like a detection failure in FDISK.
+That byte now belongs to the [USB disk](storage.md#drive-c--usb-mass-storage), which
+sets it only if enumeration succeeded. Test tools that flip it must **leave it as they
+found it** — an earlier `HDTEST` cleared it on exit, which hid the drive from anything
+run afterwards and looked exactly like a detection failure in FDISK.
 
 ## Performance
 
@@ -176,9 +214,15 @@ the write tests fill and went stale the moment writes were enabled.
 ## Writing the BIOS copy
 
 `BIOSFLSH.COM` copies the **running** BIOS (`F000:0000`, 64 KB) into the reserved
-region, through ordinary `INT 13h` writes to cylinder 31 — reusing the proven
+region, through ordinary `INT 13h` writes **to drive `B:`** — reusing the proven
 erase/program path rather than carrying its own SPI sequence. It then reads all 64 KB
 back and compares.
+
+Neither the target nor the geometry is hardcoded: the reserved region is derived from
+the chip size POST detected (BDA `40:E4`) and the CHS for each transfer from what
+`AH=08` reports. An earlier version wrote to `DL=0x80` at cylinder 31 of a `31×4×32`
+geometry — correct when the flash *was* the fixed disk, and after the USB disk took that
+drive letter it quietly wrote 64 KB of BIOS onto the USB stick instead.
 
 There is no filename to get wrong, and the flashed copy is by construction the BIOS you
 just booted and tested.

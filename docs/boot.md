@@ -27,8 +27,10 @@ sequenceDiagram
         Note over BR: POST 5, 6
     else no host within ~2 s
         Note over BR: POST A
-        BR->>FL: READ 0x1F0000, 64 KB
-        FL-->>RAM: 64 KB -> 0xF0000..0xFFFFF
+        loop 128 times, 512 bytes each
+            BR->>FL: READ 0x1F0000 + n
+            FL-->>RAM: 512 bytes
+        end
         Note over BR: POST B
     end
     CPU->>CPU: copy trampoline to 0060:0000, run from low RAM
@@ -36,9 +38,13 @@ sequenceDiagram
     Note over BR: POST 7
     CPU->>BIOS: jmp F000:FFF0
     BIOS->>BIOS: POST, banner, BDA, IVT
-    BIOS->>FDC: INT 19h - read boot sector via DMA
-    BIOS->>CPU: jmp 0000:7C00 with DL=0
+    BIOS->>BIOS: INT 19h - try A:, then C:, then B:
+    BIOS->>CPU: jmp 0000:7C00 with DL = the drive it loaded from
 ```
+
+> **The flash read is 512 bytes at a time, not one 64 KB burst.** It used to be one
+> command, which is what the part allows — and about a sixth of the bytes came back
+> wrong. See [gotchas](gotchas.md#a-long-spi-read-does-not-come-back-intact).
 
 ## 1. Reset
 
@@ -119,17 +125,36 @@ See [BIOS](bios.md) for detail. In order:
 
 ## 5. INT 19h — bootstrap
 
+The boot order is a table, so it is data rather than control flow:
+
 ```asm
-reset disk (AH=00, DL=0)
-read C0 H0 S1 -> 0000:7C00        ; 1 sector, via DMA
-check for 0xAA55 at 0x7DFE
-capture BPB geometry into BDA 0xB0..0xB2   ; spt, heads, total sectors
-mov dl, 0                          ; boot drive
+boot_order: .byte 0x00, 0x80, 0x01, 0xFF   # A:, C:, B:, end
+```
+
+For each entry in turn:
+
+```asm
+reset drive (AH=00)
+read C0 H0 S1 -> 0000:7C00        ; 1 sector
+check for 0xAA55 at 0x7DFE        ; not bootable -> next entry
+capture BPB geometry              ; floppies only, into BDA 0xB0..0xB2
+mov dl, <this drive>
 jmp 0000:7C00
 ```
 
-The BPB capture matters: it makes `INT 13h AH=08` report the geometry of the *actual*
-image being served, rather than a hardcoded guess.
+Two entries can be skipped before they are tried: **`A:`** if POST found nothing
+serving it (BDA `40:B7`), and **`C:`** unless POST advertised a fixed disk in BDA
+`40:75`. Skipping `A:` matters because otherwise every boot with the loader muted pays
+the FDC timeout a second time.
+
+The BPB capture is **floppies only**: a fixed disk's first sector is a partition table,
+not a BPB, so reading `spt` and `heads` out of it would be reading partition entries.
+It makes `INT 13h AH=08` report the geometry of the *actual* image being served rather
+than a hardcoded guess.
+
+Running out of entries prints what the original ROM printed — `Boot Error.` then
+`Press Ctrl-Alt-Del to Reboot ... `. The full order and its reasoning is in
+[storage](storage.md#boot-order).
 
 Interrupts stay off through the boot read, because the disk path is polled.
 
@@ -160,14 +185,18 @@ the fallback ran but the flash copy is missing or wrong.
 
 ## Untethering the board
 
-Two independent things are tethered at power-on:
+**Done — the board runs standalone.** Three things were tethered at power-on, and none
+of them are any more:
 
-| What | How to untether | Status |
-|---|---|---|
-| **FPGA configuration** | `bash tools/mkjic.sh`, then program the `.jic` to the DE0-Nano's EPCS16 | works |
-| **BIOS image** | `BIOSFLSH` writes a copy to flash `0x1F0000`; the loader falls back to it | copy verifies, boot from it does not work yet |
+| What | How to untether |
+|---|---|
+| **FPGA configuration** | `bash tools/mkjic.sh`, then program the `.jic` to the DE0-Nano's EPCS16 |
+| **BIOS image** | `BIOSFLSH` writes a copy to the reserved top of the flash; the loader falls back to it when no host answers |
+| **The operating system** | DOS on the [USB hard disk](storage.md#drive-c--usb-mass-storage), which `INT 19h` tries before `B:` |
 
-The floppy image is still served over serial in either case.
+A serial host is now a *development* convenience — it wins over the flash copy when
+present, so a rebuilt BIOS is a reboot away — rather than a requirement. Drive `A:`
+reports NOT READY without one, and the boot moves on.
 
 ## Related
 
@@ -175,4 +204,5 @@ The floppy image is still served over serial in either case.
 - [fdc8272](modules/fdc8272.md) — cylinder `0xFF` and the host protocol
 - [BIOS](bios.md) — what runs after the hand-off
 - [Building](building.md) — `mkjic.sh` and programming
-- [Status and roadmap](status.md) — the flash fallback is the one open item
+- [Storage](storage.md) — the three drives and the boot order
+- [Status and roadmap](status.md) — what is verified working

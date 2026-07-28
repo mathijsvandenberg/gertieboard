@@ -96,12 +96,19 @@ instead of driving the shared bus during write cycles too.
 
 | Range | Size | Contents |
 |---|---|---|
-| `0x000000`–`0x1EFFFF` | 1984 KB | Fixed disk — 31 cylinders as reported to DOS |
+| `0x000000`–`0x167FFF` | 1440 KB | Drive `B:` — a 1.44 MB floppy as DOS sees it |
+| `0x168000`–`0x1EFFFF` | 544 KB | Unused — beyond the geometry reported to DOS |
 | `0x1F0000`–`0x1FFFFF` | 64 KB | Reserved for a BIOS image (boot fallback) |
 
 The chip erases in **4 KB blocks** (`0x20`), programs in **256-byte pages** (`0x02`),
 and needs a write-enable (`0x06`) before each. `0x05` reads the status register, whose
-bit 0 is `WIP`. See [fixed disk](../fixed-disk.md) for how that is turned into a disk.
+bit 0 is `WIP`. See [fixed disk](../fixed-disk.md) for how that is turned into a drive.
+
+> ⚠️ **Keep reads to 512 bytes per command.** A `READ` (`0x03`) may stream the whole
+> chip with `/CS` held low, and both the part and the datasheet allow it — but on this
+> board a long burst does not come back intact. A 64 KB read returned about a sixth of
+> its bytes wrong. Both long readers are chunked; see
+> [gotchas](../gotchas.md#a-long-spi-read-does-not-come-back-intact).
 
 > These are **ordinary user I/O pins**, not the FPGA's dedicated active-serial
 > configuration pins. This is a different chip from the one holding the bitstream, so

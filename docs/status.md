@@ -8,13 +8,15 @@ marketing: if something is listed as working it has been run on hardware.
 | Feature | Detail |
 |---|---|
 | **Real CPU** | NEC V20 (µPD70108C-8) on the [top board](hardware.md), FPGA as the surrounding chipset |
-| **Boots PC-DOS 3.3** | From a floppy image served over serial |
+| **Runs standalone** | FPGA configures from its own flash, BIOS from the on-board SPI flash, DOS from the USB disk — nothing attached but power and a monitor — [boot](boot.md) |
+| **Boots MS-DOS 4.01** | The Dutch release shipped with the Philips P2120. PC-DOS 3.30 works too and is what the tool image carries |
+| **USB hard disk, `C:`** | Bulk-Only Transport and SCSI in the BIOS over the fabric host controller. `FDISK`, `FORMAT`, `CHKDSK` pass; 504 MB addressable — [storage](storage.md) |
 | **CGA text** | Modes 0–3, 80×25 and 40×25, 16 colours — [vga](modules/vga.md) |
 | **CGA graphics** | Modes 4, 5, 6 — 320×200×4 and 640×200×2 |
 | **VGA output** | 640×480 @ 60 Hz on a real monitor, CGA doubled into it |
 | **PS/2 keyboard** | Translated to XT scancodes, with a hardware Ctrl+Alt+Del — [ps2_kbd_ppi](modules/ps2_kbd_ppi.md) |
-| **Floppy** | Served from a host over a 1 Mbaud serial link — [fdc8272](modules/fdc8272.md) |
-| **Fixed disk, 2 MB** | On the SPI flash; FDISK and FORMAT work and partitions survive a reboot — [fixed disk](fixed-disk.md) |
+| **Floppy `A:`** | Served from a host over a 1 Mbaud serial link. Absent or muted, it reports NOT READY and the boot moves on — [fdc8272](modules/fdc8272.md) |
+| **Floppy `B:`, 1.44 MB** | On the SPI flash; `FORMAT B:` works and the contents survive a reboot — [fixed disk](fixed-disk.md) |
 | **8253 PIT** | 18.2 Hz system tick and speaker tone — [timer8253](modules/timer8253.md) |
 | **8259A PIC** | Timer, keyboard and floppy interrupts — [int8259](modules/int8259.md) |
 | **8237A DMA** | Channel 2 for floppy transfers, channel 0 refresh — [dma8237](modules/dma8237.md) |
@@ -22,17 +24,13 @@ marketing: if something is listed as working it has been run on hardware.
 | **PC speaker** | Timer channel 2 gated through the PPI |
 | **640 KB RAM** | All 640 KB reported to DOS; the disk write buffer sits in M9K outside it — [mem_hybrid](modules/mem_hybrid.md) |
 | **Standalone FPGA config** | `.jic` in the DE0-Nano's EPCS16, no JTAG needed at power-on — [building](building.md) |
-| **USB host, full speed** | Enumerates a mass-storage device: descriptor, SET_ADDRESS, descriptor again at the new address — [usb_host](modules/usb_host.md) |
-| **Runs real software** | Alley Cat, Digger, Sopwith, the PC-DOS utilities |
+| **USB host, full speed** | NRZI, bit stuffing, CRC5/CRC16, SOF, enumeration and bulk transfers, with event counters for diagnosis — [usb_host](modules/usb_host.md) |
+| **Keyboard, extended keys** | Arrows, Home/End/PgUp/PgDn, Insert/Delete, right Ctrl, AltGr, keypad Enter — [ps2_kbd_ppi](modules/ps2_kbd_ppi.md) |
+| **Runs real software** | Alley Cat, Digger, Sopwith, Pacman, the DOS utilities |
 
-## Not working yet
-
-| Issue | Status |
-|---|---|
-| **BIOS boot from SPI flash** | `BIOSFLSH` writes and verifies the copy byte-for-byte, but booting from it produces a corrupted image. The serial path is unaffected. See [gotchas](gotchas.md#currently-open). |
-
-Until that is solved the board still needs a host at power-on for the BIOS, and always
-needs one for the floppy.
+Nothing is currently known-broken. The last open item — booting the BIOS from SPI
+flash — closed when the boot ROM stopped reading the image as one 64 KB burst; see
+[gotchas](gotchas.md#a-long-spi-read-does-not-come-back-intact).
 
 ## Planned
 
@@ -41,22 +39,19 @@ the logic elements** and **70 % of the 608 Kbit of M9K** are already committed. 
 still the tighter of the two, so several of these are memory problems before they are
 logic problems.
 
-### USB mass storage
+### USB throughput
 
-**The host controller is done and enumerating** — see [`usb_host`](modules/usb_host.md).
-What remains is entirely software, built on transactions the hardware already performs:
+Reads and writes are correct but slow: about **85 KB/s**. The wire is not the limit —
+a 64-byte packet takes ~45 µs on the bus and ~320 µs in the CPU's byte-at-a-time
+`IN`/`STOSB` loop, so the bus sits idle roughly 85 % of the time.
 
-- `GET_DESCRIPTOR` for the configuration, to find the bulk IN/OUT endpoints
-- `SET_CONFIGURATION`
-- Bulk-Only Transport: the 31-byte Command Block Wrapper, the data phase, the 13-byte
-  Command Status Wrapper, and the endpoint-toggle bookkeeping across all of them
-- SCSI: `INQUIRY`, `READ CAPACITY(10)`, `READ(10)`, `WRITE(10)`
-- then hang it off the existing `INT 13h` fixed-disk path in place of the SPI flash
+In rough order of return:
 
-That last step is the reason this is now tractable rather than daunting: the `INT 13h`
-side already exists and is proven against the [SPI flash](fixed-disk.md), so joining a
-USB stick to it is a different backing store behind an interface DOS already uses, not
-new BIOS surface.
+1. **Memory-map the packet buffer** into M9K so the copy becomes `rep movsb` (~3×)
+2. **Unroll the copy loop** (~40 % on top)
+3. **A 512-byte hardware buffer**, so one command moves a whole sector
+4. **DMA**, last — [`dma8237`](modules/dma8237.md) exists, but this is the biggest
+   change for the smallest remaining multiple
 
 ### USB keyboard
 

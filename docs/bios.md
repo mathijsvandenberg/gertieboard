@@ -71,19 +71,20 @@ The image is **8 KB**, linked at F-segment offset `0xE000` — physical
 
 ```bash
 as --32 xtbios_src.s -o xtbios.o
-ld -m elf_i386 -Ttext=0xE000 --section-start=.reset=0xFFF0 \
+ld -m elf_i386 -Ttext=0xC000 --section-start=.reset=0xFFF0 \
    --oformat=binary -e _post xtbios.o -o xtbios_claude.bin
 python make64k.py xtbios_claude.bin -o xtbios_claude.64k
 ```
 
-`make64k.py` places the 8 KB image at offset `0xE000` of a 64 KB file and fills the
+`make64k.py` places the 16 KB image at offset `0xC000` of a 64 KB file and fills the
 rest with `0xFF`, so the whole F-segment has defined content and the reset vector
 lands at `0xFFF0` of the image.
 
 **Use `bash tools/mkbios.sh`** rather than running those by hand. It does all three
-steps under `set -e` and then verifies the result: the `.bin` is exactly 8192 bytes,
-the `.64k` is 65536, the image really sits at offset `0xE000`, the reset vector at
-`0xFFF0` is a far jump into segment `F000`, and everything below is `0xFF` fill.
+steps under `set -e`, runs [`tools_equcheck.py`](../tools/tools_equcheck.py) over the
+source first, and then verifies the result: the `.bin` is exactly 16384 bytes, the
+`.64k` is 65536, the image really sits at offset `0xC000`, the reset vector at `0xFFF0`
+is a far jump into segment `F000`, and everything below is `0xFF` fill.
 
 > That script exists because a hand-built chain once failed silently — a `grep` in the
 > middle returned non-zero, the `&&` short-circuited, `make64k.py` never ran, and a
@@ -157,8 +158,14 @@ text is the same typeface as the text-mode display.
 
 ### INT 13h — disk
 
-`DL < 0x80` goes to the floppy path; `DL >= 0x80` to the
-[SPI-flash fixed disk](fixed-disk.md).
+Three drives, dispatched on `DL` alone — `0x00` to the serial floppy, `0x01` to the
+[SPI flash](fixed-disk.md), anything with bit 7 set to the
+[USB disk](storage.md#drive-c--usb-mass-storage). See [storage](storage.md) for how the
+three fit together.
+
+The flash drive is a **floppy** now, so it answers the floppy surface: `AH=05`, `16`,
+`17` and `18` matter to `FORMAT`, and without `AH=18` it reports *"Invalid media or
+Track 0 bad"*.
 
 | AH | Floppy | Fixed disk |
 |---|---|---|
@@ -252,10 +259,21 @@ Standard fields:
 | `0x6C`–`0x6F` | dword | Timer tick count |
 | `0x70` | byte | Timer overflow (midnight) flag |
 | `0x74` | byte | Last fixed-disk status |
-| `0x75` | byte | **Number of fixed disks** — 1 |
+| `0x75` | byte | **Number of fixed disks** — 1 when the USB disk enumerated, else 0 |
 | `0x80` / `0x82` | word | Keyboard buffer start / end |
-| `0x90`–`0x9F` | — | Floppy scratch (count, drive, head, cyl, sector, buffer, page) |
+| `0x96` / `0x97` | byte | Keyboard status flags 3 and 4 — **not scratch space**, see below |
+| `0xA8`–`0xAF`, `0xB4`–`0xB5` | — | Floppy scratch (count, drive, head, cyl, sector, buffer) |
 | `0xB0`–`0xB2` | byte | Floppy geometry for `AH=08`, captured from the boot sector's BPB |
+| `0xB6` | byte | FDC timeout flag |
+| `0xB7` | byte | "Drive A: answered at POST" — read by `INT 19h` only |
+| `0xB8`–`0xBA` | word | POST checksum of the code region, and its length |
+
+> ⚠️ **The floppy scratch used to live at `0x90`–`0x99`.** That overlaps `0x96`/`0x97`,
+> the keyboard status flags, so every disk access wrote a buffer offset through them and
+> the keyboard grew phantom modifier keys — but only on DOS 4 and later, which are the
+> versions that read those bytes. And `0xB0`–`0xB2` is not free either: it holds the
+> floppy geometry, and the read path uses it. Full allocation table in
+> [gotchas](gotchas.md#scratch-space-in-the-bios-data-area-is-not-free).
 
 Custom fields, all in the reserved `0xE0`+ area:
 
@@ -307,8 +325,8 @@ Two assemble-time equates near the fixed-disk code:
 
 | Switch | Default | Effect |
 |---|---|---|
-| `HD_ENABLE` | `1` | Route `DL >= 0x80` to the SPI fixed disk. Set to `0` to bisect a boot failure without removing the code |
-| `HD_DEBUG` | `0` | Report fixed-disk activity on the port-`0x80` 7-segment display |
+| `HD_ENABLE` | `1` | Route `DL = 0x01` to the SPI flash drive. Set to `0` to bisect a boot failure without removing the code |
+| `HD_DEBUG` | `0` | Report flash-drive activity on the port-`0x80` 7-segment display |
 
 With `HD_DEBUG = 1`: raw `AH` on entry, `B8` when `AH=08` returns, `B2` when a
 transfer completes, `C1` when a call is refused because no disk is advertised, `C9`
@@ -316,13 +334,20 @@ for an unsupported function.
 
 ## Space
 
-The 8 KB image has roughly 1 KB free. The full 64 KB F-segment is available if a
-larger addition is ever needed, but staying at 8 KB avoids re-validating how much of
-the segment the bootloader loads.
+The image is **16 KB**, linked at `F000:C000`. It outgrew 8 KB during the USB work —
+that build was using 8191 of 8192 bytes — and the reset vector needed no change because
+it jumps to the `_post` *symbol*. The bootloader has always loaded the full 64 KB
+F-segment, so there is room to grow again.
+
+> A `.equ` used **above** its definition assembles as a memory operand rather than an
+> immediate, silently. `cmp dl, HD_DRIVE` became `cmp dl,[0x1]` and cost a hardware
+> debugging session; so did `cmp bx, U_BUFSZ`, which became a comparison against the
+> BDA's floppy motor counter. `tools/tools_equcheck.py` now fails the build on it.
 
 ## Related
 
 - [Boot flow](boot.md) — how this image gets into memory
-- [Fixed disk](fixed-disk.md) — the `INT 13h` `DL >= 0x80` implementation
+- [Storage](storage.md) — the three drives behind `INT 13h`
+- [Fixed disk](fixed-disk.md) — the SPI flash drive in detail
 - [Tools](tools.md) — the DOS diagnostics
 - [Gotchas](gotchas.md) — **read this before editing the BIOS**

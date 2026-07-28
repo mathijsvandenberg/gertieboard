@@ -14,21 +14,24 @@
 
 ## Subsystems
 
-- **[Boot flow](boot.md)** — power-on to DOS: the boot ROM overlay, and the two
-  places a BIOS image can come from (serial host, SPI flash).
+- **[Boot flow](boot.md)** — power-on to DOS: the boot ROM overlay, the two places a
+  BIOS image can come from (serial host, SPI flash), and the boot order.
 - **[BIOS](bios.md)** — interrupt services, BIOS data area layout, and building it.
-- **[Fixed disk](fixed-disk.md)** — the 2 MB hard disk on SPI flash: geometry,
-  write strategy, and the reserved BIOS region.
+- **[Storage](storage.md)** — the three drives and how one `INT 13h` serves all of
+  them: serial `A:`, flash `B:`, USB `C:`, plus the boot order and the USB
+  mass-storage stack.
+- **[Fixed disk](fixed-disk.md)** — the SPI-flash drive in detail: geometry, the block
+  buffer, the erase/program path, and the reserved BIOS region.
 
 ## Practical
 
-- **[Status and roadmap](status.md)** — what works today, the one thing that does
-  not, and what is planned (USB keyboard, AdLib/Sound Blaster, EGA, USB storage)
-  with the real obstacle for each.
+- **[Status and roadmap](status.md)** — what works today, and what is planned (USB
+  throughput, USB keyboard, AdLib/Sound Blaster, EGA) with the real obstacle for
+  each.
 - **[Building](building.md)** — Quartus and assembler toolchains, the build
   scripts, and programming the FPGA and its configuration flash.
-- **[Tools](tools.md)** — DOS diagnostics (`HDTEST`, `MEMTEST`, `RAMSPEED`,
-  `CGATEST*`, `HDSTEP`, `BIOSFLSH`) and the host-side loader.
+- **[Tools](tools.md)** — DOS diagnostics (`USBSOAK`, `USBSTAT`, `SPIDUMP`, `KBSCAN`,
+  `HDTEST`, `MEMTEST`, `RAMSPEED`, `CGATEST*`, `BIOSFLSH`) and the host-side loader.
 - **[Gotchas](gotchas.md)** — mistakes that cost days of debugging. The 8088
   opcode trap in particular will bite anyone writing assembly for this machine.
 

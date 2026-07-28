@@ -186,12 +186,100 @@ is impossible, and that is the reading that means the pulldowns or the wiring ar
 > "the SETUP stage was ACKed but the IN data stage failed" point at completely different
 > halves of the problem.
 
+### USBSOAK — sustained write / read / verify
+
+The instrument that found the bit-stuffing bug. Every failure in the storage stack looks
+identical from DOS — "disk error" — and has been a different bug each time, so this one
+is built to tell them apart.
+
+```
+usbsoak            one pass, write/read/verify  (destroys data on C:, asks first)
+usbsoak 5          five passes
+usbsoak r          read-only
+```
+
+Five phases per pass at 1, 2, 8, 64 and 127 sectors per command. Three design choices
+matter:
+
+- **The verify pattern is derived from each sector's own LBA**, so a read that returns a
+  valid sector *from the wrong place* fails. With a constant pattern it would pass, and
+  that is exactly the class of bug behind "sector not found".
+- **`do_io` has no retries.** The existing retry logic is what hides raw failure rates.
+- **A verify failure re-reads the sector once**, which separates corruption on the disk
+  from corruption in the read path.
+
+Every failing command prints its own line: LBA, byte offset, expected and actual, and
+what that one command cost in NAKs and timeouts. `got − expected = 0x1234 × k` means the
+data is *k* sectors stale — the signature that cracked the write bug.
+
+127 is not arbitrary: it is the largest transfer one CBW can carry.
+
+### USBSTAT — controller event counters
+
+Reads the diagnostic window at `0xEF`: frames, CRC/PID errors, timeouts, NAKs, STALLs,
+packets in and out, transactions accepted, and software BUSY stalls. `usbstat r` samples
+them around a 64-sector read so the deltas can be attributed.
+
+CRC errors against packets moved is the link error rate. NAKs are normal — a device
+saying "not yet".
+
+### USBHD / USBWIPE — enumeration state, and clearing a stick
+
+`USBHD` shows how far enumeration got, dumps the descriptors, and probes `INT 13h`
+directly. `USBWIPE` zeroes the first 64 sectors so `FDISK` accepts a stick that arrived
+with GPT — DOS reads the existing table, does not understand it, and refuses.
+
+### SPIDUMP — read the flash the way the boot ROM does
+
+```
+spidump            one continuous burst, as the boot ROM used to
+spidump c          a fresh command every 512 bytes
+spidump n / s      no gap / a long gap after each write
+spidump d          hex-dump the 128 bytes at image offset C000
+```
+
+Drives the SPI engine directly at ports `0x98`–`0x9A` and compares 64 KB against the
+running BIOS. It counts mismatches at **three alignments** — aligned, lagging by one,
+leading by one — so a byte-shift race is distinguishable from genuinely different data,
+and the timing variants let a settle-time theory be tested rather than argued.
+
+This is what proved a long SPI read is unsafe on this board: 11256 mismatches streamed,
+zero chunked. See [gotchas](gotchas.md#a-long-spi-read-does-not-come-back-intact).
+
+### KBSCAN — raw scancodes
+
+Hooks `INT 09h`, takes each byte straight from port `0x60`, acknowledges exactly as the
+BIOS does, and prints it untranslated. Expected on a 101-key board: right arrow
+`E0 4D` / `E0 CD`, keypad 6 a bare `4D` / `CD`, AltGr `E0 38` / `E0 B8`.
+
+The arrow keys had been wrong twice, both times because the reasoning rested on an
+assumed byte stream rather than a measured one. This settled it in one run.
+
 ### BIOSFLSH — write the BIOS to flash
 
-Copies the running BIOS (`F000:0000`, 64 KB) into flash `0x1F0000` through ordinary
-`INT 13h` writes to cylinder 31, then reads it all back and compares. No filename to
-get wrong, and the copy is by construction the BIOS you just booted. See
-[fixed disk](fixed-disk.md#writing-the-bios-copy).
+Copies the running BIOS (`F000:0000`, 64 KB) into the reserved top of the flash through
+ordinary `INT 13h` writes **to drive `B:`**, then reads it all back and compares. No
+filename to get wrong, and the copy is by construction the BIOS you just booted.
+
+Nothing is hardcoded: the reserved region comes from the chip size POST detected
+(BDA `40:E4`) and the CHS for every transfer from what `INT 13h AH=08` reports. An
+earlier version addressed cylinder 31 of a geometry the drive no longer had, on a drive
+letter the flash no longer used — and so wrote 64 KB of BIOS onto the USB disk instead.
+
+It also refuses to flash an image it cannot trust. The F-segment is PSRAM, not ROM, so
+the running BIOS can be scribbled on between POST and running the tool. POST publishes a
+checksum of the code region at BDA `40:B8`; `BIOSFLSH` recomputes it and stops if the two
+disagree. See [storage](storage.md#drive-b--the-spi-flash).
+
+### SPLASH — CGA splash screen
+
+`Gertieboard` as graffiti on a brick wall, in CGA mode 4. Built by
+`tools/mksplash.py`, which writes a run-length encoded framebuffer and a PNG preview.
+
+Two CGA details it has to respect: black as the background colour makes the heavy black
+outline free, leaving all three palette entries for the artwork; and CGA pixels are not
+square, so the art is composed at 320×240 and squashed to 320×200 on export or the
+lettering comes out elongated.
 
 ### Older utilities
 

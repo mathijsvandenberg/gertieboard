@@ -198,19 +198,17 @@ interrupt-acknowledge cycle.
 
 ## Deliberate quirks
 
-These look like bugs but are intentional, carried over faithfully from the
-schematic the top level was converted from:
+These look like bugs but are intentional:
 
 - `DBG(7..2)` are tied low; `DBG(0)`/`DBG(1)` are debug taps of `PS2CLK`/`PS2DAT`
-- `ppi8255`'s unused outputs (below) — genuine XT features not implemented
 - `ppi8255`'s `ENABLE_PARITY_N`, `ENABLE_IOCHK_N` and `KBD_CLOCK_HOLD` outputs are
-  `OPEN` — XT features not implemented
-
-Two former quirks are gone: `USB0_DP`/`USB0_DM` are now driven by
-[`usb_host`](modules/usb_host.md), and the dead `pll2` was replaced by the 48 MHz
-`pll48` that feeds it.
+  `OPEN` — genuine XT features not implemented
 - `SPEAKER_MUTE` is a constant in the top level for silencing the buzzer during
   late-night work
+
+Two former quirks are gone: `USB0_DP`/`USB0_DM` are now driven by
+[`usb_host`](modules/usb_host.md), and the dead second PLL was replaced by the
+48 MHz `pll48` that feeds it.
 
 ## Related
 

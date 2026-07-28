@@ -22,7 +22,7 @@ had to be physical; a stock **Terasic DE0-Nano** underneath carries the FPGA.
    |                                                            |
    |    the chipset: bus decode, memory controller, CGA,        |
    |    8259 PIC, 8253 PIT, 8255 PPI, 8237 DMA, 8272 FDC,       |
-   |    keyboard controller, boot ROM                           |
+   |    keyboard controller, USB host controller, boot ROM      |
    |                                                            |
    |    also on it, unused: 32 MB SDRAM, accelerometer, ADC     |
    +----------------------------------------------------------+
@@ -36,27 +36,30 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
 
 ## What it does today
 
-- Boots **IBM PC-DOS 3.3**
+- **Runs standalone.** No host, no JTAG: the FPGA configures itself from its own
+  flash, the BIOS is fetched from the on-board SPI flash, and DOS boots from a USB
+  hard disk. A serial host is used for BIOS development, not to run the machine.
+- Boots **MS-DOS 4.01** — the Dutch release that shipped with the Philips P2120 —
+  and **IBM PC-DOS 3.30**
+- **USB hard disk** as drive `C:` — a full-speed host controller in fabric with a
+  Bulk-Only Transport and SCSI stack in the BIOS. `FDISK`, `FORMAT` and `CHKDSK`
+  all pass; 504 MB addressable
 - **CGA** 80×25 colour text plus graphics modes 4, 5 and 6, output as 640×480 VGA
-- **PS/2 keyboard**, including a hardware Ctrl+Alt+Del that no software can bypass
-- **Floppy** served over serial from a host loader
-- **Fixed disk** (2 MB) backed by the on-board SPI flash — FDISK and FORMAT work
-- PC speaker, 8253 timer, 8259 interrupt controller, 8237 DMA, 8255 PPI
-- **USB host** (full speed, in fabric) — enumerates a mass-storage device
-- 640 KB RAM, and the FPGA configures itself from its own flash at power-on
-- Runs real software: Alley Cat, Digger, Sopwith, PC-DOS utilities
+- **PS/2 keyboard** with extended keys, AltGr, and a hardware Ctrl+Alt+Del that no
+  software can bypass
+- **Two floppy drives**: `A:` served over serial from a host loader, `B:` a
+  1.44 MB drive backed by the on-board SPI flash
+- 640 KB RAM, PC speaker, 8253 timer, 8259 PIC, 8237 DMA, 8255 PPI
+- Runs real software: Alley Cat, Digger, Sopwith, Pacman, the DOS utilities
 
 ### On the list
 
 | | Planned |
 |---|---|
-| **USB mass storage** | The host controller enumerates already; what is left is Bulk-Only Transport and SCSI in software, then hanging it off the existing `INT 13h` path |
+| **USB throughput** | ~85 KB/s today, and the bottleneck is the CPU's byte-at-a-time copy, not the wire. Memory-mapping the packet buffer into M9K makes it a `rep movsb` |
 | **USB keyboard** | The SIE exists now, so mostly a matter of low-speed support — most keyboards are 1.5 Mbps |
 | **AdLib / Sound Blaster** | The DMA controller and PIC are already there and proven; an OPL2 at `0x388` is the self-contained first step |
 | **EGA** | Wants 256 KB of planar video memory, four times the on-chip RAM this device has — so it has to be PSRAM-backed |
-
-One thing is **known broken**: the BIOS copy in flash verifies byte-for-byte but does
-not boot, so a host is still needed at power-on.
 
 Full detail, including why each item is hard and what it needs, is in
 **[Status and roadmap](docs/status.md)**.
@@ -74,7 +77,8 @@ Start at **[docs/README.md](docs/README.md)**.
 | [Pinout](docs/pinout.md) | FPGA pin assignments |
 | [Boot flow](docs/boot.md) | Reset, boot ROM overlay, serial and flash BIOS paths |
 | [BIOS](docs/bios.md) | Interrupt services, BIOS data area, build |
-| [Fixed disk](docs/fixed-disk.md) | The SPI-flash hard disk |
+| [Storage](docs/storage.md) | The three drives: serial `A:`, flash `B:`, USB `C:` |
+| [Fixed disk](docs/fixed-disk.md) | The SPI-flash drive in detail: block buffer, erase/program |
 | [Building](docs/building.md) | Toolchain, scripts, programming the board |
 | [Tools](docs/tools.md) | DOS diagnostics and host-side utilities |
 | [Status and roadmap](docs/status.md) | What works, what does not, and what is planned |
@@ -82,8 +86,9 @@ Start at **[docs/README.md](docs/README.md)**.
 
 ## The host loader
 
-The board has no floppy drive, so a host program serves the floppy image — and, during
-development, the BIOS as well — over a serial link.
+The board has no floppy drive, so a host program can serve a floppy image as `A:` —
+and, during development, the BIOS as well — over a serial link. Neither is required to
+run the machine any more: it boots its own BIOS from flash and DOS from the USB disk.
 
 **[GertieBoardLoader](https://github.com/mathijsvandenberg/gertieboardloader)** is that
 program. It watches both files and reloads them automatically, so rebuilding a BIOS is a
@@ -144,7 +149,9 @@ This time Claude went at it with me. The three original blockers went first —
 which turned out to be the whole problem, because everything after them had only
 ever been waiting on a stable machine. From there it went quickly: CGA, then the
 keyboard, then DMA and the floppy link, then DOS, then a hard disk on the SPI
-flash. The board runs real software now.
+flash, then a USB host controller and a real hard disk behind it. The board runs
+real software now, and it runs it without anything plugged into it but power and a
+monitor.
 
 The [gotchas](docs/gotchas.md) page is the honest record of that second stretch.
 Several of the entries cost days, and one of them — an assembler quietly emitting

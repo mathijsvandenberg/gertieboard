@@ -75,11 +75,17 @@ quartus_sta gertieboard 2>&1 | grep "could not be matched"     # must be empty
 bash tools/mkbios.sh                    # -> xtbios_claude.bin + xtbios_claude.64k
 ```
 
-Do not run the steps by hand. The script chains assemble → link → expand → verify under
-`set -e`, and checks that the `.bin` is exactly 8192 bytes, the `.64k` is 65536, the
-image sits at F-segment offset `0xE000`, the reset vector at `0xFFF0` is a far jump into
-segment `F000`, and everything below `0xE000` is `0xFF` fill. It prints `BUILD OK` only
-if the `.64k` was genuinely built from that `.bin`.
+Do not run the steps by hand. The script chains check → assemble → link → expand →
+verify under `set -e`, and checks that the `.bin` is exactly 16384 bytes, the `.64k` is
+65536, the image sits at F-segment offset `0xC000`, the reset vector at `0xFFF0` is a far
+jump into segment `F000`, and everything below `0xC000` is `0xFF` fill. It prints
+`BUILD OK` only if the `.64k` was genuinely built from that `.bin`.
+
+It runs [`tools_equcheck.py`](../tools/tools_equcheck.py) over the source **first**, and
+refuses to build if any `.equ` is used above its definition — GNU `as` assembles such a
+symbol as a memory operand rather than an immediate, silently, and that has cost two
+hardware debugging sessions. It currently reports 51 symbols, all defined before first
+use.
 
 > It exists because a hand-built chain failed silently once: a `grep` in the middle
 > returned non-zero, the `&&` short-circuited, `make64k.py` never ran, and a two-day-old
@@ -115,11 +121,21 @@ cd tools
 ./nasm.exe -f bin hdtest.asm -o hdtest.com
 ```
 
-Getting a `.COM` onto the boot floppy: there is no `mtools` here, so the repo uses a
-small inline Python FAT12 writer that injects the file into
-`tools/dos33-xtpro.img` — find a free cluster, write the data, set both FAT copies,
-add a root-directory entry, and read it back to verify. Look at the injection snippets
-in the session history, or use `GertieBoardLoader`'s own editor.
+Getting a `.COM` onto the boot floppy: there is no `mtools` here, so use
+[`tools/fatput.py`](../tools/fatput.py).
+
+```bash
+python tools/fatput.py tools/dos33-xtpro.img tools/hdtest.com
+python tools/fatput.py tools/dos33-xtpro.img tools/hdtest.com --as HDTEST.COM
+python tools/fatput.py tools/dos33-xtpro.img --list
+```
+
+Everything comes from the BPB in the boot sector, so it works on a 360K, 720K or
+1.44M image without being told which. An existing file of the same name is replaced
+and its old cluster chain freed, so a rebuild loop does not leak space. After writing
+it **reads the file back through the directory entry and cluster chain** and compares
+— a silent mis-write here would otherwise look exactly like a bug in the program being
+tested. `GertieBoardLoader`'s own editor works too.
 
 > **Add `CPU 8086` to any new DOS utility.** They run on the same 8088 and will hit the
 > same opcode trap if a jump ever goes out of short range.

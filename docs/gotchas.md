@@ -379,21 +379,157 @@ the hardware is broken.**
 
 ---
 
+## A long SPI read does not come back intact
+
+The boot ROM fetched the 64 KB BIOS image from flash in **one `READ` command**, holding
+`/CS` low throughout. The part allows that, the datasheet allows that, and it appeared
+to work: the image loaded, the reset vector was intact, POST ran.
+
+About **a sixth of the bytes were wrong.** So the machine failed in ways that looked
+like anything except a bad read — a register that would not match its expected value, a
+drive that printed its label and no status, a screen of debris. A long stretch of
+suspicion fell on the *writer*, which had been correct the whole time.
+
+`tools/spidump.com` settled it by performing the identical read both ways from DOS —
+same port, same command, same byte-exchange routine, same comparison — with only the
+burst length changed:
+
+| Read style | Mismatches out of 65536 |
+|---|---|
+| One continuous burst, `/CS` low throughout | **11256** |
+| A fresh command every 512 bytes | **0** |
+
+**Never issue an SPI read longer than 512 bytes on this board.** Both long readers are
+chunked now: `flash_load` in the boot ROM, and `hd_load_block` in the BIOS, which was
+reading a whole 4 KB block in one command — eight times the length now known to be safe,
+never verified, and worse than a bad boot because it feeds read-modify-write and would
+have written the corruption back into the filesystem.
+
+### How the alternatives were ruled out first
+
+This is why the answer was trustworthy when it arrived. `spidump` counts mismatches at
+three alignments and offers several timing variants, so each theory died on its own
+evidence rather than on argument:
+
+- **A byte-shift race** — the status read overtaking the write, so the engine returns the
+  previous byte — would put one of the three alignment counts near zero. All three were
+  ~11200.
+- **Timing** — two filler instructions after the write versus eight gave *byte-identical*
+  counts. Not a settle-time problem.
+- **An erased or zeroed region** predicts a computable number of mismatches: 16265 if
+  `0xFF`, 9665 if `0x00`. Observed 11256, so the bytes were real data, just not ours.
+
+### The lesson that generalises
+
+Two readers disagreed about the same address. The instinct was to audit the writer —
+geometry, drive letter, address arithmetic, the flush, the block cache, whether PSRAM had
+been scribbled on. All of it was fine, and two independent checks had already said so:
+the read-back verified byte-for-byte, and a checksum proved the image in RAM was
+unchanged since POST.
+
+**When two readers disagree about the same address, enumerate how the _readers_ differ.**
+The one property that separated them — burst length — was in plain sight throughout.
+
+## Two writes to one array signal in a single clock
+
+Legal VHDL. Simulates correctly. Does not synthesise.
+
+The keyboard FIFO enqueued an extended key's `E0` prefix and its scancode in the same
+clock using a variable write pointer, and said so in a comment as though it were a
+clever economy:
+
+```vhdl
+-- Uses a variable write pointer so an E0 prefix + code (two bytes) can be
+-- enqueued in the same clock.
+fifo(to_integer(wrp_v(FW-1 downto 0))) <= b;   -- called twice, two indices
+```
+
+Quartus collapsed the two element writes into **a single write using the last index**.
+Only the code byte landed; the prefix slot kept whatever stale scancode had been written
+there on a previous trip around the ring.
+
+The symptom was arrow keys emitting a random old key followed by the numeric-keypad code
+they share. `tools/kbscan.com`, which prints raw bytes from port `0x60` with no
+translation, made it unarguable — three presses of the right arrow:
+
+```
+1f 4d   2e cd
+ae 4d   31 cd
+1c 4d   b8 cd
+```
+
+Second byte always correct, first byte a different leftover every time. Keypad Enter read
+`1c 1c 1c 9c`, where the leftover happened to be `1C` itself.
+
+The fix is one byte per clock: the prefix now, the code from a pending register on the
+next clock. PS/2 bytes are about a millisecond apart against a 50 MHz clock, so nothing
+can overtake it.
+
+**Write one element of an array signal per clock.** This is a synthesis hazard, not a
+language error, so nothing warns you — and it belongs in the same family as the
+[8088 opcode trap](#the-8088-opcode-trap): the source reads correctly and the machine
+disagrees.
+
+## Bit stuffing has to survive the end of the packet
+
+USB inserts a `0` after six consecutive `1` bits. That run can end **on the packet's very
+last CRC bit**, and the stuffed bit still has to go out before EOP.
+
+The transmitter dropped it. The receiver then saw six ones against EOP — a bit-stuff
+violation — and discarded the packet in silence: no ACK, no NAK, nothing to count.
+
+Whether a packet hits this depends **only on its bytes**, so the failure is perfectly
+deterministic per content and looks like anything but a wire problem. A write soak failed
+at the same three sectors on every run, with `tmo` incrementing while `nak` and `crc`
+stayed at zero. Roughly **one packet in 64** of random content is affected: frequent
+enough to destroy a filesystem, rare enough to pass every short test.
+
+It was found by modelling the coded transmit logic in Python and decoding it with an
+independently written, by-the-spec receiver. The model named exactly those three sectors
+from the pattern generator alone, before any hardware change.
+
+Retrospectively it explains a long tail of ghost stories: any host-transmitted packet
+whose CRC happened to end in six ones was undeliverable *forever*, so a `WRITE` losing
+its last data packet became silent FAT corruption, and a `READ` whose CBW hit it became
+"sector not found" at one specific sector for all time.
+
+## Scratch space in the BIOS data area is not free
+
+The floppy handler kept its parameters at BDA `40:90`–`40:99`, which looks like unclaimed
+space. `40:96` and `40:97` are the **keyboard status flags 3 and 4** — the `E0`/`E1`-seen
+bits, right-Ctrl, right-Alt, and the lock LED state.
+
+So every floppy read and write wrote a buffer offset straight through them, and the
+keyboard grew phantom modifier keys **after disk activity**. DOS 3.3 never reads those
+bytes; DOS 4 and later, `KEYB.COM` and anything enhanced-keyboard-aware do. A bug that
+appears only on some DOS versions, and only partway through a session, is very hard to
+attribute to the floppy driver.
+
+A near-repeat of the same mistake while fixing it: the first relocation aimed at `40:B0`,
+which holds the floppy geometry captured from the BPB at boot — and the read path *uses*
+it. That would have broken booting outright.
+
+**This BIOS's allocations**, so the next one does not collide:
+
+| Range | Owner |
+|---|---|
+| `40:A8`–`40:AF`, `40:B4`–`40:B5` | Floppy handler scratch |
+| `40:B0`–`40:B2` | Floppy geometry from the BPB — the read path reads this |
+| `40:B6` | FDC timeout flag |
+| `40:B7` | "Drive A: answered at POST" — read by `INT 19h` only |
+| `40:B8`–`40:BA` | POST code checksum and its length |
+| `40:C0`–`40:DF` | USB mass storage |
+| `40:E0`–`40:F5` | SPI flash disk |
+
 ## Currently open
 
-**The SPI-flash BIOS fallback.** With the host loader disabled, the boot ROM reaches POST
-`B` (64 KB read from flash) and loads an image that renders as corrupted, flashing text
-and then stalls — even though `BIOSFLSH` verifies the flash contents byte-for-byte
-against the running BIOS. The serial path is unaffected. Suspicion remains on the boot
-ROM's SPI read timing; the explicit settle gap did not resolve it.
-
-The next thing to try is having the bootloader checksum what it read and display it,
-then compare against `BIOSFLSH`'s verify — that would say definitively whether the read
-or the write side is at fault.
+Nothing. The last entry here — the BIOS not booting from SPI flash — closed when the boot
+ROM stopped reading the image as
+[one 64 KB burst](#a-long-spi-read-does-not-come-back-intact).
 
 ## Related
 
 - [Building](building.md) — the scripts and guards these lessons produced
-- [Tools](tools.md) — the diagnostics
-- [Status and roadmap](status.md) — the open item, in context
+- [Tools](tools.md) — the diagnostics that found several of these
+- [Storage](storage.md) — the three drives these lessons came out of
 - [Architecture](architecture.md)
