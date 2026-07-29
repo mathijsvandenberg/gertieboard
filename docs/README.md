@@ -30,8 +30,9 @@
   each.
 - **[Building](building.md)** — Quartus and assembler toolchains, the build
   scripts, and programming the FPGA and its configuration flash.
-- **[Tools](tools.md)** — DOS diagnostics (`USBSOAK`, `USBSTAT`, `SPIDUMP`, `KBSCAN`,
-  `HDTEST`, `MEMTEST`, `RAMSPEED`, `CGATEST*`, `BIOSFLSH`) and the host-side loader.
+- **[Tools](tools.md)** — DOS diagnostics (`USBPERF`, `USBSOAK`, `USBSTAT`, `SPIDUMP`,
+  `KBSCAN`, `186BOOST`, `HDTEST`, `MEMTEST`, `RAMSPEED`, `CGATEST*`, `BIOSFLSH`) and the
+  host-side loader.
 - **[Gotchas](gotchas.md)** — mistakes that cost days of debugging. The 8088
   opcode trap in particular will bite anyone writing assembly for this machine.
 

@@ -41,17 +41,36 @@ logic problems.
 
 ### USB throughput
 
-Reads and writes are correct but slow: about **85 KB/s**. The wire is not the limit —
-a 64-byte packet takes ~45 µs on the bus and ~320 µs in the CPU's byte-at-a-time
-`IN`/`STOSB` loop, so the bus sits idle roughly 85 % of the time.
+**Reads are 1.66× faster than they were**, and the remaining work is known. Measured
+with [`USBPERF`](tools.md#usbperf--read-benchmark-and-regression-check), which reads a
+fixed 256 KB at each transfer size:
 
-In rough order of return:
+| per call | before | after |
+|---|---|---|
+| 512 B | 49 KB/s | **69 KB/s** |
+| 1 KB | 56 | **83** |
+| 4 KB | 63 | **101** |
+| 32 KB | 65 | **108** |
+| 63.5 KB | 65 | **107** |
 
-1. **Memory-map the packet buffer** into M9K so the copy becomes `rep movsb` (~3×)
-2. **Unroll the copy loop** (~40 % on top)
-3. **A 512-byte hardware buffer**, so one command moves a whole sector
-4. **DMA**, last — [`dma8237`](modules/dma8237.md) exists, but this is the biggest
-   change for the smallest remaining multiple
+The gain came from replacing the per-byte `IN`/`STOSB`/`LOOP` copy with a single
+`REP INSB` — see [storage](storage.md#the-80186-fast-path). Nothing changed on the
+wire: transactions went 22157 → 22164, and the seven extra are exactly the seven extra
+NAKs, with the integrity checksum unchanged.
+
+That the numbers converge at 107–108 KB/s says the bottleneck is still the CPU rather
+than the bus. What is left, in rough order of return:
+
+1. **Memory-map the packet buffer** into M9K, so the copy becomes `REP MOVSB` from
+   memory instead of a port read per byte
+2. **A 512-byte hardware buffer**, so one command moves a whole sector rather than
+   eight 64-byte packets
+3. **DMA**, last — [`dma8237`](modules/dma8237.md) exists, but it is the biggest change
+   for the smallest remaining multiple
+
+Writes still use the byte loop. `REP OUTSB` is the same one-line change, but wants a
+[`USBSOAK`](tools.md#usbsoak--sustained-write--read--verify) pass on a scratch stick
+first, not on the disk with DOS installed on it.
 
 ### USB keyboard
 
@@ -116,7 +135,26 @@ likely under CERN-OHL-P, since MIT does not really fit a PCB.
   of a rebuild. The buffer itself is already in M9K; this is the remaining half of that
   idea. Reasoning in [fixed disk](fixed-disk.md#where-the-buffer-lives).
 - **Real floppy drive** on a physical connector, instead of serving images.
-- **Faster CPU clock** — `c0` is 5 MHz; the PSRAM path is the limit, not the CPU.
+- **Faster CPU clock.** `c0` is 5 MHz and the socket will take an 8088-2 (8 MHz) or
+  8088-1 (10 MHz), so there is headroom on paper. Two things make it a project rather
+  than a PLL edit, and neither is optional:
+
+  **Nothing can detect the speed grade.** An 8088, 8088-2 and 8088-1 are electrically
+  identical; the grade is a marking on the package and a promise from Intel, exposed
+  through no register and no pin. POST can identify an
+  [instruction-set class](storage.md#the-80186-fast-path) because that is a difference
+  in *behaviour*, but there is no equivalent for speed. Anything here would be a
+  stability *trial* — raise the clock, self-test, back off on failure — which also
+  means surviving the failure well enough to do the backing off.
+
+  **`c0` is not just the CPU.** [`busdecode`](modules/busdecode.md), the DMA, PIC, PPI,
+  FDC, `vga.CLK_CPU`, [`sevenseg`](modules/sevenseg.md), `ctrl_reg` and the boot ROM all
+  run on it, and two carry it as a generic: `fdc8272`'s `CLK_FREQ` sets the host link's
+  baud divider, so a changed clock silently breaks drive `A:`. Timing would need
+  re-closing at the new rate, and the PSRAM path is already the limit at 5 MHz.
+
+  A sensible first step is making `c0` one parameter that every dependent generic
+  derives from, so the rate is a single edit rather than six places to keep in step.
 - **Composite/RGBI output** alongside VGA, for a period-correct monitor.
 - **CP/M-80 software**, using the V20's 8080 emulation mode (`BRKEM`). Needs a host
   program on the DOS side rather than anything in the FPGA — a curiosity the CPU

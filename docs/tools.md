@@ -281,6 +281,47 @@ outline free, leaving all three palette entries for the artwork; and CGA pixels 
 square, so the art is composed at 320×240 and squashed to 320×200 on export or the
 lettering comes out elongated.
 
+### USBPERF — read benchmark and regression check
+
+```
+usbperf            512 sectors per phase (256 KB)
+usbperf 4          four times that, for finer resolution on a fast build
+```
+
+**Read-only** — it never issues `AH=03`, so it is safe with DOS installed on `C:`.
+`USBSOAK` is the one that writes.
+
+Three things, and the first matters most:
+
+- **integrity** — a checksum of a fixed region, read identically every run. A faster
+  driver that returns different bytes is not a faster driver, and this is what catches
+  that. It must not change across builds.
+- **throughput** at five transfer sizes, every phase moving the same 256 KB so the
+  columns compare directly. One averaged number would hide a change that helps large
+  transfers and hurts small ones; five columns show it as numbers moving in opposite
+  directions.
+- **cost** — controller transactions and NAKs over the whole run. These should not move
+  when only the CPU-side copy changes. When `REP INSB` went in, transactions went
+  22157 → 22164 and NAKs 21 → 28 — the same seven, so nothing happened on the wire.
+
+Timing is the 18.2 Hz tick, so phases are sized to run a couple of seconds. Pass a
+multiplier once reads get fast enough that they do not.
+
+### 186BOOST — turn the 80186 fast path off
+
+POST enables the fast path by itself when the CPU supports it, so this is not needed to
+get the speed. What it is for is taking it **away**: benchmarking one path against the
+other on the same boot is the only honest way to measure what a change is worth.
+
+```
+186boost           report the CPU class and which path is active
+186boost off       back to the 8086-safe byte loop
+186boost on        re-enable it
+186boost on /f     enable without the CPU test -- hangs the machine if wrong
+```
+
+See [storage](storage.md#the-80186-fast-path) for the probe and why it is conditional.
+
 ### Older utilities
 
 `IRQTEST`, `IRQTEST_CHK`, `IRQTEST_M0`, `MAPTEST` — interrupt-level and memory-map

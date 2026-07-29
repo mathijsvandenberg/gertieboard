@@ -188,6 +188,52 @@ middle that has to find everything exactly where it was left. Period software fr
 has no idea it is talking to a USB stick over a host controller in an FPGA, which is
 rather the point.
 
+## The 80186 fast path
+
+A USB packet is 64 bytes, and moving one used to cost roughly **900 µs** of CPU against
+**45 µs** on the wire. The bus was idle about 95 % of the time, which is why every
+transfer size converged on the same ~65 KB/s: the size did not matter, the copy did.
+
+The copy is now a single `REP INSB`, which reads the port `CX` times straight into
+`ES:DI`. It works because `U_DATA` auto-increments the controller's buffer pointer on
+every read, so repeated reads of one port walk the packet — exactly what `INS` expects.
+Worth **1.66×**, and the [numbers are in status](status.md#usb-throughput).
+
+### Why it is conditional
+
+`INS` is an 80186 instruction. The socket takes a NEC V20, which implements the 80186
+additions, **or a real Intel 8088-1, which does not** — opcode `6C` is undefined there
+and executing it is not survivable. So the BIOS cannot simply use it.
+
+POST therefore probes the CPU and picks the path, reporting what it found:
+
+```
+Processor          : 80186 instructions present - fast disk path
+Processor          : 8086/8088 class - compatible disk path
+```
+
+The probe asks one question: **does the CPU mask a shift count to five bits?** An 8086
+or 8088 performs all 33 shifts of `shl al,cl` with `CL=33` and leaves zero; an 80186 and
+the V20 mask the count to 1 and leave `0xFE`. It needs no undefined opcode — shifting by
+`CL` is the only form an 8086 has — and it **fails in the safe direction**: a CPU that
+does not mask is treated as an 8088 and never meets a 186 instruction. It can wrongly
+refuse the fast path, never wrongly enable it.
+
+> This identifies a **capability class, not a part.** A CPU carries no identifying
+> register; everything you can learn comes from catching it behaving differently. A V20
+> and a genuine 80186 answer identically, and the *speed grade* — 8088 against 8088-2
+> against 8088-1 — is not detectable at all, being a marking on the package rather than
+> anything electrical. See [status](status.md#ideas-unscheduled) for what raising the
+> clock would actually involve.
+
+The flag lives in the BIOS image (the F-segment is PSRAM, so it is writable) and its
+offset is published at BDA `40:BC`. POST rewrites it every boot, so a fast path can
+never be inherited across a CPU swap.
+[`186BOOST`](tools.md#186boost--turn-the-80186-fast-path-off) can turn it off, which is
+how the two paths get benchmarked against each other on one boot.
+
+Writes still use the byte loop.
+
 ## Diagnosis
 
 Every failure in this subsystem looks identical from DOS — "disk error" — and has been

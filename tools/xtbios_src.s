@@ -116,7 +116,10 @@ _post:
     mov bx, offset u_cbw
     sub bx, 0xC000
     mov [0xBA], bx
+    mov bx, offset u_fast        # where 186BOOST.COM finds the boost flag
+    mov [0xBC], bx
     pop ds
+    mov byte ptr cs:[u_fast], 0  # 8086-safe path until something asks for more
     push ax
     mov al, ah
     call dbg_byte
@@ -138,6 +141,42 @@ _post:
     mov al, 6
     mov si, offset b_par
     call putrow
+
+    # ---- what is in the socket? ----------------------------------------
+    # Not which part -- that cannot be known. A CPU carries no identifying
+    # register and its speed grade is a marking on the package, so the only
+    # honest question is what the thing can DO. This asks exactly one thing:
+    # does it mask a shift count to five bits?
+    #
+    # An 8086 or 8088 performs all 33 shifts and leaves zero. An 80186, and the
+    # V20 which implements the 80186 additions, masks the count to 1 and leaves
+    # 0xFE. The probe needs no undefined opcode -- shifting by CL is the only
+    # form an 8086 has -- and it fails in the safe direction: a CPU that does
+    # not mask is treated as an 8088 and never meets a 186 instruction.
+    #
+    # The answer picks the USB read path. REP INSB is worth 1.66x and is an
+    # 80186 instruction; opcode 6C is undefined on a real 8088-1, and this
+    # board's socket takes either.
+    mov al, 0xFF
+    mov cl, 33
+    shl al, cl
+    mov si, offset b_cpu86
+    test al, al
+    jz .cpu_report               # every shift performed -> 8086 class
+    mov byte ptr cs:[u_fast], 1  # 186 class: take the fast disk path
+    mov si, offset b_cpu186
+.cpu_report:
+    push si
+    mov al, 7
+    mov si, offset b_cpu
+    call putrow
+    pop si
+    push es
+    mov ax, VID
+    mov es, ax
+    mov di, 7*160 + 2*21
+    call dbg_str
+    pop es
 
 ## ---- 8259 PIC (master, XT single mode) -----------------------------
     mov al, 0x13            # ICW1: edge, single, ICW4 needed
@@ -3901,6 +3940,40 @@ u_bulk_in:
     mov cx, bx
     jcxz .ubi_short
     mov dx, U_DATA
+    cld
+    # REP INSB: the whole packet in one instruction.
+    #
+    # This replaced "in al,dx / stosb / loop", which costs about 36 clocks per
+    # byte before instruction fetch -- and the fetch is not free, because the
+    # BIOS executes from PSRAM. Measured, the CPU was spending roughly 900 us
+    # moving a 64-byte packet that takes 45 us on the wire, so the bus sat idle
+    # about 95 % of the time and every transfer size converged on ~65 KB/s.
+    #
+    # INS is an 80186 instruction and the V20 implements it, which is exactly
+    # the distinction docs/gotchas.md draws: .arch i8086 is a portability guard
+    # that keeps ACCIDENTAL 186 encodings out, not a statement that the CPU
+    # lacks them. Reaching for one deliberately is fine; the guard is switched
+    # off for one instruction and straight back on, so nothing else in the file
+    # loses the protection.
+    #
+    # It works here only because U_DATA auto-increments the controller's buffer
+    # pointer on every read -- u_setptr rewinds it above -- so repeated reads of
+    # one port walk the packet, which is precisely what INS expects.
+    # But INS is an 80186 instruction. The V20 in the socket implements it; a
+    # real Intel 8088-1, which this board is equally happy to hold, does not --
+    # opcode 6C is undefined there and executing it is not survivable. So the
+    # fast path is OFF at reset and something has to ask for it: 186BOOST.COM
+    # tests the CPU and sets the flag. A machine with an 8088 in it never
+    # reaches the instruction.
+    #
+    # Testing a flag costs ~20 clocks against ~640 for the copy, so guarding
+    # every packet is worth the 3 % and avoids self-modifying code.
+    cmp byte ptr cs:[u_fast], 0
+    je .ubi_copy
+    .arch i186
+    rep insb                     # ES:DI <- port DX, CX times
+    .arch i8086
+    jmp short .ubi_short
 .ubi_copy:
     in al, dx
     stosb
@@ -5168,6 +5241,11 @@ u_delay:
 ##  machine, so the buffers below really are writable. Every CDB table is
 ##  padded to 16 bytes because u_bot always copies 16 into the CBW.
 ## ---------------------------------------------------------------------
+##  Set to 1 by 186BOOST.COM once it has established that the CPU can execute
+##  80186 string instructions. Zero at reset, and POST rewrites it every boot,
+##  so a fast path can never be inherited across a CPU swap. Its offset is
+##  published at BDA 40:BC, because a DOS tool has no other way to find it.
+u_fast:     .byte 0              # 1 = the REP INSB path in u_bulk_in
 u_cbw:      .space 31            # Command Block Wrapper
 u_csw:      .space 13            # Command Status Wrapper
 u_buf:      .space U_BUFSZ       # descriptors, sense data, capacity
@@ -5360,6 +5438,9 @@ b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"
 b_hdr:    .asciz "                     Total  Base Extra"
 b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
+b_cpu:    .asciz "Processor          : "
+b_cpu186: .asciz "80186 instructions present - fast disk path"
+b_cpu86:  .asciz "8086/8088 class - compatible disk path"
 b_fd1:     .asciz "Diskette Drive A:  : "   # 21 columns, like B: and the disk
 b_boot:   .asciz "Booting..."
 b_sum:    .asciz "   code "
