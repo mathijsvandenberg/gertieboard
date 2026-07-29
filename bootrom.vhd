@@ -12,7 +12,8 @@
 --   * the overlay-enable flag               (ROM_EN)
 --   * the control register                  (OUT 0xE2 bit0 = 1 -> ROM_EN=0)
 --
--- ROM image comes from bootldr.mif (assemble bootldr.asm, convert with mkmif.py).
+-- ROM image is baked into the constant array below, from tools/bootldr.bin -- see
+-- the note on that constant. Assemble tools/bootldr_64k.asm to regenerate it.
 --------------------------------------------------------------------------------
 
 LIBRARY IEEE;
