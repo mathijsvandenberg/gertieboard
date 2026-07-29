@@ -142,29 +142,60 @@ _post:
     mov si, offset b_par
     call putrow
 
-    # ---- what is in the socket? ----------------------------------------
+    # ---- can this CPU execute INSB? -------------------------------------
     # Not which part -- that cannot be known. A CPU carries no identifying
-    # register and its speed grade is a marking on the package, so the only
-    # honest question is what the thing can DO. This asks exactly one thing:
-    # does it mask a shift count to five bits?
+    # register, and its speed grade is a marking on the package. The only
+    # honest question is what the thing can DO, and the only answer worth
+    # having is about the exact instruction we intend to use.
     #
-    # An 8086 or 8088 performs all 33 shifts and leaves zero. An 80186, and the
-    # V20 which implements the 80186 additions, masks the count to 1 and leaves
-    # 0xFE. The probe needs no undefined opcode -- shifting by CL is the only
-    # form an 8086 has -- and it fails in the safe direction: a CPU that does
-    # not mask is treated as an 8088 and never meets a 186 instruction.
+    # An earlier version asked instead whether the CPU masks a shift count to
+    # five bits, on the theory that a V20 behaves like an 80186 there. It does
+    # not: NEC kept the 8086's quirks and only ADDED instructions, so a V20
+    # answers that question exactly like an 8088 and the fast path was never
+    # taken on the very CPU that supports it. Inferring a capability from an
+    # unrelated behaviour was the mistake; this asks directly.
     #
-    # The answer picks the USB read path. REP INSB is worth 1.66x and is an
-    # 80186 instruction; opcode 6C is undefined on a real 8088-1, and this
-    # board's socket takes either.
-    mov al, 0xFF
-    mov cl, 33
-    shl al, cl
+    # The probe rests on a documented 8086 property: opcodes 60-6F decode as
+    # aliases of 70-7F, the conditional jumps. So the byte 6C is INSB on a V20
+    # or 80186, and JZ rel8 on an 8088. One byte against two -- which is what
+    # makes a direct test possible, once the byte counts are made to line up:
+    #
+    #   6C 06   V20:  INSB, then PUSH ES        8088: JZ +6, taken (ZF=1)
+    #   07      V20:  POP ES                    8088: jumped over
+    #   43      V20:  INC BX                    8088: jumped over
+    #   90 x4   V20:  NOP                       8088: jumped over
+    #
+    # Six bytes skipped, six bytes of displacement, so both CPUs resume at the
+    # same instruction and the stack balances on either path. Every byte is
+    # harmless whichever way it is decoded, and BX says which happened.
+    #
+    # INSB needs somewhere to put its byte: ES:DI points at u_buf, which is
+    # scratch, and DX at the diagnostic window, which has no side effects.
+    push es
+    push di
+    push dx
+    push bx
+    cld
+    push cs
+    pop es
+    mov di, offset u_buf         # a scratch byte to receive the read
+    mov dx, 0xEF                 # reading the diag window changes nothing
+    xor bx, bx
+    xor ax, ax                   # ZF = 1, and nothing below disturbs it
+    .byte 0x6C, 0x06             # INSB + PUSH ES   |   JZ +6
+    .byte 0x07                   # POP ES     -- V20 only
+    .byte 0x43                   # INC BX     -- V20 only
+    .byte 0x90, 0x90, 0x90, 0x90 # NOP        -- V20 only
     mov si, offset b_cpu86
-    test al, al
-    jz .cpu_report               # every shift performed -> 8086 class
-    mov byte ptr cs:[u_fast], 1  # 186 class: take the fast disk path
+    test bx, bx
+    jz .cpu_slow                 # jumped over it: no INSB on this CPU
+    mov byte ptr cs:[u_fast], 1  # it executed: take the fast disk path
     mov si, offset b_cpu186
+.cpu_slow:
+    pop bx
+    pop dx
+    pop di
+    pop es
 .cpu_report:
     push si
     mov al, 7
@@ -5439,8 +5470,8 @@ b_hdr:    .asciz "                     Total  Base Extra"
 b_mem:    .asciz "System Memory Found:   640   640     0 Kbytes"
 b_par:    .asciz "Parity Checking Enabled"
 b_cpu:    .asciz "Processor          : "
-b_cpu186: .asciz "80186 instructions present - fast disk path"
-b_cpu86:  .asciz "8086/8088 class - compatible disk path"
+b_cpu186: .asciz "80186 / V20 found  -  fast disk path"
+b_cpu86:  .asciz "8088 found  -  compatible disk path"
 b_fd1:     .asciz "Diskette Drive A:  : "   # 21 columns, like B: and the disk
 b_boot:   .asciz "Booting..."
 b_sum:    .asciz "   code "

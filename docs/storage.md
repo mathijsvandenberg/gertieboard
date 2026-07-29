@@ -208,16 +208,34 @@ and executing it is not survivable. So the BIOS cannot simply use it.
 POST therefore probes the CPU and picks the path, reporting what it found:
 
 ```
-Processor          : 80186 instructions present - fast disk path
-Processor          : 8086/8088 class - compatible disk path
+Processor          : 80186 / V20 found  -  fast disk path
+Processor          : 8088 found  -  compatible disk path
 ```
 
-The probe asks one question: **does the CPU mask a shift count to five bits?** An 8086
-or 8088 performs all 33 shifts of `shl al,cl` with `CL=33` and leaves zero; an 80186 and
-the V20 mask the count to 1 and leave `0xFE`. It needs no undefined opcode — shifting by
-`CL` is the only form an 8086 has — and it **fails in the safe direction**: a CPU that
-does not mask is treated as an 8088 and never meets a 186 instruction. It can wrongly
-refuse the fast path, never wrongly enable it.
+**The probe executes `INSB` and sees whether it happened.** It rests on a documented
+8086 property: opcodes `60`–`6F` decode as aliases of `70`–`7F`, the conditional jumps.
+So the byte `6C` is `INSB` on a V20 or 80186, and `JZ rel8` on an 8088 — one byte
+against two. Lining the byte counts up makes both readings safe and convergent:
+
+| bytes | on a V20 | on an 8088 |
+|---|---|---|
+| `6C 06` | `INSB`, then `PUSH ES` | `JZ +6`, taken because `ZF=1` |
+| `07` | `POP ES` | jumped over |
+| `43` | `INC BX` | jumped over |
+| `90 90 90 90` | `NOP` | jumped over |
+
+Six bytes skipped, six bytes of displacement, so both CPUs resume at the same
+instruction. Every byte is harmless whichever way it decodes, the `PUSH`/`POP` pair
+balances the stack on the V20 path, and `BX` says which happened. `INSB` needs somewhere
+to put its byte: `ES:DI` points at scratch and `DX` at the diagnostic window, which has
+no side effects.
+
+> **An earlier version asked the wrong question** and is worth recording. It tested
+> whether the CPU masks a shift count to five bits, on the theory that a V20 behaves
+> like an 80186 there. It does not — NEC kept the 8086's quirks and only *added*
+> instructions — so a V20 answered exactly like an 8088 and POST refused the fast path
+> on the very CPU that supports it. Inferring a capability from an unrelated behaviour
+> is the mistake; ask about the instruction you actually intend to execute.
 
 > This identifies a **capability class, not a part.** A CPU carries no identifying
 > register; everything you can learn comes from catching it behaving differently. A V20

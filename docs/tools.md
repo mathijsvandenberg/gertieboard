@@ -320,7 +320,10 @@ other on the same boot is the only honest way to measure what a change is worth.
 186boost on /f     enable without the CPU test -- hangs the machine if wrong
 ```
 
-See [storage](storage.md#the-80186-fast-path) for the probe and why it is conditional.
+It runs the same probe POST does: execute `INSB` and see whether it happened, rather
+than inferring the answer from some other behaviour. See
+[storage](storage.md#the-80186-fast-path) for how that is made safe on a CPU where the
+opcode means something else entirely.
 
 ### Older utilities
 

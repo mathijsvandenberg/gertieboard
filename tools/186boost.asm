@@ -22,11 +22,10 @@
 ;      186boost off       back to the 8086-safe loop
 ;      186boost on /f     enable without the test -- see the warning below
 ;
-;  The test shifts by a count above 31 and looks at the result. An 8086/8088
-;  performs every one of the shifts; an 80186 and the V20 mask the count to five
-;  bits and perform one. That is a documented difference, it needs no undefined
-;  opcode to probe, and it fails in the safe direction: a CPU that does not mask
-;  is refused. It cannot wrongly enable the boost, only wrongly refuse it.
+;  The test executes opcode 6C and sees what happened. On a V20 that is INSB;
+;  on an 8088 it is JZ, because the 8086 family decodes 60-6F as aliases of the
+;  conditional jumps at 70-7F. The surrounding bytes are arranged so both
+;  readings are harmless and land on the same instruction -- see cputest.
 ;
 ;  POST clears the flag on every boot, so this is not sticky -- put it in
 ;  AUTOEXEC.BAT if you want it. That is deliberate: swapping the CPU must never
@@ -124,24 +123,52 @@ bye:
         int  0x21
 
 ; ---------------------------------------------------------------------------
-; cputest -- AL = 1 if the CPU masks shift counts to five bits (80186 class,
-;            which includes the V20), 0 if it performs every shift (8086/8088).
+; cputest -- AL = 1 if this CPU can execute INSB, 0 if it cannot.
 ;
-; Nothing here is newer than an 8086: the count goes in CL, which is the only
-; form an 8086 has. Shifting 0xFF left 33 times gives 0 on a part that does all
-; 33, and 0xFE on a part that masks the count to 1.
+; It asks about the exact instruction the BIOS wants to use, rather than
+; inferring the answer from some other behaviour. An earlier version asked
+; whether shift counts are masked to five bits, on the theory that a V20
+; behaves like an 80186 there. It does not -- NEC kept the 8086's quirks and
+; only ADDED instructions -- so a V20 answered exactly like an 8088 and the
+; fast path was refused on the very CPU that supports it.
+;
+; The probe rests on a documented 8086 property: opcodes 60-6F decode as
+; aliases of 70-7F, the conditional jumps. So 6C is INSB on a V20 or 80186,
+; and JZ rel8 on an 8088 -- one byte against two. Line the byte counts up and
+; both CPUs resume at the same instruction:
+;
+;   6C 06   V20:  INSB, then PUSH ES      8088: JZ +6, taken because ZF=1
+;   07      V20:  POP ES                  8088: jumped over
+;   43      V20:  INC BX                  8088: jumped over
+;   90 x4   V20:  NOP                     8088: jumped over
+;
+; Six bytes skipped, six of displacement. Every byte is harmless whichever way
+; it decodes, the PUSH/POP pair balances the stack on the V20 path, and BX says
+; which CPU it was.
 cputest:
-        push cx
-        mov  al, 0xFF
-        mov  cl, 33
-        shl  al, cl
-        test al, al
-        jz   .old               ; every shift performed -> 8086/8088
+        push bx
+        push dx
+        push di
+        push es
+        cld
+        push cs
+        pop  es
+        mov  di, scratch        ; somewhere harmless for INSB to write
+        mov  dx, 0xEF           ; reading the diag window has no side effect
+        xor  bx, bx
+        xor  ax, ax             ; ZF = 1, and nothing below disturbs it
+        db   0x6C, 0x06         ; INSB + PUSH ES   |   JZ +6
+        db   0x07               ; POP ES     -- V20 only
+        db   0x43               ; INC BX     -- V20 only
+        db   0x90, 0x90, 0x90, 0x90
+        mov  al, 0
+        test bx, bx
+        jz   .done
         mov  al, 1
-        pop  cx
-        ret
-.old:   xor  al, al
-        pop  cx
+.done:  pop  es
+        pop  di
+        pop  dx
+        pop  bx
         ret
 
 ; ---------------------------------------------------------------------------
@@ -195,10 +222,8 @@ msg_hdr   db '186BOOST - 80186 fast path for USB reads',13,10
 msg_nobios db 'This BIOS does not publish a boost flag (BDA 40:BC is zero),',13,10
           db 'so it has no fast path to enable.',13,10,'$'
 msg_cpu   db 'CPU       : $'
-msg_cpu186 db '80186-class string instructions ARE available',13,10
-          db '            (masks shift counts - a V20 or better)',13,10,'$'
-msg_cpu8086 db 'plain 8086/8088 - no 80186 instructions',13,10
-          db '            (performs every shift of a count over 31)',13,10,'$'
+msg_cpu186 db 'INSB executes - 80186 class (a V20 or better)',13,10,'$'
+msg_cpu8086 db 'no INSB - plain 8086/8088',13,10,'$'
 msg_refuse db 13,10,'REFUSED. This CPU does not appear to implement the 80186',13,10
           db 'additions, and REP INSB would be an undefined opcode on it.',13,10
           db 'If you are certain the test is wrong, "186boost on /f" will',13,10
@@ -211,6 +236,7 @@ msg_fast  db 'REP INSB (about 1.66x faster)',13,10,'$'
 msg_slow  db 'byte loop (works on any 8086 or 8088)',13,10,'$'
 
 flagoff dw 0
+scratch db 0            ; one byte for the probe's INSB to land in
 is186   db 0
 action  db 0
 force   db 0
