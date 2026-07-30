@@ -74,6 +74,25 @@ _post:
     mov al, 2
     mov si, offset b_copy
     call putrow
+
+    # Release and commit, at the right of the model line. The Philips banner
+    # above names the machine being imitated; this names what is actually
+    # running, which has twice been the thing nobody could establish.
+    push es
+    push ds
+    push di
+    mov ax, VID
+    mov es, ax
+    mov di, 1*160 + 2*44
+    push cs
+    pop ds
+    mov si, offset b_rel
+    call dbg_str
+    mov si, offset b_git
+    call dbg_str
+    pop di
+    pop ds
+    pop es
     # Sum the code region NOW, before any device is probed, and paint it at
     # the top right. On a flash boot this is the first thing that tells the
     # truth: if it reads the same value as a serial boot, the loaded image is
@@ -742,6 +761,11 @@ v_writeca:                       # AL=char BL=attr CX=count
     push si
     mov dx, BDA
     mov ds, dx
+    cmp byte ptr [0x49], 4       # graphics mode? -> glyph renderer
+    jb .wc_text
+    call g_repeat
+    jmp .wc_done
+.wc_text:
     mov si, ax                   # save char in si low
     mov dx, [0x50]
     call cursor_off              # -> DI = byte offset
@@ -776,6 +800,11 @@ v_writec:                        # AL=char CX=count (keep attr)
     push si
     mov dx, BDA
     mov ds, dx
+    cmp byte ptr [0x49], 4       # graphics mode? -> glyph renderer
+    jb .wcc_text
+    call g_repeat
+    jmp .wcc_done
+.wcc_text:
     mov si, ax
     mov dx, [0x50]
     call cursor_off
@@ -924,6 +953,210 @@ g_tty_body:
     mov [0x50], dx
 .g_ret:
     jmp .tt_done
+
+## ---------------------------------------------------------------------
+##  g_repeat -- draw AL, CX times, from the cursor, in a graphics mode.
+##
+##  AH=09 and AH=0A replicate a character across the screen without moving the
+##  cursor. In a text mode that is a run of words stored into the buffer, which
+##  is what both handlers did unconditionally -- and in a graphics mode those
+##  words ARE pixels, so the result was a rectangle of scattered dots wherever
+##  a program drew text. King's Quest puts its scrolling text on screen this
+##  way, which is how it surfaced; AH=0E had been diverted to the renderer
+##  since the SOPWITH work, but these two never were.
+##
+##  Entry: DS = BDA, AL = character, CX = count. The cursor is NOT advanced --
+##  these calls do not move it, which is the whole reason a program uses them
+##  to paint a field rather than the teletype call.
+##
+##  Entry: DS=BDA, AL=char, CX=count.
+## ---------------------------------------------------------------------
+g_repeat:
+    push ax
+    push bx
+    push cx
+    push dx
+    mov bl, al                   # g_render wants the character in AL, and AL
+    mov dx, [0x50]               # is needed for the width, so park it in BL
+    call g_width                 # AH = columns for this mode
+.gr_l:
+    test cx, cx
+    jz .gr_done
+    mov al, bl
+    call g_render                # preserves AX and DX
+    inc dl
+    cmp dl, ah
+    jb .gr_next
+    mov dl, 0                    # wrap to the next row, as a real BIOS does
+    inc dh
+    cmp dh, 25
+    jae .gr_done                 # off the bottom: stop rather than scroll --
+.gr_next:                        # these calls must not disturb the display
+    dec cx
+    jmp .gr_l
+.gr_done:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ---------------------------------------------------------------------
+##  g_scrollwin -- AH=06 for a graphics mode: scroll or clear a character
+##  window by whole 8-pixel rows, moving pixels rather than character cells.
+##
+##  Entered from v_scrollup with its locals already unpacked and its registers
+##  already saved, so it shares that routine's exit at .su_done.
+##      [bp-1] top   [bp-2] left  [bp-3] bottom  [bp-4] right
+##      [bp-5] rows to scroll, 0 = clear the window
+##      [bp-8] width in columns
+##
+##  Geometry: a character row is 8 display lines; a scanline is 80 bytes in
+##  both modes; and a character cell is 2 bytes at 2 bits per pixel (mode 4/5)
+##  or 1 byte at 1 bit per pixel (mode 6). Even display lines live at B800:0000
+##  and odd ones at B800:2000, so a row spans both banks.
+##
+##  Blanks are cleared to zero rather than to the attribute in BH: in a
+##  graphics mode that register is a colour, and the callers that matter here
+##  want the background.
+## ---------------------------------------------------------------------
+g_scrollwin:
+    mov ax, VID
+    mov ds, ax
+    mov es, ax
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0x49]
+    pop ds
+    mov bl, 2                    # bytes per character cell
+    cmp al, 6
+    jne .gsw_bpc
+    mov bl, 1
+.gsw_bpc:
+    mov al, [bp-2]               # left column -> byte offset
+    mul bl
+    mov [bp-7], al               # x0, in bytes
+    mov al, [bp-8]               # width in columns -> width in bytes
+    mul bl
+    mov bh, al                   # BH = bytes to move per scanline
+    mov al, [bp-5]
+    test al, al
+    jz .gsw_clear
+
+.gsw_pass:
+    mov al, [bp-1]               # row = top
+.gsw_move:
+    cmp al, [bp-3]
+    jae .gsw_last
+    push ax
+    mov ah, al
+    inc ah                       # source row = destination + 1
+    call g_rowmove
+    pop ax
+    inc al
+    jmp .gsw_move
+.gsw_last:
+    call g_rowclear              # the row vacated at the bottom
+    dec byte ptr [bp-5]
+    jnz .gsw_pass
+    jmp .su_done
+
+.gsw_clear:
+    mov al, [bp-1]
+.gsw_clrrow:
+    cmp al, [bp-3]
+    ja .su_done
+    call g_rowclear
+    inc al
+    jmp .gsw_clrrow
+
+## g_rowmove: copy character row AH over character row AL.
+##   BH = bytes per scanline to move, [bp-7] = x offset. ES=DS=VID.
+g_rowmove:
+    push ax
+    push cx
+    push si
+    push di
+    push bx
+    mov cl, 3
+    shl al, cl                   # display line = row * 8
+    shl ah, cl
+    mov bl, 8                    # eight lines to a character row
+.grm_line:
+    push ax
+    call g_lineoff               # AL -> DI
+    mov di, si
+    pop ax
+    push ax
+    mov al, ah
+    call g_lineoff               # source line -> SI
+    pop ax
+    mov cl, bh
+    xor ch, ch
+    rep movsb
+    inc al
+    inc ah
+    dec bl
+    jnz .grm_line
+    pop bx
+    pop di
+    pop si
+    pop cx
+    pop ax
+    ret
+
+## g_rowclear: zero character row AL. BH = bytes per scanline, [bp-7] = x.
+g_rowclear:
+    push ax
+    push cx
+    push si
+    push di
+    push bx
+    mov cl, 3
+    shl al, cl                   # display line = row * 8
+    mov bl, 8
+.grc_line:
+    call g_lineoff               # SI = offset of line AL; preserves AX
+    mov di, si
+    mov cl, bh
+    xor ch, ch
+    push ax                      # AL is the line number AND the fill value,
+    xor al, al                   # so it has to be saved across the store
+    rep stosb
+    pop ax
+    inc al
+    dec bl
+    jnz .grc_line
+    pop bx
+    pop di
+    pop si
+    pop cx
+    pop ax
+    ret
+
+## g_lineoff: SI = the byte offset of display line AL, column [bp-7].
+##   Even lines are at 0x0000 and odd ones at 0x2000; both banks are 80 bytes
+##   per line. This is the CGA interleave, not a quirk of this BIOS.
+g_lineoff:
+    push ax
+    push dx
+    mov dl, al
+    and dl, 1                    # bank
+    shr al, 1                    # line within the bank
+    mov dh, 80
+    mul dh                       # AX = line * 80
+    test dl, dl
+    jz .glo_even
+    add ax, 0x2000
+.glo_even:
+    mov si, ax
+    mov al, [bp-7]
+    xor ah, ah
+    add si, ax
+    pop dx
+    pop ax
+    ret
 
 ## g_width: AH = text columns for the current graphics mode (DS=BDA)
 g_width:
@@ -1083,6 +1316,21 @@ v_scrollup:
     mov [bp-4], dl               # right
     mov [bp-5], al               # line count (0 = clear)
     mov [bp-6], bh               # attribute
+    # A graphics mode has no character cells to move. This handler shifts
+    # char+attr WORDS around B8000, which in mode 4 is moving pixels two bits
+    # at a time in units of four -- it scrambles the picture. King's Quest
+    # calls AH=06 nine times per run to manage its text window, which was
+    # enough to visibly corrupt the screen.
+    push ds
+    push ax
+    mov ax, BDA
+    mov ds, ax
+    cmp byte ptr [0x49], 4
+    pop ax
+    pop ds
+    jb .su_text
+    jmp g_scrollwin
+.su_text:
     mov al, dl
     sub al, cl
     inc al
@@ -5463,6 +5711,9 @@ usb_report:
 ##  _int19's .boot_fail.
 boot_order: .byte 0x00, 0x80, 0x01, 0xFF   # A:, C:, B:, end
 
+##  Generated by mkbios.sh on every build; see the note there. Not committed.
+.include "gitver.inc"
+b_rel:    .asciz "Release 1.00  "
 b_ver:    .asciz "Philips ROM BIOS Version 1.00"
 b_model:  .asciz "Gertieboard BIOS Retirement Edition"
 b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"

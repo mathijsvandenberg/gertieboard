@@ -32,6 +32,18 @@ ROMSZ=16384
 ROMOFF=0xC000
 
 # ---------------------------------------------------------------------------
+# Stamp the image with the commit it was built from. "Which BIOS is running?"
+# is a question that has cost real time here -- twice a stale artefact was
+# diagnosed as a hardware fault -- and seven characters on the POST screen
+# answer it without guesswork. A trailing + means the working tree had
+# uncommitted changes, so the hash alone does not describe the build.
+GITHASH="$(git rev-parse --short=7 HEAD 2>/dev/null || echo 0000000)"
+git diff --quiet HEAD 2>/dev/null || GITHASH="$GITHASH+"
+printf 'b_git:    .asciz "%s"
+' "$GITHASH" > gitver.inc
+echo "== build stamp $GITHASH =="
+
+# ---------------------------------------------------------------------------
 # GNU as turns a symbol used BEFORE its .equ into a forward label reference, so
 # "cmp dl, HD_DRIVE" silently assembles as "cmp dl, [0x0001]" -- a compare
 # against memory instead of an immediate. The source looks perfect and only the
