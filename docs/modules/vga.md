@@ -109,6 +109,46 @@ In graphics modes, pixel value `00` takes the background colour from `0x3D9`, an
 `01`/`10`/`11` come from the selected palette. Mode 6 uses the `0x3D9` low nibble
 as the foreground.
 
+## Text cursor
+
+Fed from [`crtc6845`](crtc6845.md): `CURSOR` is the cell (R14/R15), `CUR_TOP`/`CUR_BOT`
+the first and last scanline (R10/R11), `CUR_MOD` the blink select (R10 bits 6:5). The
+BIOS had been writing all four since day one; until `crtc6845` existed there was nothing
+on the other end of those writes, so there was no cursor at all.
+
+**Scanlines double.** The BIOS programs a genuine CGA -- `R9 = 7`, so eight lines to a
+cell, cursor on lines 6 and 7. This display is 400 active lines with **sixteen** to a
+cell, every CGA scanline drawn twice, so the cursor's lines double with everything else:
+
+```vhdl
+cur_first <= CUR_TOP(3 DOWNTO 0) & '0';   -- first * 2
+cur_last  <= CUR_BOT(3 DOWNTO 0) & '1';   -- last * 2 + 1
+```
+
+Taken literally, lines 6-7 of sixteen would sit across the middle of the character
+instead of under it. Doubling also turns a two-line CGA cursor into four lines here,
+which is the same fraction of the cell and matches how the glyph itself is stretched.
+
+**The cell match rides the pipeline.** The pixel path is two registers deep
+(`vga_idx` -> `MEMCHR` -> `CHAR`), so the comparison is made beside `vga_idx` and then
+registered twice, alongside `MEMCHR` and then alongside `CHAR`. A single compare would
+draw the cursor two pixels away from its own cell. The *row* match needs no delay --
+it depends only on `YY`, which is constant for a whole scanline, which is why `GetChar`
+already uses `YY` directly.
+
+**Blink** comes from a field counter: `frame_cnt(3)` is 8 fields on and 8 off, about
+3.7 Hz at 59.5 Hz. `CUR_MOD = "01"` means cursor-off and is honoured; `"11"` selects the
+slower rate. Everything else blinks, *including* the `00` this BIOS writes -- a datasheet
+reading of those bits calls `00` non-blinking, but a machine of this era blinks with
+exactly that value, and reproducing the machine is the point.
+
+Two behaviours fall out for free: a first line set *above* the last hides the cursor
+(how software does it without touching the blink bits), and the cursor is drawn in the
+cell's own foreground colour, so it inherits whatever the text under it is using rather
+than being hardcoded white.
+
+Costs 17 registers and no measurable logic. `clk[1]` keeps 24 ns of slack.
+
 ## CPU read-back
 
 ```vhdl

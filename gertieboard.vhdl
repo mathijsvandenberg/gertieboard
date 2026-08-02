@@ -113,6 +113,10 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_mem_addr             : std_logic_vector(19 downto 0);
   SIGNAL n_mem_rd               : std_logic;
   SIGNAL n_mem_wr               : std_logic;
+  SIGNAL n_cur_addr             : std_logic_vector(13 downto 0);  -- CRTC R14/R15
+  SIGNAL n_cur_top              : std_logic_vector(4 downto 0);   -- CRTC R10(4:0)
+  SIGNAL n_cur_bot              : std_logic_vector(4 downto 0);   -- CRTC R11(4:0)
+  SIGNAL n_cur_mod              : std_logic_vector(1 downto 0);   -- CRTC R10(6:5)
   SIGNAL n_opl_snd              : std_logic;   -- AdLib PWM, mixed into BUZ
   SIGNAL n_out0                 : std_logic;
   SIGNAL n_out2                 : std_logic;
@@ -155,6 +159,10 @@ BEGIN
       DATAIN               => n_cpu_wdata,
       IOWR                 => n_io_wr,
       IOADDR               => n_io_addr,
+      CURSOR               => n_cur_addr,
+      CUR_TOP              => n_cur_top,
+      CUR_BOT              => n_cur_bot,
+      CUR_MOD              => n_cur_mod,
       HS                   => n_hs,
       VS                   => n_vs,
       RGB                  => n_rgb,
@@ -380,7 +388,10 @@ BEGIN
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
       START                => OPEN,
-      CURSOR               => OPEN
+      CURSOR               => n_cur_addr,
+      CUR_TOP              => n_cur_top,
+      CUR_BOT              => n_cur_bot,
+      CUR_MOD              => n_cur_mod
     );
 
   -- AdLib at 0x388/0x389. CLK_HZ must match the clock wired to CLK: every

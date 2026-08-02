@@ -39,6 +39,12 @@ ENTITY vga IS
 		  DATAIN					  : IN std_logic_vector(7 DOWNTO 0);
 		  IOWR					  : IN std_logic;                       -- I/O write strobe (active low)
 		  IOADDR				  : IN std_logic_vector(15 DOWNTO 0);  -- latched I/O address
+		  -- Text cursor, from crtc6845. Tie CURSOR to all-ones and CUR_MOD to
+		  -- "01" to disable it: both mean "not here" and neither can draw.
+		  CURSOR				  : IN std_logic_vector(13 DOWNTO 0);  -- R14/R15 cell
+		  CUR_TOP				  : IN std_logic_vector(4 DOWNTO 0);   -- R10(4:0)
+		  CUR_BOT				  : IN std_logic_vector(4 DOWNTO 0);   -- R11(4:0)
+		  CUR_MOD				  : IN std_logic_vector(1 DOWNTO 0);   -- R10(6:5)
  		  HS                 	  : OUT std_logic;
  		  VS                 	  : OUT std_logic;
  		  RGB               	  : OUT std_logic_vector(5 DOWNTO 0);
@@ -126,6 +132,30 @@ ARCHITECTURE behavior OF vga IS
   -- byte every 8 VGA clocks, so the fetch address is the same expression.
   SIGNAL goff    : std_logic_vector(12 DOWNTO 0);  -- offset within bank
   SIGNAL txt_idx : std_logic_vector(12 DOWNTO 0);  -- text cell index
+
+  ----------------------------------------------------------------------------
+  -- Text cursor
+  --
+  -- The BIOS has always written the cursor position to CRTC R14/R15 and its
+  -- shape to R10/R11; until crtc6845 existed there was nothing on the other end
+  -- of those writes, so there was no cursor at all. These signals are that
+  -- other end.
+  --
+  -- The cell match has to travel the SAME two pipeline stages as the character
+  -- it belongs to (vga_idx -> MEMCHR -> CHAR), or the cursor would be drawn two
+  -- pixels away from its own cell. Hence cur_c0/1/2 rather than one compare.
+  --
+  -- The row match does not need delaying: it depends only on YY, which is
+  -- constant for a whole scanline. GetChar already uses YY directly for the
+  -- same reason.
+  ----------------------------------------------------------------------------
+  SIGNAL cur_c0, cur_c1, cur_c2 : std_logic := '0';
+  SIGNAL cur_row   : std_logic;
+  SIGNAL cur_on    : std_logic;
+  SIGNAL cur_first : std_logic_vector(4 DOWNTO 0);
+  SIGNAL cur_last  : std_logic_vector(4 DOWNTO 0);
+  SIGNAL cur_blink : std_logic;
+  SIGNAL frame_cnt : std_logic_vector(5 DOWNTO 0) := (OTHERS => '0');
   SIGNAL vga_idx : std_logic_vector(12 DOWNTO 0);  -- muxed scan read index
   SIGNAL GSEL    : std_logic;                      -- even/odd byte select
   SIGNAL GPIX2   : std_logic_vector(1 DOWNTO 0);   -- 2-bpp pixel (mode 4/5)
@@ -186,12 +216,18 @@ BEGIN
                                       + conv_integer(XX(10 DOWNTO 3)), 13);
   vga_idx <= YY(1) & goff(12 DOWNTO 1) WHEN gfx_on = '1' ELSE txt_idx;
 
+  -- Is the cell being fetched RIGHT NOW the one the CRTC points at? Compared
+  -- here, beside vga_idx, so it can be pipelined alongside the character it
+  -- refers to rather than chasing it two stages later.
+  cur_c0 <= '1' WHEN (txt_idx = CURSOR(12 DOWNTO 0)) ELSE '0';
+
   VGA_PORT : PROCESS (CLK_VGA)
   BEGIN
     IF rising_edge(CLK_VGA) THEN
       MEMCHR <= MEMC(conv_integer(vga_idx));
       MEMATT <= MEMA(conv_integer(vga_idx));
       GSEL   <= goff(0);
+      cur_c1 <= cur_c0;                 -- rides with MEMCHR, stage 1 of 2
     END IF;
   END PROCESS;
 
@@ -234,6 +270,7 @@ BEGIN
         ELSE
           Y  <= "00000000000";
           YY <= "00000000000";
+          frame_cnt <= frame_cnt + 1;   -- one per field, drives the cursor blink
         END IF;
       END IF;
     END IF;
@@ -251,6 +288,7 @@ BEGIN
     IF (rising_edge(CLK_VGA)) THEN
       CHAR     <= GetChar(XX(2 DOWNTO 0) - 1, YY(3 DOWNTO 0), MEMCHR(7 DOWNTO 0));
       ATTR_REG <= MEMATT;
+      cur_c2   <= cur_c1;               -- rides with CHAR, stage 2 of 2
 
       psel := XX - 1;
       IF (GSEL = '1') THEN
@@ -290,7 +328,41 @@ BEGIN
   fg_rgb   <= cga_to_rgb(fg_color);
   bg_rgb   <= cga_to_rgb(bg_color);
 
-  RGBCHR <= fg_rgb WHEN (CHAR = '1') ELSE bg_rgb;
+  ----------------------------------------------------------------------------
+  -- Text cursor decode
+  --
+  -- SCANLINES DOUBLE. The BIOS programs a genuine CGA: R9 = 7, so eight lines
+  -- to a cell, with the cursor on lines 6 and 7. This display is 400 active
+  -- lines with SIXTEEN to a cell -- every CGA scanline drawn twice -- so the
+  -- cursor's lines double with everything else. Taken literally, 6..7 of
+  -- sixteen would sit across the middle of the character instead of under it.
+  --
+  -- Doubling also makes a two-line CGA cursor four lines here, which is right:
+  -- it is the same fraction of the cell, and it matches how the glyph is
+  -- stretched.
+  cur_first <= CUR_TOP(3 DOWNTO 0) & '0';        -- first * 2
+  cur_last  <= CUR_BOT(3 DOWNTO 0) & '1';        -- last * 2 + 1
+
+  cur_row <= '1' WHEN (('0' & YY(3 DOWNTO 0)) >= cur_first AND
+                       ('0' & YY(3 DOWNTO 0)) <= cur_last) ELSE '0';
+
+  -- A first line ABOVE the last is how software hides the cursor without
+  -- touching the blink bits, and it falls out of the comparison above for free.
+
+  -- R10(6:5) selects the blink rate. 01 means "cursor off" and is honoured;
+  -- 11 is the slower rate. Anything else blinks at the faster one, including
+  -- the 00 this BIOS actually writes -- a machine of this era shows a blinking
+  -- cursor with exactly that value, and reproducing the machine is the point.
+  -- frame_cnt(3) is 8 fields on, 8 off: about 3.7 Hz at 59.5 Hz.
+  cur_blink <= frame_cnt(4) WHEN CUR_MOD = "11" ELSE frame_cnt(3);
+
+  cur_on <= '1' WHEN (cur_c2   = '1' AND cur_row   = '1' AND
+                      gfx_on   = '0' AND CUR_MOD  /= "01" AND
+                      cur_blink = '1') ELSE '0';
+
+  -- Drawn in the cell's own foreground colour, so it inherits whatever colour
+  -- the text under it is using rather than being hardcoded white.
+  RGBCHR <= fg_rgb WHEN (CHAR = '1' OR cur_on = '1') ELSE bg_rgb;
 
   -- Graphics color index:
   --   mode 4  pixel 00       -> background color (0x3D9 bits 3:0)

@@ -72,7 +72,10 @@ ENTITY crtc6845 IS
         WR      : IN    std_logic;                      -- active LOW I/O write
         DATAOUT : INOUT std_logic_vector(7 DOWNTO 0);   -- 'Z' when not addressed
         START   : OUT   std_logic_vector(13 DOWNTO 0);  -- R12/R13, for vga.vhd
-        CURSOR  : OUT   std_logic_vector(13 DOWNTO 0)); -- R14/R15, for vga.vhd
+        CURSOR  : OUT   std_logic_vector(13 DOWNTO 0);  -- R14/R15, cursor cell
+        CUR_TOP : OUT   std_logic_vector(4 DOWNTO 0);   -- R10(4:0) first line
+        CUR_BOT : OUT   std_logic_vector(4 DOWNTO 0);   -- R11(4:0) last line
+        CUR_MOD : OUT   std_logic_vector(1 DOWNTO 0));  -- R10(6:5) blink select
 END crtc6845;
 
 ARCHITECTURE behavior OF crtc6845 IS
@@ -108,9 +111,16 @@ BEGIN
   sel_rd  <= '1' WHEN (RD = '0' AND ADDR = x"03D5") ELSE '0';
   DATAOUT <= rdval WHEN sel_rd = '1' ELSE "ZZZZZZZZ";
 
-  -- Straight out for vga.vhd to pick up when it is ready for them.
+  -- Straight out for vga.vhd.
   START  <= reg(12)(5 DOWNTO 0) & reg(13);
   CURSOR <= reg(14)(5 DOWNTO 0) & reg(15);
+
+  -- Cursor shape. R10 carries the first scanline in bits 4:0 and the blink
+  -- select in 6:5; R11 carries the last scanline. The XT BIOS writes R10 = 0x06
+  -- and R11 = 0x07 -- the bottom two lines of an eight-line cell.
+  CUR_TOP <= reg(10)(4 DOWNTO 0);
+  CUR_BOT <= reg(11)(4 DOWNTO 0);
+  CUR_MOD <= reg(10)(6 DOWNTO 5);
 
   ----------------------------------------------------------------------------
   -- Write path. The index latch at 0x3D4, the data port at 0x3D5.
