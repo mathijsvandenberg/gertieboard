@@ -167,7 +167,6 @@ ARCHITECTURE behavior OF psram_ctrl IS
   SIGNAL cur_tag    : std_logic_vector(15 DOWNTO 0);
   SIGNAL hit_vec    : std_logic_vector(NLINES-1 DOWNTO 0);
   SIGNAL hit        : std_logic;
-  SIGNAL hit_sel    : integer RANGE 0 TO NLINES-1;
   SIGNAL cache_byte : std_logic_vector(7 DOWNTO 0);
   SIGNAL rd_hit     : std_logic;
 
@@ -202,19 +201,43 @@ BEGIN
   END GENERATE;
 
   -- Tags are unique, so at most one bit of hit_vec is set.
-  hit_enc : PROCESS (hit_vec)
+  hit_or : PROCESS (hit_vec)
     VARIABLE h : std_logic;
-    VARIABLE s : integer RANGE 0 TO NLINES-1;
   BEGIN
-    h := '0'; s := 0;
+    h := '0';
     FOR i IN 0 TO NLINES-1 LOOP
-      IF hit_vec(i) = '1' THEN h := '1'; s := i; END IF;
+      h := h OR hit_vec(i);
     END LOOP;
-    hit     <= h;
-    hit_sel <= s;
+    hit <= h;
   END PROCESS;
 
-  cache_byte <= cache(hit_sel)(conv_integer(ADDR(3 DOWNTO 0)));
+  -- One-hot byte select, NOT an encoder followed by an index.
+  --
+  -- This is not tidying. "cache(hit_sel)(offset)" is a SERIAL chain -- compare
+  -- the tags, encode the result to an index, then run a NLINES*LINE_BYTES:1 mux
+  -- with that index -- and it was the critical path of the entire design. Going
+  -- from four lines to eight broke the 50 MHz constraint by 37 ps, on the path
+  -- dma8237|DMA_ADDR[13] -> psram_ctrl|lu_data[2].
+  --
+  -- Written this way, each line's byte select depends only on the ADDRESS, so
+  -- all NLINES of them evaluate in PARALLEL with the tag compare and the only
+  -- thing left in series is the final OR. The encoder leaves the path
+  -- altogether, and the depth stops growing with the line count the way an
+  -- index-mux does.
+  --
+  -- Safe because the tags are unique: at most one bit of hit_vec is ever set,
+  -- so the OR sees one term at most and never merges two lines.
+  byte_mux : PROCESS (hit_vec, cache, ADDR)
+    VARIABLE b : std_logic_vector(7 DOWNTO 0);
+  BEGIN
+    b := (OTHERS => '0');
+    FOR i IN 0 TO NLINES-1 LOOP
+      IF hit_vec(i) = '1' THEN
+        b := b OR cache(i)(conv_integer(ADDR(3 DOWNTO 0)));
+      END IF;
+    END LOOP;
+    cache_byte <= b;
+  END PROCESS;
 
   -- registered lookup + "belongs to the current address" guard
   lookup : PROCESS (CLK_RAM)
