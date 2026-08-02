@@ -26,15 +26,22 @@ marketing: if something is listed as working it has been run on hardware.
 | **Standalone FPGA config** | `.jic` in the DE0-Nano's EPCS16, no JTAG needed at power-on — [building](building.md) |
 | **USB host, full speed** | NRZI, bit stuffing, CRC5/CRC16, SOF, enumeration and bulk transfers, with event counters for diagnosis — [usb_host](modules/usb_host.md) |
 | **Keyboard, extended keys** | Arrows, Home/End/PgUp/PgDn, Insert/Delete, right Ctrl, AltGr, keypad Enter — [ps2_kbd_ppi](modules/ps2_kbd_ppi.md) |
-| **Runs real software** | Alley Cat, Digger, Sopwith, Pacman, the DOS utilities |
+| **6845 CRTC registers** | `0x3D4`/`0x3D5` answer, so software can *detect* the card. Prince of Persia and Commander Keen both refused to start without this — [crtc6845](modules/crtc6845.md) |
+| **Blinking text cursor** | Position and shape from CRTC R10/R11/R14/R15, scanlines doubled for the 16-line cell — [vga](modules/vga.md#text-cursor) |
+| **AdLib at `0x388`** | Detection handshake, and nine channels rendered as square waves on the buzzer. Not FM synthesis — [opl2_lite](modules/opl2_lite.md) |
+| **Runs real software** | Alley Cat, Digger, Sopwith, Pacman, Prince of Persia, Commander Keen 4, the DOS utilities |
 
 Nothing is currently known-broken. The last open item — booting the BIOS from SPI
 flash — closed when the boot ROM stopped reading the image as one 64 KB burst; see
 [gotchas](gotchas.md#a-long-spi-read-does-not-come-back-intact).
 
+One known *gap* rather than a fault: CRTC `START` (R12/R13, the display start address)
+is latched but not yet wired into [`vga`](modules/vga.md), so anything that scrolls by
+moving it will not scroll. Software that redraws instead is unaffected.
+
 ## Planned
 
-Roughly in the order they are likely to happen. Two budgets to keep in mind: **60 % of
+Roughly in the order they are likely to happen. Two budgets to keep in mind: **68 % of
 the logic elements** and **70 % of the 608 Kbit of M9K** are already committed. Memory is
 still the tighter of the two, so several of these are memory problems before they are
 logic problems.
@@ -84,19 +91,32 @@ One caveat: most keyboards are **low speed** (1.5 Mbps) and `usb_host` is full-s
 only. So this needs either a low-speed mode in the SIE — a different bit rate, and
 keep-alive instead of SOF — or a full-speed keyboard.
 
-### Sound Blaster / AdLib
+### Sound: real FM, then the DSP
 
-The pieces this needs are mostly already on the board. [`dma8237`](modules/dma8237.md)
-exists and is proven with the floppy, so single-cycle DMA playback has somewhere to
-come from, and [`int8259`](modules/int8259.md) can raise IRQ 5.
+The AdLib **front end** has landed — [`opl2_lite`](modules/opl2_lite.md) answers the
+detection handshake at `0x388`/`0x389` and plays each of the nine channels as a square
+wave, PWM-mixed onto the buzzer beside the PC speaker. What it is not is a synthesiser:
+no operators, no envelopes, no rhythm mode, so notes never decay, the timbre is a square
+wave rather than the patch the game chose, and percussion is silent.
 
-- **AdLib (OPL2/YM3812)** at I/O `0x388`–`0x389` is the bigger win for the era and is
-  self-contained: nine channels of two-operator FM, an exponential/log sine table in
-  M9K, and no DMA involved. Many games detect AdLib alone.
-- **Sound Blaster DSP** at `0x220` adds the command interface, 8-bit DMA playback on
-  channel 1, and the IRQ acknowledge at `0x22E`.
+AdLib came first on purpose. A Sound Blaster is an AdLib plus a DAC, and announcing one
+commits the board to servicing DMA channel 1 and an interrupt — a game sets up a
+transfer and waits for a completion IRQ, and if it never comes the game hangs. The AdLib
+half promises nothing and cannot wedge anything, and it is the half that carries the
+music in this era.
 
-Output would be a sigma-delta or PWM pin on the top board rather than a real DAC.
+Two steps left, in order:
+
+- **A real OPL2 core** behind the existing register decode: nine channels of
+  two-operator FM, phase accumulators, an exponential/log sine table in M9K, and ADSR
+  envelopes. The register file and per-channel state already exist, so this replaces the
+  square-wave renderer rather than starting over.
+- **Sound Blaster DSP** at `0x220` — the command interface, 8-bit DMA playback on
+  channel 1, and the IRQ acknowledge at `0x22E`. [`dma8237`](modules/dma8237.md) is
+  proven with the floppy and [`int8259`](modules/int8259.md) can raise IRQ 5, so the
+  surrounding parts are in place.
+
+Output stays PWM into the existing buzzer rather than a real DAC.
 
 ### EGA
 

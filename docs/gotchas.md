@@ -521,11 +521,58 @@ it. That would have broken booting outright.
 | `40:C0`–`40:DF` | USB mass storage |
 | `40:E0`–`40:F5` | SPI flash disk |
 
+## A working machine that cannot be identified
+
+Prince of Persia refused to start with "no graphics card", on a machine that was
+rendering that refusal perfectly. Commander Keen 4 hung on its startup panel.
+
+Nothing detects a graphics card by looking at the screen. It writes a CRTC register and
+reads it back. [`vga`](modules/vga.md) generates fixed timing and ignored `0x3D4`/`0x3D5`
+entirely, so the read floated to open-bus `0xFF`, the test pattern never came back, and
+every program that probed concluded there was no card.
+
+**The video path was never at fault.** It had been verified on hardware by five separate
+tools. What was missing was not a capability but an *answer*.
+
+That is the general shape, and it is worth recognising because it defeats an entire
+class of instrumentation. Six theories were falsified by measurement first —
+[`INTSPY`](tools.md#intspy--unimplemented-interrupts) proved no unimplemented interrupt
+was called, [`VIDSPY`](tools.md#vidspy--did-the-video-call-return) proved every BIOS
+video call returned, [`PITTEST`](tools.md#pittest--does-irq0-survive-being-reprogrammed)
+proved the timer survives reprogramming,
+[`MEMTOP`](tools.md#memtop--the-memory-a-large-program-actually-gets) proved memory holds
+what is written to it, and the disk was eliminated by running the same program from three
+drives. Every one of those results was **true**, and none of them could see the fault,
+because a machine failing to be *recognised* leaves no trace in any interrupt, any timer
+or any byte of RAM.
+
+The instrument that found it was a program complaining in plain English, and the tool
+that confirmed it — [`CRTCTEST`](tools.md#crtctest--can-this-card-be-detected) — was
+written afterwards.
+
+**Lesson:** when a program refuses to run rather than running wrongly, ask what it asked
+the machine about itself before asking what it tried to do. Identity is probed before
+capability is used, and an unanswered probe reads as absence.
+
+Related: [answering a probe half-truthfully](#answering-a-probe-half-truthfully), which
+is the same failure with the answer present but wrong.
+
 ## Currently open
 
-Nothing. The last entry here — the BIOS not booting from SPI flash — closed when the boot
-ROM stopped reading the image as
+Nothing broken. The last entry — the BIOS not booting from SPI flash — closed when the
+boot ROM stopped reading the image as
 [one 64 KB burst](#a-long-spi-read-does-not-come-back-intact).
+
+Two things are *unfinished* rather than wrong, and are recorded here so they are not
+rediscovered as bugs:
+
+- **CRTC `START` (R12/R13) is latched but unused.** Anything that scrolls by moving the
+  display start address will not scroll. Software that redraws is unaffected.
+- **Divisor `0x8000` on PIT counter 0 runs at half rate.** Found by
+  [`PITTEST`](tools.md#pittest--does-irq0-survive-being-reprogrammed) and genuinely
+  anomalous — neighbouring divisors are correct and the arithmetic in
+  [`timer8253`](modules/timer8253.md) reads as if it should be too. No game picks that
+  value, so it has not been chased.
 
 ## Related
 

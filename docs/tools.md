@@ -388,6 +388,87 @@ is above `0800h`.
 > number and this is a V20, so treat it as a landmark rather than a verdict. The B-against-C
 > comparison is the one that matters and it depends on no timing table at all.
 
+### CRTCTEST — can this card be detected?
+
+Writes CRTC registers and reads them back, which is how software decides a card is
+present. Nothing here looks at the picture.
+
+```
+  R15 cursor low    readable   write 66 -> read 66   OK
+  R15 cursor low    readable   write 99 -> read 99   OK
+  R14 cursor high   6 bits     write 66 -> read 26   OK
+  R10 cursor start  write-only write 55 -> read 00   OK
+```
+
+Two patterns go to R15 because a stuck bus can match one by luck. The `00` expected from
+R10 matters as much as the values that echo — a board answering `55` there would be
+answering, but not like a 6845. Before [`crtc6845`](modules/crtc6845.md) existed every
+line read `FF`, and Prince of Persia and Keen 4 both refused to start.
+
+### VIDSPY — did the video call return?
+
+`BIOSSPY` can tell you the last service used was video. It cannot tell *"the call
+returned and the program then spun"* from *"the BIOS never came back"*, because it marks
+a call on the way in and chains away. This marks both ends.
+
+Instead of chaining, the stub invokes the real handler as a subroutine — `PUSHF` then a
+far `CALL` is exactly the frame an `INT` builds — so control comes back and the return
+can be recorded. On the display: `00`–`1F` entering that function by its real `AH`, `Ex`
+on return. Frozen on a low value means the BIOS handler for that `AH` never came back.
+
+`vidspy t` shows the timer tick instead, in a separate run — they compete for one
+display, and an 18 Hz heartbeat would overwrite the video state within a tick.
+
+### PITTEST — does IRQ0 survive being reprogrammed?
+
+The BIOS sets timer 0 once at 18.2 Hz and never touches it again, so this board had been
+tested at exactly one divisor out of 65536 — and it is the one value no game uses. Every
+id engine reprograms counter 0 to a few hundred Hz and drives its whole sense of time
+from the result.
+
+Six divisors, counted over a fixed amount of work, timers and vector restored on exit.
+Every row must be non-zero; a zero is a divisor at which the board stops delivering IRQ0.
+
+> It also turned up a real oddity: divisor **`0x8000` runs at half rate**. Not a problem
+> for any game, since none picks it, but it is genuinely anomalous and unexplained.
+
+### MEMTOP — the memory a large program actually gets
+
+`MEMTEST` covers `0x20000`–`0x7FFFF`. The top 128 KB of conventional memory had never
+been tested by anything on this board, and it is exactly what a 500 KB game fills — DOS,
+`COMMAND.COM` and every utility here live below it and would not notice if it were made
+of tin.
+
+Asks DOS for the largest free block so the range is the same memory a large program
+gets, and **fills everything before verifying anything**: testing chunk by chunk passes
+on aliased memory, because the write that lands on top of an earlier chunk is never
+checked. The pattern is the address itself, then the whole thing again inverted.
+
+### ADLIBCHK — bench test for the AdLib
+
+A game is a bad first test of new hardware: if it stays silent you cannot tell whether
+the card was not detected, was detected but got no notes, or got notes that came out
+inaudible. Four stages, so a failure says where — detection (with both status bytes
+printed), a chromatic scale, a chord, and a per-channel sweep.
+
+It writes a real OPL2 patch to registers `0x20`–`0xE0` even though
+[`opl2_lite`](modules/opl2_lite.md) ignores every one of them. That is deliberate: the
+same binary is then valid on a genuine AdLib card, and a tool that only works on the
+thing it is testing is not a test.
+
+### ADLIBSNG — three voices, for the things a scale hides
+
+A scale sounds fine when the octaves are wrong and a sweep sounds fine when the timing
+is. Music does not let either past. Melody, bass, and the bass doubled an octave up —
+three simultaneous channels across three blocks, keeping the PWM mixer under changing
+load. Listen for wrong octaves, notes that never release, and the bass dropping out when
+the melody gets busy.
+
+```
+adlibsng          play once
+adlibsng r        repeat until a key is pressed
+```
+
 ### BIOSFLSH — write the BIOS to flash
 
 Copies the running BIOS (`F000:0000`, 64 KB) into the reserved top of the flash through
