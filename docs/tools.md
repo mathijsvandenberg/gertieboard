@@ -255,6 +255,100 @@ BIOS does, and prints it untranslated. Expected on a 101-key board: right arrow
 The arrow keys had been wrong twice, both times because the reasoning rested on an
 assumed byte stream rather than a measured one. This settled it in one run.
 
+### MEMQUIZ — memory as this machine reports it
+
+Asks every memory question DOS and games ask, and prints the raw answer to each:
+`INT 12h`, the equipment word, `INT 15h AH=88h` and `AH=C0h`, the XMS multiplex call
+`INT 2Fh AX=4300h`, the `INT 67h` vector and the `EMMXXXX0` signature behind it, and
+the largest block DOS will hand a program.
+
+`MEM` printing a number nobody can explain is not a `MEM` bug — `MEM` prints what it is
+told. This prints the same answers one call at a time, with nothing interpreted in
+between, and it names the specific failure that produced the historical bad number:
+
+```
+INT 15h  AH=88h extended   : AX=8800  CF=0
+         -> UNANSWERED: AX came back holding the 8800h we sent.
+            Anything that trusts this sees 34816 KB of extended
+            memory that does not exist.
+```
+
+That line is what an unimplemented `INT 15h` looks like. With the handler in place it
+reads `AX=0000` and *answered: no extended memory*.
+
+### INTSPY — unimplemented interrupts
+
+A program that stops dead tells you nothing: it has the screen, DOS is not coming back,
+and whatever it asked for last is gone.
+
+INTSPY finds every vector still pointing at the BIOS dummy `IRET`, gives each one its
+own twelve-byte stub, and has each stub write **its own vector number to port `0x80`**
+before returning exactly as the dummy would have. Registers and flags are untouched, so
+it is safe to leave installed.
+
+The [7-segment display](modules/sevenseg.md) is the point. It is not memory and it is
+not the screen — it keeps showing the last value written after the CPU has stopped
+doing anything useful. Run the program, let it hang, read the digit:
+
+| Display | Meaning |
+|---|---|
+| freezes on a value | that interrupt is the last thing the program asked for, it is unimplemented, and the program is probably waiting on the answer |
+| never leaves the POST code | no unimplemented interrupt was called; the hang is elsewhere, and a whole class of cause is ruled out |
+
+```
+intspy          install
+intspy d        per-vector counts, if DOS came back
+intspy r        remove
+```
+
+`INT 1Ch` is deliberately left alone — the BIOS calls it 18.2 times a second, and
+hooking it would peg the display at `1C` and hide everything else.
+
+### BIOSSPY — which BIOS service, live
+
+The follow-on question to INTSPY: not *is it stuck on a missing interrupt* but **what
+did it last ask the machine for, and is it still asking for anything**.
+
+Hooks nine BIOS services and chains every one straight through, writing one byte to
+port `0x80` on the way past — **high nibble the service, low nibble a call counter**.
+
+| High digit | Service | | High digit | Service |
+|---|---|---|---|---|
+| `1` | video `10h` | | `6` | system `15h` |
+| `2` | equipment `11h` | | `7` | keyboard `16h` |
+| `3` | memory size `12h` | | `8` | printer `17h` |
+| `4` | disk `13h` | | `9` | clock `1Ah` |
+| `5` | serial `14h` | | | |
+
+The counter is what makes it readable — a frozen display and a hammered one look
+identical without it, and those are opposite diagnoses:
+
+| Display | Meaning |
+|---|---|
+| low digit racing, high steady | polling that one service forever |
+| low digit racing, high varying | **working, just slowly** — wait before calling it a hang |
+| both frozen | spinning in its own code; the high digit is the last service it used |
+
+Sampling from a timer hook cannot do this: games take `INT 08h` and `INT 09h` and stop
+chaining them. They *call* `10h`/`13h`/`16h`/`1Ah` rather than replacing them, so these
+hooks cannot be bypassed.
+
+### FILESUM — is the disk returning the right bytes
+
+```
+filesum C:\KEEN4\KEEN4C.EXE
+```
+
+Prints a length and an Adler-style checksum pair to compare against a value computed on
+the host, off the original file.
+
+USBPERF's integrity check answers a narrower question than it appears to: it reads a
+fixed region every run and checks the checksum does not *change*. That catches a read
+path that has become unstable, but not one that is reliably wrong — the same bad bytes
+every time produce the same checksum and it passes. This compares against ground truth
+instead. `s2` accumulates `s1`, so unlike a plain sum it does not forgive bytes that are
+right but in the wrong order.
+
 ### BIOSFLSH — write the BIOS to flash
 
 Copies the running BIOS (`F000:0000`, 64 KB) into the reserved top of the flash through
