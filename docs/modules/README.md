@@ -43,6 +43,8 @@ entity ports, decoded addresses and behaviour.
 | Module | Instance | Clock | Function |
 |---|---|---|---|
 | [sevenseg](sevenseg.md) | `sevenseg1` | `c0` 5 MHz | 7-segment POST/debug display at I/O `0x80` |
+| [opl2_lite](opl2_lite.md) | `opl2lite1` | `c0` 5 MHz | AdLib at I/O `0x388`–`0x389`, square waves on the buzzer |
+| [crtc6845](crtc6845.md) | `crtc1` | `c0` 5 MHz | 6845 register file at I/O `0x3D4`–`0x3D5` |
 | [clkgen / pll](clkgen-pll.md) | `clkgen1`, `pll1`, `pll2` | — | Clock generation and reset stretch |
 
 ## Shared conventions

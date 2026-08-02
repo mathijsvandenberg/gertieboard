@@ -113,6 +113,7 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_mem_addr             : std_logic_vector(19 downto 0);
   SIGNAL n_mem_rd               : std_logic;
   SIGNAL n_mem_wr               : std_logic;
+  SIGNAL n_opl_snd              : std_logic;   -- AdLib PWM, mixed into BUZ
   SIGNAL n_out0                 : std_logic;
   SIGNAL n_out2                 : std_logic;
   SIGNAL n_pa_data              : std_logic_vector(7 downto 0);
@@ -366,6 +367,39 @@ BEGIN
       DATAOUT              => n_periph_rdata
     );
 
+  -- The 6845 register file. vga.vhd still generates fixed timing and ignores
+  -- these values -- this exists so the card can be DETECTED, which is done by
+  -- writing a CRTC register and reading it back. START and CURSOR are left
+  -- OPEN until vga.vhd can use them for hardware scrolling and a text cursor.
+  crtc1 : ENTITY work.crtc6845
+    PORT MAP (
+      CLK                  => n_c0,
+      DATA                 => n_cpu_wdata,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      START                => OPEN,
+      CURSOR               => OPEN
+    );
+
+  -- AdLib at 0x388/0x389. CLK_HZ must match the clock wired to CLK: every
+  -- period inside the module is derived from it, and the detection protocol
+  -- depends on the two timers keeping real time.
+  opl2lite1 : ENTITY work.opl2_lite
+    GENERIC MAP (
+      CLK_HZ               => 5_000_000
+    )
+    PORT MAP (
+      CLK                  => n_c0,
+      DATA                 => n_cpu_wdata,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      SND                  => n_opl_snd
+    );
+
   fdc1 : ENTITY work.fdc8272
     -- CLK is the 5 MHz CPU-bus clock (c0), NOT the 50 MHz reference: the
     -- entity's own defaults are 50 MHz / 115200, which would divide down to
@@ -492,7 +526,13 @@ BEGIN
   -- with its output dangling, which is why BUZ used to sit at GND.
   -- Software drives it the standard XT way: program counter 2 for the tone, then
   -- set 61h bits 0+1 to open the gate and let it through.
-  BUZ <= '0' WHEN SPEAKER_MUTE = '1' ELSE (n_speaker_data AND n_out2);
+  -- The AdLib mixes in by OR rather than by summing into its PWM, so the
+  -- speaker path above is bit-for-bit what it was: when nothing is keyed on the
+  -- OPL's mix is zero and n_opl_snd sits at '0', making the OR transparent.
+  -- Both sounding at once distorts, which is rare and audible rather than
+  -- silent -- the right way round for a fault.
+  BUZ <= '0' WHEN SPEAKER_MUTE = '1'
+         ELSE ((n_speaker_data AND n_out2) OR n_opl_snd);
   DBG(2) <= '0';
   DBG(3) <= '0';
   DBG(6) <= '0';

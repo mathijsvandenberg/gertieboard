@@ -56,6 +56,8 @@
 | [ctrl_reg](modules/ctrl_reg.md) | Runtime PSRAM timing control | I/O `0xE4` |
 | [sevenseg](modules/sevenseg.md) | 7-segment POST/debug display | I/O `0x80` |
 | [com1_stub](modules/com1_stub.md) | Answers COM1 probes as "absent" | I/O `0x3F8`–`0x3FF` |
+| [opl2_lite](modules/opl2_lite.md) | AdLib front end, played as square waves on the buzzer | I/O `0x388`–`0x389` |
+| [crtc6845](modules/crtc6845.md) | 6845 register file, so the video card can be detected | I/O `0x3D4`–`0x3D5` |
 | [clkgen / pll](modules/clkgen-pll.md) | Clock generation and reset stretch | — |
 
 ## Conventions

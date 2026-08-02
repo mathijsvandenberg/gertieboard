@@ -76,6 +76,8 @@ serves everything below `0x08000`. `vga` independently decodes
 | `0xED` | [usb_host](modules/usb_host.md) | R/W | Buffer pointer |
 | `0xEE` | [usb_host](modules/usb_host.md) | R/W | W port select / bus reset / SOF enable · R line state |
 | `0xEF` | [usb_host](modules/usb_host.md) | R | USB frame counter, low byte |
+| `0x3D4` | [crtc6845](modules/crtc6845.md) | W | 6845 register index |
+| `0x3D5` | [crtc6845](modules/crtc6845.md) | R/W | 6845 register data — R14/R15 readable, R0–R13 read as 0 |
 | `0x3D8` | [vga](modules/vga.md) | W | CGA mode control |
 | `0x3D9` | [vga](modules/vga.md) | W | CGA colour select |
 | `0x3DA` | [cga_status](modules/cga_status.md) | R | CGA status — bit 0 blanking, bit 3 vertical retrace |
@@ -83,6 +85,8 @@ serves everything below `0x08000`. `vga` independently decodes
 | `0x3F4` | [fdc8272](modules/fdc8272.md) | R | Main Status Register (RQM, DIO, CB) |
 | `0x3F5` | [fdc8272](modules/fdc8272.md) | R/W | Data / FIFO |
 | `0x3F7` | [fdc8272](modules/fdc8272.md) | R/W | DIR (read) / CCR (write) |
+| `0x388` | [opl2_lite](modules/opl2_lite.md) | R/W | AdLib: write = register index, read = status (timer flags) |
+| `0x389` | [opl2_lite](modules/opl2_lite.md) | W | AdLib: data for the latched register |
 | `0x3F8`–`0x3FF` | [com1_stub](modules/com1_stub.md) | R | Answers COM1 probes so software concludes "no serial port" |
 
 ### Deliberately absent
