@@ -349,6 +349,45 @@ every time produce the same checksum and it passes. This compares against ground
 instead. `s2` accumulates `s1`, so unlike a plain sum it does not forgive bytes that are
 right but in the wrong order.
 
+### WAITSTAT — what one memory read costs
+
+`RAMSPEED` compares M9K against PSRAM and reports the difference. That answers
+*"which memory is slower"* but not *"is either of them fast"* — and the second turned
+out to be the question that mattered, because M9K read only 13% quicker than a serial
+PSRAM, which is not what a 60 ns on-chip SRAM should look like beside one.
+
+This times the same loop with and without a memory operand, so each difference isolates
+exactly one read:
+
+| | Loop body | Isolates |
+|---|---|---|
+| A | `mov al,bl` + `loop` | baseline — no data access |
+| B | `mov al,[si]` + `loop`, `DS:SI` → M9K | one on-chip read |
+| C | `mov al,[si]` + `loop`, PSRAM, **same address** | one guaranteed cache **hit** |
+| D | `mov al,bl` + `add si,16` + `loop` | baseline for E |
+| E | `mov al,[si]` + `add si,16` + `loop`, PSRAM | 16-byte stride — a guaranteed **miss** |
+
+```
+one M9K read          B-A =  6.3 clocks
+one PSRAM cache hit   C-A =  6.3 clocks
+one PSRAM cache miss  E-D = 36.2 clocks
+```
+
+**C is the load-bearing test.** After the first iteration that address is cached, so the
+PSRAM interface is not involved at all — whatever it costs above A is overhead *around*
+the memory. It came back identical to M9K, and both are below the 11 clocks an 8088
+spends on `mov al,[si]` before any waiting. That killed the theory that a wait-state
+handshake was taxing every access, and redirected the work to the miss rate. See
+[mem_hybrid](modules/mem_hybrid.md).
+
+Read-only throughout: the M9K address is `0000:0600` and both PSRAM addresses are inside
+the program's own segment. It prints its load segment first so you can confirm it really
+is above `0800h`.
+
+> The reference figure — 11 clocks for `mov al,[si]` versus `mov al,bl` — is an 8088
+> number and this is a V20, so treat it as a landmark rather than a verdict. The B-against-C
+> comparison is the one that matters and it depends on no timing table at all.
+
 ### BIOSFLSH — write the BIOS to flash
 
 Copies the running BIOS (`F000:0000`, 64 KB) into the reserved top of the flash through

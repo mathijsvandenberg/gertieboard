@@ -103,9 +103,37 @@ line**:
 | No cache | 16 SCK per byte |
 | 16-byte line | `16 + 2×15 = 46` SCK per line → 2.9 SCK per byte |
 
-- **4 lines, 16 bytes each, fully associative, round-robin replacement.** Four
-  lines matter: the CPU interleaves code fetch with operand reads, so a single
+- **8 lines, 16 bytes each, fully associative, round-robin replacement.** Line
+  *count* matters: the CPU interleaves code fetch with operand reads, so a single
   line would be evicted by every data access and end up *slower* than no cache.
+
+  It was four lines until [`WAITSTAT`](../tools.md#waitstat--what-one-memory-read-costs)
+  measured what a miss actually costs:
+
+  | | clocks |
+  |---|---|
+  | one M9K read | 6.3 |
+  | one PSRAM cache hit | 6.3 |
+  | one PSRAM cache miss | **36.2** |
+
+  The first two lines are the important ones. A cached PSRAM read costs exactly
+  what an on-chip SRAM read costs, and both are *below* the 11 clocks an 8088
+  spends on `mov al,[si]` before any waiting at all. **When this cache hits,
+  memory is free** — there is no fixed per-access overhead and nothing wrong
+  with the `RAM_READY` handshake. Everything the machine loses, it loses on the
+  third row.
+
+  So the lever is the miss *rate*, not the miss cost and not `SCK`. DOS, the
+  BIOS and the program are all in PSRAM and all competing for these lines;
+  doubling the count doubles the number of distinct regions held at once.
+
+  Not free: the tag compare and byte mux both grow with `NLINES`, and that path
+  was already the worst-case one — the registered lookup below exists because of
+  it. **Check the timing report after changing it**, not just the fitter summary.
+
+  `LINE_BYTES` is *not* a free parameter — `cur_tag` slices `ADDR(19 DOWNTO 4)`
+  and the byte mux indexes `ADDR(3 DOWNTO 0)`, both assuming 16. `NLINES` is
+  genuinely parametric and is the one safe thing to turn.
 - **Lines are 16-byte aligned**, so a burst can never cross the PSRAM's 1024-byte
   page boundary.
 - **Writes stay write-through** and invalidate any cached copy of the line. DMA

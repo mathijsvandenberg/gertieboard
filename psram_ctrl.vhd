@@ -101,9 +101,34 @@ ARCHITECTURE behavior OF psram_ctrl IS
   -- wait states. 8088 instruction fetch is overwhelmingly sequential, so this
   -- turns ~16 SCK/byte into (16+2*15)/16 = 2.9 SCK/byte.
   --
-  -- 4 lines, fully associative, round-robin replacement. Four lines matter: the
-  -- CPU interleaves code fetch with data access, and a single line would be
-  -- evicted by every operand read, making things WORSE than no cache.
+  -- Fully associative, round-robin replacement. Line COUNT matters because the
+  -- CPU interleaves code fetch with data access: a single line would be evicted
+  -- by every operand read, making things WORSE than no cache.
+  --
+  -- It was four lines -- 64 bytes of cache in total -- until WAITSTAT measured
+  -- what a miss actually costs on this board:
+  --
+  --     one M9K read          6.3 clocks
+  --     one PSRAM cache hit   6.3 clocks
+  --     one PSRAM cache miss  36.2 clocks
+  --
+  -- The first two lines are the important ones. A cached PSRAM read costs
+  -- exactly what an on-chip SRAM read costs, and both are BELOW the 11 clocks
+  -- an 8088 spends on "mov al,[si]" before any waiting at all. There is no
+  -- fixed per-access overhead to remove and nothing wrong with the handshake:
+  -- when this cache hits, memory is free. Everything the machine loses, it
+  -- loses on the third line.
+  --
+  -- So the useful lever is the miss RATE, not the miss cost and not SCK. Eight
+  -- lines instead of four doubles the number of distinct regions held at once,
+  -- which is the quantity that decides whether code fetch and operand reads
+  -- evict each other. DOS, the BIOS, and the program are all in PSRAM and all
+  -- competing for these lines.
+  --
+  -- This is not free: the tag compare and the byte mux both grow with NLINES,
+  -- and that path was ALREADY the worst-case one (see the lookup pipeline
+  -- below, which exists because of it). Check the timing report after
+  -- changing this, not just the fitter summary.
   --
   -- Lines are 16-byte ALIGNED, so a burst can never cross the PSRAM's 1024-byte
   -- page boundary. Note tCEM (max CS-low time, ~8 us) bounds the burst: 46 SCK
@@ -114,8 +139,12 @@ ARCHITECTURE behavior OF psram_ctrl IS
   -- of the affected line. DMA writes arrive on the same port, so they are
   -- covered too.
   ----------------------------------------------------------------------------
+  -- LINE_BYTES is NOT a free parameter: cur_tag slices ADDR(19 DOWNTO 4) and
+  -- the byte mux indexes ADDR(3 DOWNTO 0), both of which assume 16. NLINES is
+  -- genuinely parametric -- tag_cmp is a GENERATE, the hit encoder loops, and
+  -- the victim pointer wraps on it -- so it is the one safe thing to turn.
   CONSTANT LINE_BYTES : integer := 16;
-  CONSTANT NLINES     : integer := 4;
+  CONSTANT NLINES     : integer := 8;
 
   TYPE line_t  IS ARRAY(0 TO LINE_BYTES-1) OF std_logic_vector(7 DOWNTO 0);
   TYPE lines_t IS ARRAY(0 TO NLINES-1)     OF line_t;
