@@ -230,8 +230,35 @@ absent.
 | `INT 09h` | Keyboard: scancode → ring buffer, shift/ctrl/alt state, Ctrl+Alt+Del → `_reboot` |
 | `INT 11h` | Equipment list from BDA `0x10` |
 | `INT 12h` | Memory size from BDA `0x13` |
+| `INT 15h` | System services — `AH=88h` returns `AX=0` (no extended memory); everything else `CF=1`, `AH=86h` |
 | `INT 19h` | Bootstrap — see [boot flow](boot.md) |
 | `INT 1Eh` | Points at `_floppy_dpt` |
+
+### Unimplemented vectors answer with the caller's own registers
+
+All 256 entries start out pointing at `_dummy_int`, a bare `IRET`, and the handlers
+above overwrite the ones that exist. Everything else still returns — and that is a
+trap, because `IRET` reloads the flags from the stack. `CF` comes back exactly as the
+caller left it, normally clear, which reads as *no error*; and every register comes
+back holding what the caller put in. An unanswered call is indistinguishable from a
+successful one.
+
+`INT 15h` was the expensive case. `MEM` asks for the extended memory size with
+`AH=88h`, got its own `0x88` back as a size in KB, and reported **34816 KB** of
+memory this board does not have. It now has a real handler, which is why it is in the
+table above.
+
+The rest are still dummies. [`INTSPY.COM`](tools.md#intspy--unimplemented-interrupts)
+finds out whether a program that hangs is stuck on one of them, and reports on the
+7-segment display so the answer survives the hang. [`MEMQUIZ.COM`](tools.md#memquiz--memory-as-this-machine-reports-it)
+prints the raw answer to every memory question at once.
+
+> **TODO.** A real XT leaves vectors `20h`–`FFh` as the memory test found them, so an
+> unused one reads `0000:0000` and "is a driver installed?" is answered by the vector
+> alone. Filling all 256 with a dummy defeats that test — `INT 67h` looks like an EMS
+> driver to anything that only checks for a non-zero vector. Careful software (id's
+> engines among them) also checks whether the target byte is `CF`, so this has not
+> bitten yet.
 
 `_reboot` far-jumps to `F000:FFF0`. That is a **warm** boot: the overlay is not
 re-armed, so the BIOS already in PSRAM re-runs. The hardware Ctrl+Alt+Del in

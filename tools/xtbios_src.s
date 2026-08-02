@@ -5,7 +5,7 @@
 ##  - 8 KB image, organised at segment F000 offset E000 (phys FE000-FFFFF)
 ##  - Reset vector at F000:FFF0 -> POST
 ##  - Brings up: 8259 PIC, 8253 PIT (18.2Hz tick), 8255 PPI, 6845 CGA 80x25
-##  - Installs IVT + handlers: INT 08,09,10,11,12,13,16,19,1A,1C,1E
+##  - Installs IVT + handlers: INT 08,09,10,11,12,13,15,16,19,1A,1C,1E
 ##  - Boots the first sector of floppy A: (CHS 0/0/1) to 0000:7C00
 ##
 ##  Assemble (GNU binutils, no NASM needed):
@@ -323,6 +323,8 @@ _post:
     mov word ptr es:[bx], offset _int12
     mov bx, 0x13*4
     mov word ptr es:[bx], offset _int13
+    mov bx, 0x15*4
+    mov word ptr es:[bx], offset _int15
     mov bx, 0x16*4
     mov word ptr es:[bx], offset _int16
     mov bx, 0x19*4
@@ -1504,6 +1506,50 @@ _int12:
     mov ds, ax
     mov ax, [0x13]
     pop ds
+    iret
+
+## =====================================================================
+##  INT 15h - system services
+##
+##  This used to be one of the vectors left pointing at _dummy_int, and a bare
+##  IRET is the worst possible answer to give here. IRET reloads the flags from
+##  the stack, so CF comes back exactly as the CALLER left it -- normally clear,
+##  which every caller reads as "no error" -- and AX comes back holding the
+##  function number that was passed in. The call is not refused, it is never
+##  answered, and nothing in the return distinguishes the two.
+##
+##  MEM reporting tens of megabytes of extended memory came from precisely
+##  that: it asks with AH=88h, gets its own 0x88 back as a size in KB, and
+##  prints 34816 KB of memory this board does not have. Games do the same thing
+##  with other functions and then wait for a result that will never arrive.
+##
+##  So: answer 88h honestly, and refuse everything else the way a real BIOS
+##  does -- CF=1 and AH=86h, the code that means "function not supported".
+##  AH=C0h stays refused deliberately: this machine is an XT, and DOS falls back
+##  to the model byte at F000:FFFE, which is already correct.
+##
+##  CF is returned by editing the flags image the INT pushed rather than with
+##  STC/RETF 2. RETF 2 would return with the CURRENT interrupt-enable state, and
+##  INT cleared IF on the way in -- so a caller that had interrupts on would get
+##  them back off. Rewriting the saved word leaves every other flag, and IF in
+##  particular, exactly as the caller had it.
+## =====================================================================
+_int15:
+    push bp
+    mov bp, sp                   # [bp+2]=IP  [bp+4]=CS  [bp+6]=FLAGS
+    cmp ah, 0x88
+    je .i15_extmem
+    mov ah, 0x86                 # not supported
+    or word ptr [bp+6], 0x0001   # CF = 1
+    pop bp
+    iret
+.i15_extmem:
+    # There is no memory above 1 MB on this board. AH is cleared too: callers
+    # read it as a status byte, and leaving 0x88 there is the same lie in a
+    # smaller place.
+    xor ax, ax
+    and word ptr [bp+6], 0xFFFE  # CF = 0
+    pop bp
     iret
 
 ## =====================================================================
@@ -5544,7 +5590,7 @@ u_rq_setcfg:  .byte 0x00,0x09,0x01,0x00,0x00,0x00,0x00,0x00
 u_rq_botrst:  .byte 0x21,0xFF,0x00,0x00,0x00,0x00,0x00,0x00
 ##  CLEAR_FEATURE(ENDPOINT_HALT); byte 4 is patched with the endpoint address.
 u_rq_clrhalt: .byte 0x02,0x01,0x00,0x00,0x00,0x00,0x00,0x00
-
+
 ## ---------------------------------------------------------------------
 ##  usb_report -- one POST line for C:, in the original BIOS's register.
 ## ---------------------------------------------------------------------
