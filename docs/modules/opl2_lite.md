@@ -1,6 +1,6 @@
 # opl2_lite — AdLib front end
 
-**I/O `0x388`–`0x389`** · instance `opl2lite1` · clocked from `c0` (5 MHz) ·
+**I/O `0x388`–`0x389`** · instance `opl2lite1` · clocked from `c0` (10 MHz) ·
 [`opl2_lite.vhd`](../../opl2_lite.vhd)
 
 Answers the AdLib detection protocol honestly and turns what a game writes to the OPL2
@@ -86,14 +86,18 @@ the source looks too simple to be doing anything.
 `BAUD_DIV`, so the module does not care which clock it is wired to — but **it must
 match**, because the detection timers depend on real time.
 
-At 5 MHz the sample divider truncates to 100, giving 50000 Hz instead of 49716: **+9.8
-cents**, about a tenth of a semitone, uniform across the whole range so nothing is out
-of tune with itself. A fractional divider would remove it if that ever matters.
+At 10 MHz the sample divider truncates to 201, giving 49751 Hz against the ideal 49716:
+**+1.2 cents**, uniform across the whole range so nothing is out of tune with itself.
+
+Doubling the bus clock made the pitch eight times more accurate for free — a bigger
+divisor quantises more finely. At the old 5 MHz it truncated to 100 and came out +9.8
+cents. The timers land exactly too: `10e6/12500 = 800` and `10e6/3125 = 3200` are whole
+numbers, so 80 µs and 320 µs are now exact rather than rounded.
 
 ## Output and mixing
 
 The buzzer is one bit, so nine square waves are summed to a 0–9 value and rendered as
-PWM against a 4-bit counter. At 5 MHz that carrier is 312 kHz — far above anything a
+PWM against a 4-bit counter. At 10 MHz that carrier is 625 kHz — far above anything a
 piezo can follow, so it hears the average.
 
 `SND` is combined with the PC speaker **in the top level**, not here:
@@ -119,11 +123,15 @@ resulting pitch:
   status1 = 0x00   (status1 & 0xE0) == 0x00 : True
   status2 = 0xC0   (status2 & 0xE0) == 0xC0 : True
   DETECTED: True
-  timer 1 flag set after 73.0 us          (+ alOut's 35 trailing reads = 80)
+  timer 1 flag set after 76.5 us          (+ alOut's 35 trailing reads = 80)
   masked timer 1 after 500 us: status = 0x00
 ```
 
-Pitch came out a uniform **+9.8 cents** across `FNum`/`Block` combinations from 110 Hz to
-6.2 kHz. An earlier run showed a *varying* error of 8–22 cents, which was the 200 ms
-measuring window quantising to 5 Hz rather than a real defect — worth knowing, because
-the honest-looking number was the wrong one.
+Pitch came out **+0 to +2 cents** across `FNum`/`Block` combinations from 110 Hz to
+6.2 kHz, consistent with the +1.2 the divisor predicts; the spread is the measuring
+window, not the hardware. An earlier run at 5 MHz showed a *varying* error of 8–22 cents,
+which was a 200 ms window quantising to 5 Hz rather than a real defect — worth knowing,
+because the honest-looking number was the wrong one.
+
+The model was re-run against `CLK_HZ = 10_000_000` when `c0` was doubled, rather than
+assuming the figures scaled.

@@ -69,15 +69,20 @@
 --
 -- CLK_HZ is a generic and the dividers come from it, in the style of
 -- fdc8272's BAUD_DIV, so this module does not care which clock it is wired to.
--- At 5 MHz the sample divider truncates to 100, giving 50000 Hz instead of
--- 49716 -- 0.57% sharp, about a tenth of a semitone, and constant across all
--- notes so nothing is out of tune with itself.
+-- At 10 MHz the sample divider truncates to 201, giving 49751 Hz against the
+-- ideal 49716 -- +1.2 cents, and constant across all notes so nothing is out
+-- of tune with itself. (At the old 5 MHz it truncated to 100 and came out
+-- +9.8 cents, so doubling the clock made the pitch eight times more accurate
+-- for free: a bigger divisor quantises more finely.)
+--
+-- The timers land exactly at 10 MHz: 10e6/12500 = 800 and 10e6/3125 = 3200,
+-- both whole numbers, so 80 us and 320 us are exact rather than rounded.
 --
 -- ---------------------------------------------------------------------------
 -- OUTPUT
 --
 -- The buzzer is one bit, so nine square waves are summed to a 0..9 value and
--- rendered as PWM against a 4-bit counter. At 5 MHz that carrier is 312 kHz --
+-- rendered as PWM against a 4-bit counter. At 10 MHz that carrier is 625 kHz --
 -- far above anything a piezo can follow, so it hears the average.
 --
 -- SND is left for the top level to combine with the PC speaker rather than
@@ -99,7 +104,7 @@ USE  IEEE.NUMERIC_STD.ALL;
 
 ENTITY opl2_lite IS
   GENERIC(
-        CLK_HZ  : integer := 5_000_000);
+        CLK_HZ  : integer := 10_000_000);
   PORT(
         CLK     : IN    std_logic;
         DATA    : IN    std_logic_vector(7 DOWNTO 0);   -- CPU -> device

@@ -25,8 +25,8 @@
 --      OUT 0x9A,1     ; /CS high
 --
 -- SPI mode 0: SCK idles low, MOSI is presented while SCK is low, and MISO is
--- sampled at the end of the SCK-high phase. CLK here is the 5 MHz CPU bus clock
--- and one SCK period takes two CLK cycles, giving SCK = 2.5 MHz (3.2 us per
+-- sampled at the end of the SCK-high phase. CLK here is the 10 MHz CPU bus clock
+-- and one SCK period takes two CLK cycles, giving SCK = 5 MHz (1.6 us per
 -- byte). That is far below what the IS25LP016D can do (133 MHz), but it is
 -- still faster than the CPU can feed it, and keeping the register interface in
 -- the CPU's own clock domain avoids any clock crossing. If sector throughput

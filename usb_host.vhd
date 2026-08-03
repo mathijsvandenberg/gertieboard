@@ -76,7 +76,7 @@ USE  IEEE.STD_LOGIC_UNSIGNED.all;
 
 ENTITY usb_host IS
   PORT (
-    CLK       : IN    std_logic;                     -- 5 MHz CPU I/O bus (c0)
+    CLK       : IN    std_logic;                     -- 10 MHz CPU I/O bus (c0)
     CLK48     : IN    std_logic;                     -- 48 MHz USB domain
     LOCKED    : IN    std_logic;                     -- 48 MHz PLL locked
     RESET     : IN    std_logic;                     -- active high
@@ -134,7 +134,7 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL go_cpu     : std_logic := '0';             -- toggles to request a run
   -- busdecode's IO_WR/IO_RD are combinational passthroughs of the CPU strobes
   -- (IO_WR <= NOT(NOT WR AND IOM)), so they stay asserted for the whole bus
-  -- cycle -- several CLK edges at 5 MHz. Every register access must therefore be
+  -- cycle -- several CLK edges. Every register access must therefore be
   -- taken on an EDGE, exactly as flash.vhd does. Without this the auto-
   -- incrementing data port stored each byte into several slots and advanced the
   -- pointer several times, so an 8-byte SETUP packet went out as garbage and the

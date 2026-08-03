@@ -1,6 +1,6 @@
 # usb_host
 
-Source: [`usb_host.vhd`](../../usb_host.vhd) · Instance `usb1` · Clocks `c0` (5 MHz CPU
+Source: [`usb_host.vhd`](../../usb_host.vhd) · Instance `usb1` · Clocks `c0` (10 MHz CPU
 port) and `pll48` (48 MHz USB) · 1962 logic elements
 
 A **USB 1.1 full-speed host controller** with the serial interface engine in fabric.
@@ -31,7 +31,7 @@ this is the difference between an evening and a week. See [`tools/usbtest.asm`](
 
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
-| `CLK` | IN | 1 | 5 MHz CPU I/O bus (`c0`) |
+| `CLK` | IN | 1 | 10 MHz CPU I/O bus (`c0`) |
 | `CLK48` | IN | 1 | 48 MHz USB domain |
 | `LOCKED` | IN | 1 | 48 MHz PLL lock, reported in the LINE register |
 | `RESET` | IN | 1 | active high |

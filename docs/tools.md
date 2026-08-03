@@ -38,8 +38,8 @@ WRITE:  FPGA -> host : 0x33 0x02 C H R <512 bytes>
 C = 0xFF  ->  serve from the BIOS image at offset (R-1) * 512
 ```
 
-**1 Mbaud.** If the host has to be set to 500000 to work, `c0` is running at 2.5 MHz
-instead of 5 MHz — `fdc8272`'s `BAUD_DIV = CLK_FREQ / BAUD` scales the real rate
+**1 Mbaud.** If the host has to be set to 500000 to work, `c0` is running at 5 MHz
+instead of 10 MHz — `fdc8272`'s `BAUD_DIV = CLK_FREQ / BAUD` scales the real rate
 directly.
 
 ## DOS diagnostics

@@ -1,6 +1,6 @@
 # bootrom
 
-Source: [`bootrom.vhd`](../../bootrom.vhd) · Instance `bootrom1` · Clock `c0` (5 MHz)
+Source: [`bootrom.vhd`](../../bootrom.vhd) · Instance `bootrom1` · Clock `c0` (10 MHz)
 · Loader source: [`tools/bootldr_64k.asm`](../../tools/bootldr_64k.asm)
 
 Holds the **1 KB bootloader** that is overlaid at `0xFFC00`–`0xFFFFF` at reset, and
@@ -10,7 +10,7 @@ owns the `ROM_EN` flag that controls the overlay.
 
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
-| `CLK` | IN | 1 | 5 MHz (`c0`) |
+| `CLK` | IN | 1 | 10 MHz (`c0`) |
 | `RESET` | IN | 1 | Active high — re-arms the overlay |
 | `MEM_ADDR` | IN | 20 | Memory address; bits 9:0 index the ROM |
 | `IO_ADDR` | IN | 16 | I/O address — watches for `0xE2` |

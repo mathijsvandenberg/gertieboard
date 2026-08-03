@@ -1,6 +1,6 @@
 # busdecode
 
-Source: [`busdecode.vhd`](../../busdecode.vhd) · Instance `busdecode1` · Clock `c0` (5 MHz)
+Source: [`busdecode.vhd`](../../busdecode.vhd) · Instance `busdecode1` · Clock `c0` (10 MHz)
 
 The glue between the real CPU and everything else. It latches the multiplexed
 address, generates the bus strobes, drives the READY handshake, arbitrates the
@@ -12,7 +12,7 @@ memory bus for DMA, and implements the boot ROM overlay and the DMA page registe
 
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
-| `CLK` | IN | 1 | 5 MHz bus clock (`c0`) |
+| `CLK` | IN | 1 | 10 MHz bus clock (`c0`) |
 | `AD` | INOUT | 8 | Multiplexed address/data — connects straight to `CPU_AD` |
 | `A` | IN | 12 | Address bits 19:8 (non-multiplexed) |
 | `RD` | IN | 1 | CPU read strobe, active low |
@@ -80,7 +80,11 @@ completes after 3 clocks.
 > ⚠️ **The `T >= 64` clause is a fault backstop, not a timing parameter.** It must
 > stay longer than the slowest legitimate access. It was originally `T >= 10`,
 > which aborted every PSRAM cache-line fill and released the CPU before the data
-> bus was driven — silent corruption on every miss. 64 clocks is 12.8 µs at 5 MHz,
+> bus was driven — silent corruption on every miss. It is **128** clocks, which is
+> 12.8 µs at the 10 MHz `c0`. The count is in CPU clocks, so it was doubled when `c0`
+> was: 64 would have become 6.4 µs against a ~4.9 µs worst case. The PSRAM side runs
+> on `c3` and did not get faster, so the deadline it must beat has not moved.
+> Previously 64 clocks at 5 MHz,
 > comfortably past the worst case (~24 clocks) while still recovering from a real
 > fault.
 

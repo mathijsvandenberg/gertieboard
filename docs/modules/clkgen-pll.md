@@ -13,7 +13,7 @@ An `altpll` megafunction wrapper. The DE0-Nano's 50 MHz oscillator comes in on
 | Port | Dir | Purpose |
 |---|---|---|
 | `inclk0` | IN | 50 MHz reference (`CLOCK50`, `PIN_R8`) |
-| `c0` | OUT | 5 MHz |
+| `c0` | OUT | 10 MHz |
 | `c1` | OUT | 25 MHz |
 | `c2` | OUT | 1.1905 MHz |
 | `c3` | OUT | 50 MHz |
@@ -23,7 +23,7 @@ An `altpll` megafunction wrapper. The DE0-Nano's 50 MHz oscillator comes in on
 
 | Output | Divider | Frequency | Drives |
 |---|---|---|---|
-| `c0` | ÷10 | **5 MHz** | `CPU_CLK` and the whole I/O bus — `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`, `fdc8272`, `flash`, `bootrom`, `vga.CLK_CPU` |
+| `c0` | ÷5 | **10 MHz** | `CPU_CLK` and the whole I/O bus — `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`, `fdc8272`, `flash`, `bootrom`, `vga.CLK_CPU` |
 | `c1` | ÷2 | **25 MHz** | `vga.CLK_VGA` |
 | `c2` | ÷42 | **1.1905 MHz** | `timer8253` |
 | `c3` | ÷1 | **50 MHz** | `mem_hybrid`, `ps2_kbd_ppi`, `cga_status` |
@@ -34,7 +34,7 @@ An `altpll` megafunction wrapper. The DE0-Nano's 50 MHz oscillator comes in on
 > investigation off after a non-existent bug. `c1` landing on exactly 25 MHz (the
 > standard VGA pixel clock) independently confirms the 50 MHz input.
 
-`c0` at 5 MHz is the machine's speed. It was briefly ÷20 (2.5 MHz) in uncommitted
+`c0` at 10 MHz is the machine's speed. It was briefly ÷20 (2.5 MHz) in uncommitted
 work, which halved performance *and* silently halved the floppy link's baud rate,
 because `fdc8272` computes `BAUD_DIV = CLK_FREQ / BAUD` from a generic that still said
 5 MHz.
@@ -54,7 +54,7 @@ synchronous reset for everything else.
 
 | Port | Dir | Purpose |
 |---|---|---|
-| `CLK` | IN | 5 MHz (`c0`) |
+| `CLK` | IN | 10 MHz (`c0`) |
 | `RESET` | IN | **Active LOW** reset request |
 | `RST_OUT` | OUT | **Active HIGH** system reset |
 
@@ -125,3 +125,19 @@ is answering".
 
 - [Architecture](../architecture.md#clocks) — the clock tree in context
 - [Pinout](../pinout.md#timing-constraints)
+
+## The MegaWizard metadata can disagree with the hardware
+
+`pll.vhd` carries two descriptions of `c0`: the `clk0_divide_by` in the actual
+instantiation, which is what gets synthesised, and a `DIV_FACTOR0` line in the
+`Retrieval info` block at the bottom, which is what the MegaWizard reloads if the PLL is
+ever reopened in the GUI.
+
+**They had drifted apart.** The instantiation said `10` (5 MHz) while `DIV_FACTOR0` said
+`20` (2.5 MHz) — the residue of the ÷20 detune above, corrected in one place and not the
+other. Nothing would have reported it: opening the PLL in the wizard and clicking Finish
+would have regenerated the design at *half speed*, with no error, no warning, and a
+machine that simply ran slowly.
+
+Both now say `5`. If you hand-edit a divider, edit the `Retrieval info` to match — it is
+not a comment, it is the wizard's saved state.

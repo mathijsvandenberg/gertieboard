@@ -399,7 +399,7 @@ BEGIN
   -- depends on the two timers keeping real time.
   opl2lite1 : ENTITY work.opl2_lite
     GENERIC MAP (
-      CLK_HZ               => 5_000_000
+      CLK_HZ               => 10_000_000
     )
     PORT MAP (
       CLK                  => n_c0,
@@ -416,7 +416,7 @@ BEGIN
     -- entity's own defaults are 50 MHz / 115200, which would divide down to
     -- ~11.5 kbaud on this clock. These were symbol parameters in the old .bdf.
     GENERIC MAP (
-      CLK_FREQ             => 5000000,
+      CLK_FREQ             => 10000000,
       BAUD                 => 1000000
     )
     PORT MAP (

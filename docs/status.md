@@ -8,6 +8,7 @@ marketing: if something is listed as working it has been run on hardware.
 | Feature | Detail |
 |---|---|
 | **Real CPU** | NEC V20 (µPD70108C-8) on the [top board](hardware.md), FPGA as the surrounding chipset |
+| **10 MHz bus** | `c0` drives the CPU and the whole I/O bus. Timing closes with margin on every domain — [clkgen/pll](modules/clkgen-pll.md) |
 | **Runs standalone** | FPGA configures from its own flash, BIOS from the on-board SPI flash, DOS from the USB disk — nothing attached but power and a monitor — [boot](boot.md) |
 | **Boots MS-DOS 4.01** | The Dutch release shipped with the Philips P2120, **installed onto `C:` from its original install floppies** — see [storage](storage.md#installing-an-operating-system-onto-it). PC-DOS 3.30 runs too, from a served floppy image |
 | **USB hard disk, `C:`** | Bulk-Only Transport and SCSI in the BIOS over the fabric host controller. `FDISK`, `FORMAT`, `CHKDSK` pass; 504 MB addressable — [storage](storage.md) |
@@ -155,26 +156,30 @@ likely under CERN-OHL-P, since MIT does not really fit a PCB.
   of a rebuild. The buffer itself is already in M9K; this is the remaining half of that
   idea. Reasoning in [fixed disk](fixed-disk.md#where-the-buffer-lives).
 - **Real floppy drive** on a physical connector, instead of serving images.
-- **Faster CPU clock.** `c0` is 5 MHz and the socket will take an 8088-2 (8 MHz) or
-  8088-1 (10 MHz), so there is headroom on paper. Two things make it a project rather
-  than a PLL edit, and neither is optional:
+- **Make `c0` a single parameter.** It is now 10 MHz, but the rate still lives in six
+  places rather than one, and they must be kept in step by hand:
 
-  **Nothing can detect the speed grade.** An 8088, 8088-2 and 8088-1 are electrically
+  | Where | What it sets |
+  |---|---|
+  | `pll.vhd` `clk0_divide_by` | the rate itself — **and** `DIV_FACTOR0` in the Retrieval info, see [clkgen/pll](modules/clkgen-pll.md#the-megawizard-metadata-can-disagree-with-the-hardware) |
+  | `fdc8272` `CLK_FREQ` generic | the host link's baud divider — wrong and drive `A:` dies quietly |
+  | `opl2_lite` `CLK_HZ` generic | AdLib sample rate and both detection timers |
+  | `sevenseg` `T_NIBBLE`/`T_BLANK` | raw cycle counts |
+  | `busdecode` READY backstop | counted in CPU clocks, so its *duration* scales |
+  | BIOS FDC and USB NAK budgets | iteration counts, so their duration scales too |
+
+  The last two are the dangerous ones, because nothing breaks visibly when they are
+  missed — a backstop that fires early returns undriven bus data, and a NAK budget that
+  expires early makes a merely-busy stick pad a sector from its stale buffer and report
+  success. Neither looks like a clock problem.
+
+  **Speed grade is still undetectable.** An 8088, 8088-2 and 8088-1 are electrically
   identical; the grade is a marking on the package and a promise from Intel, exposed
   through no register and no pin. POST can identify an
   [instruction-set class](storage.md#the-80186-fast-path) because that is a difference
-  in *behaviour*, but there is no equivalent for speed. Anything here would be a
-  stability *trial* — raise the clock, self-test, back off on failure — which also
+  in *behaviour*, but there is no equivalent for speed. Anything automatic here would be
+  a stability *trial* — raise the clock, self-test, back off on failure — which also
   means surviving the failure well enough to do the backing off.
-
-  **`c0` is not just the CPU.** [`busdecode`](modules/busdecode.md), the DMA, PIC, PPI,
-  FDC, `vga.CLK_CPU`, [`sevenseg`](modules/sevenseg.md), `ctrl_reg` and the boot ROM all
-  run on it, and two carry it as a generic: `fdc8272`'s `CLK_FREQ` sets the host link's
-  baud divider, so a changed clock silently breaks drive `A:`. Timing would need
-  re-closing at the new rate, and the PSRAM path is already the limit at 5 MHz.
-
-  A sensible first step is making `c0` one parameter that every dependent generic
-  derives from, so the rate is a single edit rather than six places to keep in step.
 - **Composite/RGBI output** alongside VGA, for a period-correct monitor.
 - **CP/M-80 software**, using the V20's 8080 emulation mode (`BRKEM`). Needs a host
   program on the DOS side rather than anything in the FPGA — a curiosity the CPU

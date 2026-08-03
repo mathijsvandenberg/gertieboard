@@ -2392,7 +2392,7 @@ fdc_out:
     cmp byte ptr [0xB6], 0
     jne .fo_out               # already given up on this operation
     mov ah, al                # stash byte to send in AH
-    mov cx, 4                 # ~2.5 s at ~10 us per poll
+    mov cx, 8                 # ~2.5 s at ~5 us per poll (10 MHz bus)
 .fo_outer:
     xor bx, bx
 .fo_wait:
@@ -2431,7 +2431,7 @@ fdc_in:
     xor al, al                # timed out earlier: hand back a zero, fast
     jmp short .fi_out
 .fi_go:
-    mov cx, 4                 # ~2.5 s at ~10 us per poll
+    mov cx, 8                 # ~2.5 s at ~5 us per poll (10 MHz bus)
 .fi_outer:
     xor bx, bx
 .fi_wait:
@@ -2477,7 +2477,7 @@ fdc_results:
     mov byte ptr [0x41], 0      # assume success; boot AA55 check validates
     cmp byte ptr [0xB6], 0      # already given up? then there is nothing to
     jne .fr_done                # drain, and no reason to wait again
-    mov cx, 4                 # ~2.5 s at ~10 us per poll
+    mov cx, 8                 # ~2.5 s at ~5 us per poll (10 MHz bus)
 .fr_outer:
     xor bx, bx
 .fr_drain:
@@ -3908,9 +3908,11 @@ u_txn:
     push si
     mov bl, al                   # command, in a register DX cannot touch
     mov bh, 3                    # attempts left after a corrupted packet
-    mov si, 16                   # outer NAK budget -- see .ut_attempt
+    mov si, 32                   # outer NAK budget -- see .ut_attempt
 .ut_attempt:
-    # NAK budget: 16 rounds of 4096. An earlier version gave up after ONE
+    # NAK budget: 32 rounds of 4096 (was 16 at a 5 MHz bus -- these are
+    # ITERATIONS, so doubling the clock halved the wall-clock budget and the
+    # count has to double to stand still). An earlier version gave up after ONE
     # round (~70 ms) on the theory that the command-level retry above would
     # cover anything slower. The write soak disproved it: a flash stick
     # programming a sector NAKs the next packet for hundreds of milliseconds,

@@ -1,6 +1,6 @@
 # ctrl_reg
 
-Source: [`ctrl_reg.vhd`](../../ctrl_reg.vhd) · Instance `ctrl1` · Clock `c0` (5 MHz)
+Source: [`ctrl_reg.vhd`](../../ctrl_reg.vhd) · Instance `ctrl1` · Clock `c0` (10 MHz)
 
 A single writable register at I/O `0xE4` that tunes the PSRAM controller's timing at
 runtime, so signal-integrity experiments need no rebuild.
@@ -9,7 +9,7 @@ runtime, so signal-integrity experiments need no rebuild.
 
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
-| `CLK` | IN | 1 | 5 MHz (`c0`) |
+| `CLK` | IN | 1 | 10 MHz (`c0`) |
 | `RESET` | IN | 1 | Synchronous, active high |
 | `DATA` | IN | 8 | CPU write data |
 | `ADDR` | IN | 16 | I/O address |

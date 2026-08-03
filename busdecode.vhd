@@ -146,10 +146,15 @@ BEGIN
 	-- slowest legitimate access -- otherwise it releases the CPU early and the
 	-- data bus is sampled before the PSRAM has driven it (silent corruption).
 	-- It used to be T >= 10, which a 16-byte PSRAM cache-line fill (~18 CPU
-	-- clocks at SCK_DIV=2) would trip on every miss. 64 clocks = 12.8 us at
-	-- 5 MHz, comfortably past the worst case (61 SCK cycles at SCK_DIV=2,
-	-- RD_LAT=15 ~= 24 clocks) while still recovering from a real fault.
-	READY <=  '1' WHEN (T >= 64 AND MEMADDR AND IOM = '0')
+	-- clocks at SCK_DIV=2) would trip on every miss.
+	--
+	-- THIS COUNTS CPU CLOCKS, so its duration halved when c0 went from 5 MHz to
+	-- 10 MHz. 64 clocks was 12.8 us at 5 MHz and would be only 6.4 us at 10,
+	-- against a worst case of 61 SCK cycles at SCK_DIV=2 (~4.9 us) -- still
+	-- clear, but with a quarter of the margin it was designed with. 128 keeps
+	-- the original 12.8 us. The PSRAM side is on c3 and did not get faster, so
+	-- the absolute deadline it has to beat has not moved.
+	READY <=  '1' WHEN (T >= 128 AND MEMADDR AND IOM = '0')
       ELSE '1' WHEN (MEMADDR AND IOM = '0' AND RAM_READY = '1')
       ELSE '1' WHEN (T >= 3 AND (NOT MEMADDR OR IOM = '1'))
       ELSE '0';

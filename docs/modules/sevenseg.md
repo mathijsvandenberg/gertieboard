@@ -1,6 +1,6 @@
 # sevenseg
 
-Source: [`sevenseg.vhd`](../../sevenseg.vhd) · Instance `sevenseg1` · Clock `c0` (5 MHz)
+Source: [`sevenseg.vhd`](../../sevenseg.vhd) · Instance `sevenseg1` · Clock `c0` (10 MHz)
 
 One 7-segment digit that displays a **full byte** by time-multiplexing its two
 nibbles. This is the machine's POST-code and debug display, and it has earned its
@@ -10,7 +10,7 @@ keep repeatedly.
 
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
-| `CLK` | IN | 1 | 5 MHz (`c0`) |
+| `CLK` | IN | 1 | 10 MHz (`c0`) |
 | `DATA` | IN | 8 | CPU write data |
 | `ADDR` | IN | 16 | I/O address |
 | `WR` | IN | 1 | I/O write strobe, active low |

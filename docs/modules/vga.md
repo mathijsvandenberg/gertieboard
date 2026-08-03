@@ -1,7 +1,7 @@
 # vga
 
 Source: [`vga.vhd`](../../vga.vhd) · Instance `vga1` · Clocks `c1` (25 MHz pixel) and
-`c0` (5 MHz CPU port) · Font: [`font.vhd`](../../font.vhd), decoded from a real
+`c0` (10 MHz CPU port) · Font: [`font.vhd`](../../font.vhd), decoded from a real
 Philips P2120 character ROM by [`tools/mkfont_p2120.py`](../../tools/mkfont_p2120.py)
 
 A CGA-compatible display adapter with its own 16 KB of video RAM, outputting VGA
@@ -12,7 +12,7 @@ timing so a modern monitor can display it.
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
 | `CLK_VGA` | IN | 1 | 25 MHz pixel clock (`c1`) |
-| `CLK_CPU` | IN | 1 | 5 MHz bus clock (`c0`) — the CPU-side port |
+| `CLK_CPU` | IN | 1 | 10 MHz bus clock (`c0`) — the CPU-side port |
 | `RESET` | IN | 1 | Synchronous, active high |
 | `ADDR` | IN | 20 | Memory address |
 | `DATAIN` | IN | 8 | Memory write data |

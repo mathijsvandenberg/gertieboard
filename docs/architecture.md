@@ -72,7 +72,7 @@ host. Two of the device's four PLLs are used.
 
 | Output | Divider | Frequency | Drives |
 |---|---|---|---|
-| `c0` | ÷10 | **5 MHz** | `CPU_CLK` (the real CPU) and the entire I/O bus: `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`, `fdc8272`, `flash`, `bootrom`, and `vga.CLK_CPU` |
+| `c0` | ÷5 | **10 MHz** | `CPU_CLK` (the real CPU) and the entire I/O bus: `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`, `fdc8272`, `flash`, `bootrom`, and `vga.CLK_CPU` |
 | `c1` | ÷2 | **25 MHz** | `vga.CLK_VGA` — VGA pixel clock |
 | `c2` | ÷42 | **1.1905 MHz** | `timer8253` — within 0.23 % of the XT's 1.193182 MHz |
 | `c3` | ÷1 | **50 MHz** | `mem_hybrid` (PSRAM), `ps2_kbd_ppi`, `cga_status` |
