@@ -228,6 +228,29 @@ _post:
     call dbg_str
     pop es
 
+## ---- the system clock, row 11 --------------------------------------
+##  MEASURED, not declared. See cpu_speed for why that distinction earned its
+##  keep: a stale bitstream reported a speed the machine was not running at,
+##  and a constant would have agreed with it.
+    call cpu_speed               # AX = MHz x 100
+    call fmt_mhz                 # -> mhz_buf as "N.NN"
+    mov al, 11
+    mov si, offset b_clk
+    call putrow
+    push es
+    push ds
+    mov ax, VID
+    mov es, ax
+    mov di, 11*160 + 2*21        # just past "System clock set to: Turbo "
+    push cs
+    pop ds
+    mov si, offset mhz_buf
+    call dbg_str
+    mov si, offset b_mhz
+    call dbg_str
+    pop ds
+    pop es
+
 ## ---- 8259 PIC (master, XT single mode) -----------------------------
     mov al, 0x13            # ICW1: edge, single, ICW4 needed
     out 0x20, al
@@ -1490,6 +1513,156 @@ scroll_one:
     ret
 
 ## =====================================================================
+##  cpu_speed -- the CPU clock, MEASURED, in hundredths of a MHz
+##
+##  The reference is PIT channel 2. That matters: the PIT is clocked from c2,
+##  a PLL output that is NOT derived from c0, so the ruler stays still while
+##  the thing being measured changes. Channel 2 is used rather than 0 because
+##  it is otherwise idle here and its gate is under our control at port 0x61;
+##  the speaker data bit is left LOW so none of this is audible.
+##
+##  THE LOOP MUST RUN FROM M9K, and now it does so in place. An 8088-class CPU
+##  is fetch-bound -- most of what it spends is waiting for instruction bytes --
+##  so a loop timed out of PSRAM would measure the memory rather than the clock:
+##  PSRAM latency is fixed in NANOSECONDS, so it eats a growing share of each
+##  cycle as the clock rises and the reading stops being proportional to
+##  anything. This used to be worked around by copying the loop to 0x0500 and
+##  far-calling it, back when low RAM was the only M9K. The BIOS itself is M9K
+##  now, so the loop simply runs where it sits.
+##
+##  Interrupts are off across the measurement, so nothing steals cycles from
+##  the count. POST has not enabled them yet, but this does not assume that.
+##
+##  CAL_CPI IS A CALIBRATION CONSTANT, not a derivation. It is the clocks one
+##  LOOP iteration costs, which depends on the CPU rather than on anything this
+##  code can compute. Set it by running a build whose rate is known exactly --
+##  50/10 = 5 MHz is the obvious one -- and scaling until the display agrees.
+##  Guessing it from a timing table would make the number look authoritative
+##  while being wrong, which is worse than not showing one.
+## =====================================================================
+.equ CAL_ITER,   4096
+.equ CAL_CPI,    20              # clocks per LOOP iteration -- CALIBRATE
+.equ CAL_CLOCKS, CAL_ITER * CAL_CPI
+.equ CAL_NUM,    CAL_CLOCKS * 119   # 119 ~= 1190500/10000, the c2 rate
+
+cpu_speed:
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push es
+    push ds
+    pushf
+    cli
+
+    in al, 0x61                  # gate 2 on, speaker data off = silent
+    and al, 0xFD
+    or al, 0x01
+    out 0x61, al
+    mov al, 0xB0                 # ch2, lo/hi, mode 0, binary
+    out 0x43, al
+    mov al, 0xFF                 # full 16-bit count; it free-runs downward
+    out 0x42, al
+    out 0x42, al
+
+    call pit2_read
+    mov si, ax                   # start count
+
+    mov cx, CAL_ITER
+    call cal_code                # in place: this segment is M9K now
+
+    call pit2_read
+    mov bx, si
+    sub bx, ax                   # counts DOWN, so start - end
+    cmp bx, 256                  # too small to divide by, or the PIT is dead
+    jb .cs_bad
+
+    mov dx, CAL_NUM >> 16
+    mov ax, CAL_NUM & 0xFFFF
+    div bx                       # AX = MHz x 100
+    jmp short .cs_out
+.cs_bad:
+    xor ax, ax                   # 0.00 -- visibly wrong rather than plausible
+.cs_out:
+    popf
+    pop ds
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    ret
+
+## pit2_read: AX = the current channel-2 count, via the latch command
+pit2_read:
+    push bx
+    mov al, 0x80                 # latch counter 2
+    out 0x43, al
+    in al, 0x42
+    mov bl, al
+    in al, 0x42
+    mov bh, al
+    mov ax, bx
+    pop bx
+    ret
+
+## The calibration loop. Two bytes of loop plus a near return.
+cal_code:
+    .byte 0xE2, 0xFE             # loop $
+    ret
+
+## fmt_mhz -- AX = MHz x 100 -> mhz_buf as "N.NN", NUL terminated
+fmt_mhz:
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    push es
+    push cs
+    pop es
+    mov di, offset mhz_buf
+    xor dx, dx
+    mov bx, 100
+    div bx
+    push dx                      # hundredths
+    xor dx, dx
+    mov bx, 10
+    div bx                       # AX = tens, DX = units
+    test al, al
+    jz .fm_units                 # no leading zero on a one-digit speed
+    add al, 0x30
+    stosb
+.fm_units:
+    mov al, dl
+    add al, 0x30
+    stosb
+    mov al, 0x2E                 # '.'
+    stosb
+    pop ax
+    xor dx, dx
+    mov bx, 10
+    div bx
+    add al, 0x30
+    stosb
+    mov al, dl
+    add al, 0x30
+    stosb
+    xor al, al
+    stosb
+    pop es
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+mhz_buf:  .space 8
+
+## =====================================================================
 ##  INT 11h / 12h
 ## =====================================================================
 _int11:
@@ -2392,7 +2565,7 @@ fdc_out:
     cmp byte ptr [0xB6], 0
     jne .fo_out               # already given up on this operation
     mov ah, al                # stash byte to send in AH
-    mov cx, 8                 # ~2.5 s at ~5 us per poll (10 MHz bus)
+    mov cx, 4                 # ~2.5 s at ~10 us per poll (5 MHz bus)
 .fo_outer:
     xor bx, bx
 .fo_wait:
@@ -2431,7 +2604,7 @@ fdc_in:
     xor al, al                # timed out earlier: hand back a zero, fast
     jmp short .fi_out
 .fi_go:
-    mov cx, 8                 # ~2.5 s at ~5 us per poll (10 MHz bus)
+    mov cx, 4                 # ~2.5 s at ~10 us per poll (5 MHz bus)
 .fi_outer:
     xor bx, bx
 .fi_wait:
@@ -2477,7 +2650,7 @@ fdc_results:
     mov byte ptr [0x41], 0      # assume success; boot AA55 check validates
     cmp byte ptr [0xB6], 0      # already given up? then there is nothing to
     jne .fr_done                # drain, and no reason to wait again
-    mov cx, 8                 # ~2.5 s at ~5 us per poll (10 MHz bus)
+    mov cx, 4                 # ~2.5 s at ~10 us per poll (5 MHz bus)
 .fr_outer:
     xor bx, bx
 .fr_drain:
@@ -3908,11 +4081,12 @@ u_txn:
     push si
     mov bl, al                   # command, in a register DX cannot touch
     mov bh, 3                    # attempts left after a corrupted packet
-    mov si, 32                   # outer NAK budget -- see .ut_attempt
+    mov si, 16                   # outer NAK budget -- see .ut_attempt
 .ut_attempt:
-    # NAK budget: 32 rounds of 4096 (was 16 at a 5 MHz bus -- these are
-    # ITERATIONS, so doubling the clock halved the wall-clock budget and the
-    # count has to double to stand still). An earlier version gave up after ONE
+    # NAK budget: 16 rounds of 4096. These are ITERATIONS, not time, so the
+    # budget scales with the bus clock -- it was doubled to 32 while c0 was
+    # 10 MHz and is back to 16 now that c0 is 5. An earlier version gave up
+    # after ONE
     # round (~70 ms) on the theory that the command-level retry above would
     # cover anything slower. The write soak disproved it: a flash stick
     # programming a sector NAKs the next packet for hundreds of milliseconds,
@@ -5771,6 +5945,26 @@ b_par:    .asciz "Parity Checking Enabled"
 b_cpu:    .asciz "Processor          : "
 b_cpu186: .asciz "80186 / V20 found  -  fast disk path"
 b_cpu86:  .asciz "8088 found  -  compatible disk path"
+
+##  The machine being imitated announced its own clock, and had two of them.
+##  Its ROM carries both wordings verbatim:
+##
+##      System clock set to: Turbo 10 MHz
+##      System clock set to: Standard 4.77 MHz
+##
+##  So this is the original's phrasing rather than an invention, and 10 MHz is
+##  what the P2120 called turbo -- not an overclock, but the speed it was built
+##  around. Confirmed from the P2120's own 27C256 dump.
+##
+##  THIS IS A CONSTANT, NOT A MEASUREMENT. There is no speed register on this
+##  board to read and nothing to poll: c0 is fixed by the PLL at synthesis time.
+##  Edit it by hand when c0 changes, and keep it in step with clkgen-pll.md.
+##  Two other places already carry the rate that way -- WAITSTAT's CLKSCALE and
+##  fdc8272's CLK_FREQ generic -- and both have been wrong at some point today,
+##  so treat a disagreement between this line and reality as the likely fault
+##  rather than as something to explain away.
+b_clk:    .asciz "System clock set to: "
+b_mhz:    .asciz " MHz"
 b_fd1:     .asciz "Diskette Drive A:  : "   # 21 columns, like B: and the disk
 b_boot:   .asciz "Booting..."
 b_sum:    .asciz "   code "

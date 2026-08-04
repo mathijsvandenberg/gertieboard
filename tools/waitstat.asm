@@ -41,6 +41,13 @@
         bits 16
         CPU  8086               ; mandatory: see docs/gotchas.md
 
+; The bus clock. MUST match c0 in the FPGA -- see docs/modules/clkgen-pll.md.
+CPU_HZ  equ 5000000
+; tenths of a clock per tick per iteration, x1000. One BIOS tick is 54925 us,
+; and the tick comes from the PIT on c2, which is NOT derived from c0 -- so it
+; stays 18.2 Hz across a bus-clock change and remains an honest time reference.
+CLKSCALE equ CPU_HZ * 54925 / 524288 / 100
+
 OUTER   equ 8                   ; passes of a 65536-iteration inner loop
                                 ; 8 * 65536 = 524288 iterations per test
 
@@ -71,15 +78,19 @@ start:
         call report
 
 ; ---------------------------------------------------------------------------
-;  B -- one read from M9K.  Segment 0 offset 0x600 is physical 0x600, inside
-;  the 0x00000-0x07FFF on-chip window. Read only, so nothing there minds.
-        xor  ax, ax
+;  B -- one read from M9K. That is the BIOS segment now, NOT low memory:
+;  conventional RAM is uniformly PSRAM since the memory map was reorganised,
+;  and 0xFC000..0xFFFFF is the only on-chip window the CPU can reach. Reading
+;  the BIOS image is harmless -- it is read-only at runtime by definition.
+;  Pointing this at 0000:0600 as it used to would now measure PSRAM twice and
+;  make B and C agree for entirely the wrong reason.
+        mov  ax, 0xFC00
         mov  ds, ax
-        mov  si, 0x0600
+        mov  si, 0x0000
         mov  di, test_mem
         call timeit
-        push cs                 ; DS is still 0 here -- restore it BEFORE the
-        pop  ds                 ; store, or [t_b] lands at 0000:t_b instead
+        push cs                 ; DS still points at the BIOS -- restore it
+        pop  ds                 ; BEFORE the store, or [t_b] lands there
         mov  [t_b], ax
         mov  si, n_b
         call report
@@ -272,16 +283,22 @@ diffline:
 ;
 ;   one tick        = 54925 us
 ;   one iteration   = ticks * 54925us / 524288
-;   one 5 MHz clock = 0.2 us
-;   so clocks       = ticks * 54925 / 524288 / 0.2 = ticks * 0.5238
-;   in tenths       = ticks * 5238 / 1000
+;   one clock       = 1/CPU_HZ seconds
+;   so clocks       = ticks * 54925us * CPU_HZ / 524288
+;   in tenths       = ticks * CLKSCALE / 1000, with CLKSCALE derived below
+;
+; CLKSCALE USED TO BE THE LITERAL 5238, correct only for a 5 MHz bus. Every
+; figure this tool prints is scaled by it, so a clock change silently rescaled
+; the whole report -- at 8.333 MHz it would have under-reported by 40% while
+; still looking perfectly plausible. It is derived from CPU_HZ now, so the one
+; thing to keep in step is CPU_HZ itself.
 putclocks:
         push ax
         push bx
         push cx
         push dx
-        mov  bx, 5238
-        mul  bx                 ; DX:AX = ticks * 5238
+        mov  bx, CLKSCALE
+        mul  bx                 ; DX:AX = ticks * CLKSCALE
         mov  bx, 1000
         div  bx                 ; AX = tenths of a clock
         xor  dx, dx
