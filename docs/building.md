@@ -21,14 +21,44 @@ Three separate build products, each with its own toolchain:
 ## FPGA
 
 ```bash
+bash tools/mkfpga.sh
+```
+
+Output: `output_files/gertieboard.sof` (JTAG, volatile) **and**
+`output_files/gertieboard.jic` (EPCS16, survives a power cycle).
+
+Use the script rather than the four commands below it. It runs the same flow and then
+**refuses** on three things: a stage that did not report success, any negative slack, and
+a `.sof` older than the newest source file. If it prints `BUILD OK`, the bitstream on
+disk really is the design in the working tree and it really does meet timing.
+
+Each refusal is there because the corresponding mistake was made, more than once:
+
+- `quartus_map` failed on a VHDL error, the `&&` chain stopped correctly — and
+  `output_files/` still held the reports and `.sof` from the *previous* run. Every number
+  read from them was real, current-looking, and about a different design. The only tell
+  was a resource count that had not changed after adding a port, a synchroniser and reset
+  gating. So the script **deletes** the artefacts before claiming to produce them.
+- A `.sof` was programmed that was two clock rates out of date, and an hour went into
+  testing 8.333 MHz while believing it was 6.25.
+- A build closed timing at −0.037 ns and nobody noticed, because the summary was read for
+  the frequency and not for the slack.
+
+The `.jic` is produced in the same run, by calling `mkjic.sh` rather than repeating it.
+That is the copy the board *boots* from, so leaving it a build behind is the same stale
+artefact trap — only surviving a power cycle.
+
+<details>
+<summary>The underlying commands</summary>
+
+```bash
 cd /c/altera/gertieboard
 /c/altera/25.1std/quartus/bin64/quartus_map.exe gertieboard    # analysis & synthesis
 /c/altera/25.1std/quartus/bin64/quartus_fit.exe gertieboard    # place & route
 /c/altera/25.1std/quartus/bin64/quartus_asm.exe gertieboard    # bitstream
 /c/altera/25.1std/quartus/bin64/quartus_sta.exe gertieboard    # timing analysis
 ```
-
-Output: `output_files/gertieboard.sof`.
+</details>
 
 Target: **Cyclone IV E `EP4CE22F17C6`**. Top-level entity `gertieboard`, sources listed
 in [`gertieboard.qsf`](../gertieboard.qsf).
@@ -37,17 +67,29 @@ in [`gertieboard.qsf`](../gertieboard.qsf).
 
 | Metric | Value |
 |---|---|
-| Logic elements | 13 450 / 22 320 (60 %) |
-| Memory bits | 425 984 / 608 256 (70 %) |
+| Logic elements | 8 588 / 22 320 (38 %) |
+| Memory bits | 300 160 / 608 256 (49 %) |
 | PLLs | 2 / 4 |
 | Pins | 78 / 154 |
-| Worst-case setup slack | +0.64 ns |
-| Worst-case hold slack | +0.36 ns |
+| Worst-case setup slack | +1.68 ns |
+| Worst-case hold slack | +0.29 ns |
+| Worst slack of any kind | +0.14 ns |
 | Fitter warnings | 7 |
 
-Where the logic goes, largest first: `fdc8272` 5881, `vga` 2047, `usb_host` 1962,
-`psram_ctrl` 1114, `dma8237` 725, `bootrom` 271, `m9k_mem` 50. The serial floppy
-controller and the USB host together are more than half the design.
+Where the logic goes, largest first: `vga` 2132, `psram_ctrl` 1899, `usb_host` 884,
+`opl2_lite` 731, `dma8237` 723, `fdc8272` 548, `ps2_kbd_ppi` 411, `timer8253` 407,
+`bootrom` 312.
+
+> The totals dropped sharply — from 13 450 LEs and 70 % of the M9K — when conventional
+> memory moved wholly into PSRAM and the [memory map was unified](../memmap.vhd). The
+> memory bits follow directly from that. The **logic** drop is larger than that change
+> accounts for and has not been explained; every module is present and the per-module
+> figures sum to the total, so it is recorded here as an open question rather than a
+> result to rely on.
+
+`mkfpga.sh` refuses on *any* negative slack, so "worst slack of any kind" is the number
+that gates a build — it includes minimum-pulse-width and recovery/removal checks, not
+just setup and hold.
 
 A clean build is 0 errors with those warning counts. Every slack must be **positive** —
 negative slack on this design is not a rounding detail, it is the failure mode that

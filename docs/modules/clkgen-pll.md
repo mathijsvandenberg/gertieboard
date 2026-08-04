@@ -13,7 +13,7 @@ An `altpll` megafunction wrapper. The DE0-Nano's 50 MHz oscillator comes in on
 | Port | Dir | Purpose |
 |---|---|---|
 | `inclk0` | IN | 50 MHz reference (`CLOCK50`, `PIN_R8`) |
-| `c0` | OUT | 10 MHz |
+| `c0` | OUT | 8.333 MHz |
 | `c1` | OUT | 25 MHz |
 | `c2` | OUT | 1.1905 MHz |
 | `c3` | OUT | 50 MHz |
@@ -23,10 +23,10 @@ An `altpll` megafunction wrapper. The DE0-Nano's 50 MHz oscillator comes in on
 
 | Output | Divider | Frequency | Drives |
 |---|---|---|---|
-| `c0` | ÷5 | **10 MHz** | `CPU_CLK` and the whole I/O bus — `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`, `fdc8272`, `flash`, `bootrom`, `vga.CLK_CPU` |
+| `c0` | ÷6 | **8.333 MHz** | `CPU_CLK` and the whole I/O bus — `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`, `fdc8272`, `flash`, `bootrom`, `vga.CLK_CPU` |
 | `c1` | ÷2 | **25 MHz** | `vga.CLK_VGA` |
 | `c2` | ÷42 | **1.1905 MHz** | `timer8253` |
-| `c3` | ÷1 | **50 MHz** | `mem_hybrid`, `ps2_kbd_ppi`, `cga_status` |
+| `c3` | ÷1 | **50 MHz** | `mem_hybrid`, `ps2_kbd_ppi` |
 
 > **Reading `pll.vhd`:** `inclk0_input_frequency => 20000` is a **period in
 > picoseconds** — 20 ns, i.e. 50 MHz. It is *not* kHz. Misreading it produced a
@@ -34,10 +34,34 @@ An `altpll` megafunction wrapper. The DE0-Nano's 50 MHz oscillator comes in on
 > investigation off after a non-existent bug. `c1` landing on exactly 25 MHz (the
 > standard VGA pixel clock) independently confirms the 50 MHz input.
 
-`c0` at 10 MHz is the machine's speed. It was briefly ÷20 (2.5 MHz) in uncommitted
-work, which halved performance *and* silently halved the floppy link's baud rate,
-because `fdc8272` computes `BAUD_DIV = CLK_FREQ / BAUD` from a generic that still said
-5 MHz.
+`c0` at 8.333 MHz is the machine's speed, 1.67× the 5 MHz it ran at for most of its
+life. It was briefly ÷20 (2.5 MHz) in uncommitted work, which halved performance *and*
+silently halved the floppy link's baud rate, because `fdc8272` computes
+`BAUD_DIV = CLK_FREQ / BAUD` from a generic that still said 5 MHz.
+
+### Why ÷6 and not ÷5
+
+10 MHz was the target — the Philips P2120 this machine imitates ran its V20 at 10 in
+turbo mode — and 10 MHz does not boot here. The serial loader is never even asked for a
+block. Whether that is the CPU, the 3.3 V logic levels driving a 5 V part, or something
+on the bus is not established; the CPU is a `-8` and 8.333 is inside its rating, so the
+part is the obvious suspect and a faster one is the obvious test.
+
+**÷6 rather than ÷5.6 or anything else near 9 MHz, because the ratio has to be an
+integer.** 8 MHz was tried first as 50 × 4 ÷ 25 and failed timing at −3.28 ns: a
+non-integer ratio between `c0` and `c3` puts a `c3` edge 5 ns before a `c0` edge, and
+nothing in the design can absorb that. 50 ÷ 6 closes at +1.9 ns. This is a real
+constraint on any future retarget, not an artefact of one attempt.
+
+Two things that do **not** scale with `c0`, and are worth knowing before changing it:
+
+- **The BIOS tick stays 18.2 Hz.** It comes from `c2`, which is divided from the 50 MHz
+  reference and not from `c0`, so it is an honest time reference across bus-clock
+  changes — which is exactly what makes the measured-CPU-clock reading in POST possible.
+- **The host serial link does not stay at 1 Mbaud.** `BAUD_DIV` is an integer divide, so
+  8333333 / 8 = **1,041,667**, 4.2 % fast. The host stays at 1000000 and it works,
+  because 4.2 % is inside 8N1 tolerance — inside it, not clear of it. Only 10, 5 and
+  2 MHz divide exactly.
 
 ### The second PLL
 
@@ -54,7 +78,7 @@ synchronous reset for everything else.
 
 | Port | Dir | Purpose |
 |---|---|---|
-| `CLK` | IN | 10 MHz (`c0`) |
+| `CLK` | IN | 8.333 MHz (`c0`) |
 | `RESET` | IN | **Active LOW** reset request |
 | `RST_OUT` | OUT | **Active HIGH** system reset |
 

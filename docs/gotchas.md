@@ -557,6 +557,66 @@ capability is used, and an unanswered probe reads as absence.
 Related: [answering a probe half-truthfully](#answering-a-probe-half-truthfully), which
 is the same failure with the answer present but wrong.
 
+## One fact, written twice
+
+Two of the hardest faults on this machine were the same mistake in different clothes: a
+single piece of information kept in two places, where nothing forces the copies to agree.
+
+**The memory map.** `mem_hybrid`, `psram_ctrl`, `m9k_mem` and `busdecode` each decided
+independently which addresses belonged to whom, in four hand-written expressions.
+Teaching one of them that low memory was PSRAM and not the others made the first stack
+push route to a controller that did not claim the address. Nothing drove `READY`, and the
+CPU stopped on `0x7C00` — an address that looks entirely ordinary. There was no error and
+there could not be one. The fix was [`memmap.vhd`](../memmap.vhd): the boundaries live in
+one package and the modules ask rather than restate.
+
+**The scan counters.** [`cga_status`](modules/cga_status.md) kept its own 800 × 525
+counters on `c3` while [`vga`](modules/vga.md) counted the same geometry on `c1`. Same
+period, second copy — and they never agreed. `vga` draws the picture on lines 35–434;
+`cga_status` announced vertical retrace from line 400, so every program that waits for
+blanking before rewriting the screen was handed **1.1 ms of active display** as if it
+were safe. The fix was to delete the counters and take both bits from the ones that
+actually address the video memory.
+
+What makes this class expensive is that the duplicate is usually *correct when written*.
+It becomes wrong later, silently, when one copy is edited — and the symptom appears
+nowhere near the edit.
+
+> The `cga_status` header had already recorded the risk: *"the PHASE is arbitrary … wire
+> `vga`'s `VS` in here instead if that ever matters."* It sat there for months. **A known
+> limitation that stays written down is a bug with a disclaimer on it** — and the
+> disclaimer underestimated it, because it framed the cost as tearing when the real cost
+> was software being told the wrong thing about when it could draw.
+
+**Lesson:** when two modules must agree about a fact, make one of them the source and
+have the other ask. If that is genuinely impractical, the second-best is a single
+assertion that fails loudly when they diverge — not a comment saying they might.
+
+## A peripheral's registers do not have to run at the peripheral's rate
+
+[`timer8253`](modules/timer8253.md) was clocked entirely from `c2`, its 1.19 MHz counting
+rate, which is the obvious reading of "the PIT runs at 1.193 MHz". It is also the reason
+the machine could not go faster than 5 MHz.
+
+A register interface on a 1.19 MHz clock has ~840 ns between edges. At 5 MHz the CPU's
+I/O write strobe was wide enough to be caught anyway. Every attempt to raise the bus
+clock narrowed the strobe relative to that window, until writes to the PIT started being
+missed — a game reprogramming counter 0 would have some of its bytes accepted and some
+dropped.
+
+**The symptom was games crashing during play at 6.25 MHz and above**, which reads as a
+CPU speed limit or a memory timing problem, and was chased as both for a long time. The
+CPU and the memory were fine.
+
+The separation is the fix: the register interface runs on the bus clock so it can see an
+I/O cycle, and the counting rate comes in as *data*, sampled through a synchroniser and
+used as a count enable. The rate stays exact; only the phase of each tick moves, which no
+8253 user can observe.
+
+**Lesson:** a peripheral has two clocks in it — the rate it *models* and the rate it must
+*be talked to at*. Wiring both to the slow one works until the bus gets faster than the
+model, and then it fails as a bus problem.
+
 ## Currently open
 
 Nothing broken. The last entry — the BIOS not booting from SPI flash — closed when the
@@ -567,7 +627,15 @@ Two things are *unfinished* rather than wrong, and are recorded here so they are
 rediscovered as bugs:
 
 - **CRTC `START` (R12/R13) is latched but unused.** Anything that scrolls by moving the
-  display start address will not scroll. Software that redraws is unaffected.
+  display start address will not scroll. Software that redraws is unaffected. It was
+  wired in once and reverted: it made Keen 4 overlap itself and shifted Arkanoid's *text*
+  screen, which rules out the word-versus-cell doubling that graphics mode makes the
+  obvious suspect and leaves the hardcoded 80-byte row length as the likely candidate.
+  [`SCROLLTST`](tools.md#scrolltst--does-the-display-start-address-land-where-it-should)
+  exists to settle it; run that before wiring it in again, rather than reading the screen.
+- **10 MHz does not boot.** The serial loader is never asked for a block. `c0` is 8.33 MHz
+  and the CPU is a `-8` part, so the CPU is the obvious suspect and a faster one is the
+  obvious test — but the 3.3 V logic levels driving a 5 V part have not been ruled out.
 - **Divisor `0x8000` on PIT counter 0 runs at half rate.** Found by
   [`PITTEST`](tools.md#pittest--does-irq0-survive-being-reprogrammed) and genuinely
   anomalous — neighbouring divisors are correct and the arithmetic in

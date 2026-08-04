@@ -1,6 +1,6 @@
 # sevenseg
 
-Source: [`sevenseg.vhd`](../../sevenseg.vhd) · Instance `sevenseg1` · Clock `c0` (10 MHz)
+Source: [`sevenseg.vhd`](../../sevenseg.vhd) · Instance `sevenseg1` · Clock `c0` (8.33 MHz)
 
 One 7-segment digit that displays a **full byte** by time-multiplexing its two
 nibbles. This is the machine's POST-code and debug display, and it has earned its
@@ -10,7 +10,7 @@ keep repeatedly.
 
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
-| `CLK` | IN | 1 | 10 MHz (`c0`) |
+| `CLK` | IN | 1 | 8.33 MHz (`c0`) |
 | `DATA` | IN | 8 | CPU write data |
 | `ADDR` | IN | 16 | I/O address |
 | `WR` | IN | 1 | I/O write strobe, active low |
@@ -28,18 +28,25 @@ uses it as a scratch I/O delay.
 ## Display cycle
 
 ```
-high nibble   500 ms
-low nibble    500 ms
-blank         1 s
+high nibble   1 s
+low nibble    1 s
+blank         2 s
 repeat
 ```
 
-So `0x73` shows `7` … `3` … dark … `7` … Timing constants assume `CLK = 5 MHz`:
+So `0x73` shows `7` … `3` … dark … `7` … Timing constants are raw cycle counts and
+assume `CLK = 8.333 MHz`:
 
 ```vhdl
-CONSTANT T_NIBBLE : integer := 5_000_000;    -- 500 ms per nibble
-CONSTANT T_BLANK  : integer := 10_000_000;   -- 1 s blank gap
+CONSTANT T_NIBBLE : integer := 8_333_333;    -- 1 s per nibble
+CONSTANT T_BLANK  : integer := 16_666_666;   -- 2 s blank gap
 ```
+
+> Both the source and this page said **500 ms and 1 s** until the figures were checked
+> against the constants. They had said it since the file was written — 5 000 000 cycles
+> on the original 5 MHz bus is one second, not half of one. Every rescale since correctly
+> preserved the *behaviour* and carried the wrong label along with it. A comment that
+> restates a number rather than deriving it cannot catch its own error.
 
 ## The value-change detail
 

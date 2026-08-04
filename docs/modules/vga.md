@@ -1,7 +1,7 @@
 # vga
 
 Source: [`vga.vhd`](../../vga.vhd) · Instance `vga1` · Clocks `c1` (25 MHz pixel) and
-`c0` (10 MHz CPU port) · Font: [`font.vhd`](../../font.vhd), decoded from a real
+`c0` (8.33 MHz CPU port) · Font: [`font.vhd`](../../font.vhd), decoded from a real
 Philips P2120 character ROM by [`tools/mkfont_p2120.py`](../../tools/mkfont_p2120.py)
 
 A CGA-compatible display adapter with its own 16 KB of video RAM, outputting VGA
@@ -12,7 +12,7 @@ timing so a modern monitor can display it.
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
 | `CLK_VGA` | IN | 1 | 25 MHz pixel clock (`c1`) |
-| `CLK_CPU` | IN | 1 | 10 MHz bus clock (`c0`) — the CPU-side port |
+| `CLK_CPU` | IN | 1 | 8.33 MHz bus clock (`c0`) — the CPU-side port |
 | `RESET` | IN | 1 | Synchronous, active high |
 | `ADDR` | IN | 20 | Memory address |
 | `DATAIN` | IN | 8 | Memory write data |
@@ -20,8 +20,14 @@ timing so a modern monitor can display it.
 | `RD` | IN | 1 | `/MEMR`, active low |
 | `IOADDR` | IN | 16 | I/O address — for the mode/colour registers |
 | `IOWR` | IN | 1 | I/O write strobe, active low |
+| `CURSOR` | IN | 14 | CRTC R14/R15 — the cursor cell, from [`crtc6845`](crtc6845.md) |
+| `CUR_TOP` | IN | 5 | CRTC R10(4:0) — first cursor scanline |
+| `CUR_BOT` | IN | 5 | CRTC R11(4:0) — last cursor scanline |
+| `CUR_MOD` | IN | 2 | CRTC R10(6:5) — blink rate select |
 | `HS` | OUT | 1 | Horizontal sync → `VGA_HS` |
 | `VS` | OUT | 1 | Vertical sync → `VGA_VS` |
+| `DISPEN` | OUT | 1 | `'1'` while pixels are being drawn → [`cga_status`](cga_status.md) |
+| `VRET` | OUT | 1 | `'1'` on every non-displayed line → [`cga_status`](cga_status.md) |
 | `RGB` | OUT | 6 | Colour, `RRGGBB` → `VGA_RGB` |
 | `DATAOUT` | INOUT | 8 | CPU read-back of video RAM, tri-state |
 | `DEBUG` | OUT | 1 | Left `OPEN` in the top level |
@@ -99,6 +105,46 @@ Graphics modes use the classic CGA **interleave**: even scanlines at offset
 ```
 graphics byte address = (cga_y & 1) * 0x2000 + 80 * (cga_y / 2) + cga_x / 4
 ```
+
+### No hardware scrolling, and that is a decision
+
+The scan address above starts at zero every field. A real 6845 loads its address counter
+from **R12/R13** instead, and counts from there — which is how software of this era
+scrolls smoothly, by moving one register rather than 4000 bytes of screen.
+[`crtc6845`](crtc6845.md) latches those registers and brings them out; `vga` does not
+consume them.
+
+That was tried. The arithmetic was written to match the chip — a cell index in text,
+doubled to bytes in graphics because the CGA fetches two bytes per count, latched once
+per field because the register is not consulted again until the next one — and it made
+the picture worse in every mode that used it. Commander Keen 4 came back overlapping
+itself, and **Arkanoid's text screen came out shifted**. Text is where the unit is
+unambiguous and the arithmetic is a single addition, so the fault was not the
+word-versus-cell doubling that graphics mode makes the obvious suspect.
+
+What it actually was is not established. The most likely candidate is that **R1, the row
+length, is hardcoded to 80 bytes here** while a scrolling program may well be changing
+it — a start address that is honoured against the wrong stride skews rather than scrolls.
+
+A start address that is honoured but lands in the wrong place is *worse* than one that is
+ignored: software that never scrolls is unaffected by the second and corrupted by the
+first. So it was reverted to exactly the addressing above, and
+[`SCROLLTST`](../tools.md#scrolltst--does-the-display-start-address-land-where-it-should)
+was written to settle it properly — it drives R12/R13 by a known amount against a
+pattern whose position can be read off the screen, which is the instrument that was
+missing the first time.
+
+If it is wired in again, two things go with it:
+
+- **Latch it once per field**, at the vertical wrap and nowhere else. Adding it at every
+  pixel — the first attempt — means a write part way down the screen moves everything
+  below it and nothing above, and the picture splits at whatever scanline the write
+  landed on.
+- **Synchronise it.** `START` is written by the CPU on `c0` and would be read on `c1`; an
+  unsynchronised sample of fourteen bits taken once a field is a metastability hazard
+  that shows up as one field displayed from a nonsense address. `CURSOR` crosses the same
+  boundary unsynchronised and gets away with it, because a cursor in the wrong cell for
+  one field of 59 is invisible and a scroll position is not.
 
 ## Colour decode
 

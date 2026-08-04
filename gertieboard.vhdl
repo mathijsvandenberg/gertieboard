@@ -432,9 +432,15 @@ BEGIN
     );
 
   fdc1 : ENTITY work.fdc8272
-    -- CLK is the 5 MHz CPU-bus clock (c0), NOT the 50 MHz reference: the
+    -- CLK is the 8.33 MHz CPU-bus clock (c0), NOT the 50 MHz reference: the
     -- entity's own defaults are 50 MHz / 115200, which would divide down to
     -- ~11.5 kbaud on this clock. These were symbol parameters in the old .bdf.
+    --
+    -- BAUD_DIV is CLK_FREQ / BAUD and is an INTEGER divide, so the link does not
+    -- run at 1 Mbaud: 8333333 / 8 = 1,041,667, which is 4.2 % fast. The host
+    -- stays set to 1000000 and it works, because 4.2 % is inside what an 8N1
+    -- receiver tolerates -- but it is inside it, not comfortably clear of it.
+    -- Only 10, 5 and 2 MHz divide exactly.
     GENERIC MAP (
       CLK_FREQ             => 8333333,
       BAUD                 => 1000000
@@ -484,7 +490,7 @@ BEGIN
     );
 
   inst3 : ENTITY work.ps2_kbd_ppi
-    -- clk here is c3 = 50 MHz (not the 5 MHz entity default): the PS/2 glitch
+    -- clk here is c3 = 50 MHz (not the entity's 5 MHz default): the PS/2 glitch
     -- filter, frame watchdog and KB_HOLD timeout are all derived from this.
     GENERIC MAP (
       CLK_FREQ_HZ          => 50000000

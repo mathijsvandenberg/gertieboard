@@ -1,6 +1,6 @@
 # timer8253
 
-Source: [`timer8253.vhd`](../../timer8253.vhd) · Instance `timer1` · Clock `c2` (1.1905 MHz)
+Source: [`timer8253.vhd`](../../timer8253.vhd) · Instance `timer1` · Clock `c0` (8.33 MHz bus), counting at `c2` (1.1905 MHz)
 
 An Intel 8253 PIT, simplified for IBM 5160 use. This is the module that produces
 the 18.2 Hz system tick and the speaker tone.
@@ -9,7 +9,8 @@ the 18.2 Hz system tick and the speaker tone.
 
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
-| `CLK` | IN | 1 | **1.1905 MHz** (`c2`) — the counter clock, not the bus clock |
+| `CLK` | IN | 1 | **8.33 MHz** (`c0`) — the *bus* clock, so the register interface can see an I/O cycle |
+| `CNT_TICK` | IN | 1 | **1.1905 MHz** (`c2`) — the counting rate, fed in as data and used as an enable |
 | `DATA` | IN | 8 | CPU write data |
 | `DATA_OUT` | OUT | 8 | Read data, `'Z'` when not addressed |
 | `ADDR` | IN | 16 | I/O address |
@@ -31,11 +32,45 @@ the 18.2 Hz system tick and the speaker tone.
 | `0x42` | R/W | Counter 2 — speaker tone |
 | `0x43` | W | Control word, or counter-latch command |
 
+## Two clocks, and why
+
+The counters advance at 1.19 MHz. The **register interface does not run there** — it
+runs on the bus clock, and `c2` arrives as an input sampled through a three-stage
+synchroniser and used as a count enable:
+
+```vhdl
+ct_sync <= ct_sync(1 DOWNTO 0) & CNT_TICK;   -- in the CLK process
+ct_en   <= ct_sync(1) AND NOT ct_sync(2);    -- one CLK-wide pulse per c2 edge
+...
+ELSIF (G0 = '1' AND ct_en = '1') THEN        -- each counter
+```
+
+**This module used to be clocked entirely from `c2`, and that was the machine's real
+speed ceiling.** A PIT register interface running at 1.19 MHz has ~840 ns between edges.
+At 5 MHz the CPU's I/O write strobe was wide enough to be caught anyway and everything
+worked; every attempt to raise the bus clock made the window narrower relative to the
+strobe until writes to the PIT started being missed — a game reprogramming counter 0
+would get some of its bytes accepted and some dropped. The symptom was a game crashing
+during play at 6.25 MHz and above, which reads as a CPU or memory limit and was chased
+as one for a long time.
+
+With the interface on `c0`, 8.333 MHz runs. Alley Cat plays where it crashed before.
+
+> The rate is exact and only the *phase* of the tick is resynchronised, which no 8253
+> user can observe. What the timing analyser sees is a clock net driving a register's D
+> input, which it times against `c2`'s own edges — meaningless here, and it showed up as
+> a −0.310 ns hold violation. Absorbing that is the synchroniser's entire job, so there
+> is a `set_false_path` for it in [`gertieboard.sdc`](../../gertieboard.sdc).
+
 ## Clock rate
 
 `c2` is 50 MHz ÷ 42 = **1.19048 MHz**, against the XT's 1.193182 MHz — a 0.23 %
 error. That is close enough that the DOS clock keeps good time and timer-paced
 software runs at the right speed.
+
+It is divided from the 50 MHz reference and **not** from `c0`, so it does not move when
+the bus clock does. That is what makes it an honest time reference — and it is what the
+BIOS measures the CPU clock against at POST.
 
 > The ÷42 divider is deliberate. An earlier investigation misread the PLL's
 > `inclk0_input_frequency` (which is a **period in picoseconds**) and concluded the

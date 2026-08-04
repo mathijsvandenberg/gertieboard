@@ -1,6 +1,6 @@
 # busdecode
 
-Source: [`busdecode.vhd`](../../busdecode.vhd) · Instance `busdecode1` · Clock `c0` (10 MHz)
+Source: [`busdecode.vhd`](../../busdecode.vhd) · Instance `busdecode1` · Clock `c0` (8.33 MHz)
 
 The glue between the real CPU and everything else. It latches the multiplexed
 address, generates the bus strobes, drives the READY handshake, arbitrates the
@@ -12,7 +12,7 @@ memory bus for DMA, and implements the boot ROM overlay and the DMA page registe
 
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
-| `CLK` | IN | 1 | 10 MHz bus clock (`c0`) |
+| `CLK` | IN | 1 | 8.33 MHz bus clock (`c0`) |
 | `AD` | INOUT | 8 | Multiplexed address/data — connects straight to `CPU_AD` |
 | `A` | IN | 12 | Address bits 19:8 (non-multiplexed) |
 | `RD` | IN | 1 | CPU read strobe, active low |
@@ -77,16 +77,20 @@ READY <= '1' WHEN (T >= 64 AND MEMADDR AND IOM = '0')
 `T` counts CPU clocks since `ALE`. Memory cycles are governed by `RAM_READY`; I/O
 completes after 3 clocks.
 
-> ⚠️ **The `T >= 64` clause is a fault backstop, not a timing parameter.** It must
-> stay longer than the slowest legitimate access. It was originally `T >= 10`,
-> which aborted every PSRAM cache-line fill and released the CPU before the data
-> bus was driven — silent corruption on every miss. It is **128** clocks, which is
-> 12.8 µs at the 10 MHz `c0`. The count is in CPU clocks, so it was doubled when `c0`
-> was: 64 would have become 6.4 µs against a ~4.9 µs worst case. The PSRAM side runs
-> on `c3` and did not get faster, so the deadline it must beat has not moved.
-> Previously 64 clocks at 5 MHz,
-> comfortably past the worst case (~24 clocks) while still recovering from a real
-> fault.
+> ⚠️ **The `T >= 128` clause is a fault backstop, not a timing parameter.** It must
+> stay longer than the slowest legitimate access. It was originally `T >= 10`, which
+> aborted every PSRAM cache-line fill and released the CPU before the data bus was
+> driven — silent corruption on every miss.
+>
+> It is **128** clocks, which is **15.4 µs** at the 8.33 MHz `c0`. The count is in CPU
+> clocks, so its *duration* shrinks as `c0` rises while the thing it guards does not:
+> the PSRAM side runs on `c3` and did not get faster, so the deadline it must beat has
+> not moved. It was 64 clocks at 5 MHz (12.8 µs) and was doubled when the bus clock was
+> raised, precisely so the margin did not quietly evaporate.
+>
+> This is the dangerous class of constant. Nothing breaks visibly when it is missed — a
+> backstop that fires early releases the CPU onto an undriven bus and returns rubbish,
+> which does not look like a clock problem.
 
 `MEMADDR` is `ADDR < 0xA0000` or `ADDR >= 0xE0000`.
 

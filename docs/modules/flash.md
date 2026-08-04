@@ -1,6 +1,6 @@
 # flash
 
-Source: [`flash.vhd`](../../flash.vhd) · Instance `flash1` · Clock `c0` (10 MHz)
+Source: [`flash.vhd`](../../flash.vhd) · Instance `flash1` · Clock `c0` (8.33 MHz)
 
 An SPI byte-transfer engine for the on-board serial FLASH — an **ISSI IS25LP016D**,
 16 Mbit / **2 MByte**. This is the backing store for the [fixed disk](../fixed-disk.md)
@@ -10,7 +10,7 @@ and, optionally, for a copy of the BIOS.
 
 | Port | Dir | Width | Purpose |
 |---|---|---|---|
-| `CLK` | IN | 1 | 10 MHz (`c0`) |
+| `CLK` | IN | 1 | 8.33 MHz (`c0`) |
 | `ADDR` | IN | 16 | I/O address |
 | `DATAIN` | IN | 8 | CPU write data |
 | `RD` / `WR` | IN | 1 | I/O strobes, active low |

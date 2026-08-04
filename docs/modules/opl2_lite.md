@@ -1,6 +1,6 @@
 # opl2_lite — AdLib front end
 
-**I/O `0x388`–`0x389`** · instance `opl2lite1` · clocked from `c0` (10 MHz) ·
+**I/O `0x388`–`0x389`** · instance `opl2lite1` · clocked from `c0` (8.33 MHz) ·
 [`opl2_lite.vhd`](../../opl2_lite.vhd)
 
 Answers the AdLib detection protocol honestly and turns what a game writes to the OPL2
@@ -86,18 +86,24 @@ the source looks too simple to be doing anything.
 `BAUD_DIV`, so the module does not care which clock it is wired to — but **it must
 match**, because the detection timers depend on real time.
 
-At 10 MHz the sample divider truncates to 201, giving 49751 Hz against the ideal 49716:
-**+1.2 cents**, uniform across the whole range so nothing is out of tune with itself.
+At 8.333 MHz the sample divider truncates to 167, giving 49900 Hz against the ideal
+49716: **+6.4 cents**, uniform across the whole range, so nothing is out of tune with
+itself even though everything is fractionally sharp.
 
-Doubling the bus clock made the pitch eight times more accurate for free — a bigger
-divisor quantises more finely. At the old 5 MHz it truncated to 100 and came out +9.8
-cents. The timers land exactly too: `10e6/12500 = 800` and `10e6/3125 = 3200` are whole
-numbers, so 80 µs and 320 µs are now exact rather than rounded.
+Raising the bus clock improves this for free — a bigger divisor quantises more finely.
+At the old 5 MHz the divider truncated to 100 and came out **+9.8 cents**; 10 MHz would
+have given +1.2, because 10e6/49716 lands close to a whole number by luck rather than by
+design. The error does not fall monotonically with clock rate, it depends on where the
+truncation lands.
+
+The timers are near-exact at this rate: `8333333/12500 = 666` gives 79.92 µs against 80,
+and `8333333/3125 = 2666` gives 319.92 µs against 320 — 0.1 % short, far inside what the
+detection handshake cares about.
 
 ## Output and mixing
 
 The buzzer is one bit, so nine square waves are summed to a 0–9 value and rendered as
-PWM against a 4-bit counter. At 10 MHz that carrier is 625 kHz — far above anything a
+PWM against a 4-bit counter. At 8.333 MHz that carrier is 521 kHz — far above anything a
 piezo can follow, so it hears the average.
 
 `SND` is combined with the PC speaker **in the top level**, not here:
@@ -128,10 +134,13 @@ resulting pitch:
 ```
 
 Pitch came out **+0 to +2 cents** across `FNum`/`Block` combinations from 110 Hz to
-6.2 kHz, consistent with the +1.2 the divisor predicts; the spread is the measuring
-window, not the hardware. An earlier run at 5 MHz showed a *varying* error of 8–22 cents,
-which was a 200 ms window quantising to 5 Hz rather than a real defect — worth knowing,
-because the honest-looking number was the wrong one.
+6.2 kHz when the module ran at 10 MHz, consistent with the +1.2 that divisor predicts;
+the spread is the measuring window, not the hardware. An earlier run at 5 MHz showed a
+*varying* error of 8–22 cents, which was a 200 ms window quantising to 5 Hz rather than a
+real defect — worth knowing, because the honest-looking number was the wrong one.
 
-The model was re-run against `CLK_HZ = 10_000_000` when `c0` was doubled, rather than
-assuming the figures scaled.
+**Those measurements have not been repeated at 8.333 MHz.** The divisor arithmetic above
+predicts a uniform +6.4 cents, and being uniform is what matters musically, but that is a
+calculation and not a measurement. Re-run the model against `CLK_HZ = 8_333_333` before
+relying on it — the reason this section exists is that the figures were once assumed to
+scale and did not.

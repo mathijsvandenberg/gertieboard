@@ -7,17 +7,23 @@ USE  IEEE.STD_LOGIC_UNSIGNED.all;
 -- sevenseg.vhd  --  one digit shows a FULL BYTE by time-multiplexing.
 --
 -- A byte written to I/O port 0x80 is displayed as:
---     high nibble   for T_NIBBLE   (500 ms)
---     low  nibble   for T_NIBBLE   (500 ms)
---     blank (gap)   for T_BLANK    (1 s)
+--     high nibble   for T_NIBBLE   (1 s)
+--     low  nibble   for T_NIBBLE   (1 s)
+--     blank (gap)   for T_BLANK    (2 s)
 --   then it repeats. So 0x73 shows  "7" ... "3" ......(dark)......  "7" ...
 --
 -- Whenever a NEW value is written, the cycle restarts from the high nibble, so
 -- a POST code that the firmware halts on is shown cleanly from the start and
 -- keeps repeating.
 --
--- Timing assumes CLK = 10 MHz (c0). The two constants below are raw cycle
+-- Timing assumes CLK = 8.333 MHz (c0). The two constants below are raw cycle
 -- counts, so they must be rescaled if c0 ever changes again.
+--
+-- The figures above used to say 500 ms and 1 s, and had since the file was
+-- written: 5_000_000 cycles on the original 5 MHz bus is one second, not half of
+-- one. Every rescale since has correctly preserved the BEHAVIOUR and carried the
+-- wrong label forward with it, which is the failure mode of a comment that
+-- restates a number instead of deriving it.
 --------------------------------------------------------------------------------
 
 ENTITY sevenseg IS
@@ -38,8 +44,8 @@ END sevenseg;
 ARCHITECTURE behavior OF sevenseg IS
 
   -- 8.333 MHz: 1 ms = 8333 cycles.
-  CONSTANT T_NIBBLE : integer := 8_333_333;            -- 500 ms per nibble
-  CONSTANT T_BLANK  : integer := 16_666_666;           -- 1 s blank gap
+  CONSTANT T_NIBBLE : integer := 8_333_333;            -- 1 s per nibble
+  CONSTANT T_BLANK  : integer := 16_666_666;           -- 2 s blank gap
 
   CONSTANT P_LO     : integer := T_NIBBLE;             -- low nibble starts here
   CONSTANT P_BLANK  : integer := 2*T_NIBBLE;           -- blank starts here

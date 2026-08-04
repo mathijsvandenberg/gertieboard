@@ -38,9 +38,11 @@ WRITE:  FPGA -> host : 0x33 0x02 C H R <512 bytes>
 C = 0xFF  ->  serve from the BIOS image at offset (R-1) * 512
 ```
 
-**1 Mbaud.** If the host has to be set to 500000 to work, `c0` is running at 5 MHz
-instead of 10 MHz — `fdc8272`'s `BAUD_DIV = CLK_FREQ / BAUD` scales the real rate
-directly.
+**1 Mbaud, nominally.** `fdc8272` computes `BAUD_DIV = CLK_FREQ / BAUD` as an integer
+divide, so the real rate scales with `c0` and rarely lands on the round number. At the
+current 8.33 MHz it is `8333333 / 8` = **1,041,667** — 4.2 % fast, which the host's
+1000000 setting tolerates because 8N1 framing allows roughly 5 %. Only 10, 5 and 2 MHz
+divide exactly. If the host has to be halved to work, `c0` has halved.
 
 ## DOS diagnostics
 
@@ -404,6 +406,40 @@ Two patterns go to R15 because a stuck bus can match one by luck. The `00` expec
 R10 matters as much as the values that echo — a board answering `55` there would be
 answering, but not like a 6845. Before [`crtc6845`](modules/crtc6845.md) existed every
 line read `FF`, and Prince of Persia and Keen 4 both refused to start.
+
+### SCROLLTST — does the display start address land where it should?
+
+`CRTCTEST` proves the CRTC registers can be *written and read*. This proves what one of
+them **does**: it drives R12/R13, the display start address, and puts a pattern on the
+screen whose position can be read off.
+
+It exists because a photograph could not answer the question. Hardware scrolling was
+wired into [`vga`](modules/vga.md), Keen 4 came back overlapping itself, and there was no
+way to tell whether the addressing arithmetic was wrong or whether Keen wanted something
+else from the card. The screen was the only instrument, and it was not enough.
+
+Two tests, arrow keys in both, each with a step whose size is known in advance:
+
+| Mode | Pattern | One press of DOWN must |
+|---|---|---|
+| Text | 51 numbered rows, `00 AAAA…`, `01 BBBB…`, past the bottom of the visible 25 | put row `01` at the top, and change nothing else |
+| Mode 4 | A rule every 10 CGA scanlines, plus one 4-pixel block per scanline stepping right | move the picture **two** CGA scanlines — 40 counts is 80 bytes, because the CGA fetches two bytes per count |
+
+Four counts of one, so the outcome is diagnostic rather than a verdict:
+
+- moves by the stated amount, cleanly → the addressing is right, and the game wants
+  something else (R1, the row length, is hardcoded to 80 bytes)
+- moves by half or double → the word-versus-cell doubling is wrong
+- moves the right amount but tears → the per-field latch is not holding for the field
+- does not move → `START` is not reaching `vga`
+
+One press of RIGHT skews the *whole screen* left by one character, and that is correct: a
+6845 has one address counter and no concept of a line. Anything tidier than a skew means
+the implementation is inventing behaviour the chip does not have.
+
+The start address is written during vertical retrace, which is what period software does.
+Writing it elsewhere is legal — the register is only consulted once a field — so if this
+behaves differently outside retrace, the latch is the fault.
 
 ### VIDSPY — did the video call return?
 

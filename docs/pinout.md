@@ -40,7 +40,7 @@ afterwards, so it is bidirectional.
 | `CPU_DTR` | IN | `PIN_R14` | data transmit/receive direction |
 | `CPU_INTA` | IN | `PIN_L14` | interrupt acknowledge |
 | `CPU_HLDA` | IN | `PIN_L16` | hold acknowledge — CPU has released the bus |
-| `CPU_CLK` | OUT | `PIN_J14` | 10 MHz clock **to** the CPU (PLL `c0`) |
+| `CPU_CLK` | OUT | `PIN_J14` | 8.33 MHz clock **to** the CPU (PLL `c0`) |
 | `CPU_RST` | OUT | `PIN_J13` | reset to the CPU |
 | `CPU_RDY` | OUT | `PIN_J16` | READY / wait-state handshake |
 | `CPU_INTR` | OUT | `PIN_K15` | maskable interrupt request (from 8259) |

@@ -8,7 +8,8 @@ marketing: if something is listed as working it has been run on hardware.
 | Feature | Detail |
 |---|---|
 | **Real CPU** | NEC V20 (µPD70108C-8) on the [top board](hardware.md), FPGA as the surrounding chipset |
-| **10 MHz bus** | `c0` drives the CPU and the whole I/O bus. Timing closes with margin on every domain — [clkgen/pll](modules/clkgen-pll.md) |
+| **8.33 MHz bus** | `c0` = 50 MHz ÷ 6 drives the CPU and the whole I/O bus, 1.67× the 5 MHz this ran at for most of its life. 10 MHz does not boot on the current V20 — [clkgen/pll](modules/clkgen-pll.md) |
+| **Measured CPU clock** | POST times a calibrated loop against PIT channel 2 and prints the result, so the displayed rate is what the machine is *doing* rather than what a constant says — [bios](bios.md) |
 | **Runs standalone** | FPGA configures from its own flash, BIOS from the on-board SPI flash, DOS from the USB disk — nothing attached but power and a monitor — [boot](boot.md) |
 | **Boots MS-DOS 4.01** | The Dutch release shipped with the Philips P2120, **installed onto `C:` from its original install floppies** — see [storage](storage.md#installing-an-operating-system-onto-it). PC-DOS 3.30 runs too, from a served floppy image |
 | **USB hard disk, `C:`** | Bulk-Only Transport and SCSI in the BIOS over the fabric host controller. `FDISK`, `FORMAT`, `CHKDSK` pass; 504 MB addressable — [storage](storage.md) |
@@ -30,15 +31,26 @@ marketing: if something is listed as working it has been run on hardware.
 | **6845 CRTC registers** | `0x3D4`/`0x3D5` answer, so software can *detect* the card. Prince of Persia and Commander Keen both refused to start without this — [crtc6845](modules/crtc6845.md) |
 | **Blinking text cursor** | Position and shape from CRTC R10/R11/R14/R15, scanlines doubled for the 16-line cell — [vga](modules/vga.md#text-cursor) |
 | **AdLib at `0x388`** | Detection handshake, and nine channels rendered as square waves on the buzzer. Not FM synthesis — [opl2_lite](modules/opl2_lite.md) |
-| **Runs real software** | Alley Cat, Digger, Sopwith, Pacman, Prince of Persia, Commander Keen 4, the DOS utilities |
+| **Runs real software** | Alley Cat, Digger, Sopwith, Pacman, Arkanoid, Prince of Persia, Commander Keen 4, the DOS utilities |
 
 Nothing is currently known-broken. The last open item — booting the BIOS from SPI
 flash — closed when the boot ROM stopped reading the image as one 64 KB burst; see
 [gotchas](gotchas.md#a-long-spi-read-does-not-come-back-intact).
 
 One known *gap* rather than a fault: CRTC `START` (R12/R13, the display start address)
-is latched but not yet wired into [`vga`](modules/vga.md), so anything that scrolls by
+is latched but not wired into [`vga`](modules/vga.md), so anything that scrolls by
 moving it will not scroll. Software that redraws instead is unaffected.
+
+**It was wired in once, and taken out again.** Honouring it made Commander Keen 4
+overlap itself and shifted Arkanoid's *text* screen — and text is where the unit is
+unambiguous and the arithmetic is a single addition, so the fault was not the
+word-versus-cell doubling that graphics mode makes the obvious suspect. What was never
+established is what it actually was; a likely candidate is that R1, the row length, is
+hardcoded to 80 bytes in `vga` while a scrolling program may be changing it. Rather than
+keep guessing with the screen as the only instrument,
+[`SCROLLTST`](tools.md#scrolltst--does-the-display-start-address-land-where-it-should)
+drives R12/R13 by a known amount against a pattern whose position can be read off the
+screen. Run that first if this is picked up again.
 
 ## Planned
 
@@ -156,13 +168,13 @@ likely under CERN-OHL-P, since MIT does not really fit a PCB.
   of a rebuild. The buffer itself is already in M9K; this is the remaining half of that
   idea. Reasoning in [fixed disk](fixed-disk.md#where-the-buffer-lives).
 - **Real floppy drive** on a physical connector, instead of serving images.
-- **Make `c0` a single parameter.** It is now 10 MHz, but the rate still lives in six
+- **Make `c0` a single parameter.** It is now 8.33 MHz, but the rate still lives in six
   places rather than one, and they must be kept in step by hand:
 
   | Where | What it sets |
   |---|---|
   | `pll.vhd` `clk0_divide_by` | the rate itself — **and** `DIV_FACTOR0` in the Retrieval info, see [clkgen/pll](modules/clkgen-pll.md#the-megawizard-metadata-can-disagree-with-the-hardware) |
-  | `fdc8272` `CLK_FREQ` generic | the host link's baud divider — wrong and drive `A:` dies quietly |
+  | `fdc8272` `CLK_FREQ` generic | the host link's baud divider — wrong and drive `A:` dies quietly. `BAUD_DIV` is an integer divide, so 8.33 MHz gives **1,041,667 baud** against the host's 1,000,000: 4.2 % fast, inside 8N1 tolerance but not comfortably. Only 10, 5 and 2 MHz divide exactly |
   | `opl2_lite` `CLK_HZ` generic | AdLib sample rate and both detection timers |
   | `sevenseg` `T_NIBBLE`/`T_BLANK` | raw cycle counts |
   | `busdecode` READY backstop | counted in CPU clocks, so its *duration* scales |

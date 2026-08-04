@@ -72,10 +72,10 @@ host. Two of the device's four PLLs are used.
 
 | Output | Divider | Frequency | Drives |
 |---|---|---|---|
-| `c0` | ÷5 | **10 MHz** | `CPU_CLK` (the real CPU) and the entire I/O bus: `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`, `fdc8272`, `flash`, `bootrom`, and `vga.CLK_CPU` |
+| `c0` | ÷6 | **8.333 MHz** | `CPU_CLK` (the real CPU) and the entire I/O bus: `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`, `fdc8272`, `flash`, `bootrom`, and `vga.CLK_CPU` |
 | `c1` | ÷2 | **25 MHz** | `vga.CLK_VGA` — VGA pixel clock |
-| `c2` | ÷42 | **1.1905 MHz** | `timer8253` — within 0.23 % of the XT's 1.193182 MHz |
-| `c3` | ÷1 | **50 MHz** | `mem_hybrid` (PSRAM), `ps2_kbd_ppi`, `cga_status` |
+| `c2` | ÷42 | **1.1905 MHz** | `timer8253`'s *counting* rate (its registers run on `c0`) — within 0.23 % of the XT's 1.193182 MHz |
+| `c3` | ÷1 | **50 MHz** | `mem_hybrid` (PSRAM), `ps2_kbd_ppi` |
 | `c4` | — | unused | |
 
 `pll48` is separate because 48 MHz is 50 × 24/25 and therefore **not** integer-related
@@ -91,17 +91,29 @@ that put −2.483 ns of setup slack on `c0`.
 
 ### Generics that must match the clock
 
-Two modules default to the wrong frequency for this board, and both fail
-*silently* rather than loudly. The top level overrides them:
+Three modules take the clock rate as a generic, and getting one wrong fails *silently*
+rather than loudly. The top level sets all three:
 
 ```vhdl
-fdc1  : fdc8272     GENERIC MAP (CLK_FREQ    => 5000000,  BAUD => 1000000)
-inst3 : ps2_kbd_ppi GENERIC MAP (CLK_FREQ_HZ => 50000000)
+fdc1      : fdc8272     GENERIC MAP (CLK_FREQ    => 8333333,  BAUD => 1000000)
+inst3     : ps2_kbd_ppi GENERIC MAP (CLK_FREQ_HZ => 50000000)
+opl2lite1 : opl2_lite   GENERIC MAP (CLK_HZ      => 8_333_333)
 ```
 
 With `fdc8272`'s defaults (50 MHz / 115200) the serial link runs at ~11.5 kbaud
-instead of 1 Mbaud. With `ps2_kbd_ppi`'s default (5 MHz) the PS/2 glitch filter,
-frame watchdog and keyboard-hold timeout are all 10× too short.
+instead of 1 Mbaud. Note that `BAUD_DIV` is an integer divide, so even when set
+correctly the real rate is `8333333 / 8` = **1,041,667** rather than the round number
+asked for — 4.2 % fast, which 8N1 framing absorbs. Only 10, 5 and 2 MHz divide exactly.
+
+With `ps2_kbd_ppi`'s default (5 MHz) the PS/2 glitch filter,
+frame watchdog and keyboard-hold timeout are all 10× too short. `opl2_lite`'s `CLK_HZ`
+sets the 49716 Hz sample rate and both detection timers, and a wrong value makes the
+AdLib fail its detection handshake — a game then decides there is no card, which looks
+like the card not being implemented rather than being mistuned.
+
+Each of these must be changed by hand whenever `c0` moves. See
+[status](status.md#ideas-unscheduled) for the full list of places the bus rate is
+written down.
 
 ## Reset
 
