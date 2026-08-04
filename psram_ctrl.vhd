@@ -34,6 +34,7 @@
 
 LIBRARY IEEE;
 USE  IEEE.STD_LOGIC_1164.all;
+USE  work.memmap.ALL;
 USE  IEEE.STD_LOGIC_ARITH.all;
 USE  IEEE.STD_LOGIC_UNSIGNED.all;
 
@@ -269,9 +270,7 @@ BEGIN
   -- ordinary. That is precisely how the boot loader died at POST code 02 --
   -- its first stack push, to 0x7C00, which mem_hybrid had just handed to a
   -- controller still convinced low memory was somebody else's.
-  is_ram    <= '1' WHEN (ADDR < x"A0000")
-                     OR  ((ADDR >= x"F0000") AND (ADDR < x"FC000"))
-                ELSE '0';
+  is_ram    <= owned_by_psram(ADDR);
 
   cpu_rd_op <= is_ram AND (NOT RD);
   cpu_wr_op <= is_ram AND (NOT WR);

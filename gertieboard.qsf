@@ -229,6 +229,7 @@ set_global_assignment -name VHDL_FILE font.vhd
 set_global_assignment -name VHDL_FILE gertieboard.vhdl
 set_global_assignment -name VHDL_FILE clkgen.vhd
 set_global_assignment -name VHDL_FILE sevenseg.vhd
+set_global_assignment -name VHDL_FILE memmap.vhd
 set_global_assignment -name VHDL_FILE busdecode.vhd
 set_global_assignment -name VHDL_FILE vga.vhd
 set_global_assignment -name QIP_FILE pll.qip

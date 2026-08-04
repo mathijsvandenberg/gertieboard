@@ -22,6 +22,7 @@
 
 LIBRARY IEEE;
 USE  IEEE.STD_LOGIC_1164.all;
+USE  work.memmap.ALL;
 USE  IEEE.STD_LOGIC_ARITH.all;
 USE  IEEE.STD_LOGIC_UNSIGNED.all;
 
@@ -65,8 +66,8 @@ ARCHITECTURE m9k OF m9k_mem IS
 
 BEGIN
 
-  in_bios <= '1' WHEN (ADDR >= x"FC000") ELSE '0';
-  in_buf  <= '1' WHEN ((ADDR >= x"E0000") AND (ADDR < x"E1000")) ELSE '0';
+  in_bios <= owned_by_bios(ADDR);
+  in_buf  <= owned_by_diskbuf(ADDR);
   in_win  <= in_bios OR in_buf;
 
   -- The BIOS maps 1:1 from 0xFC000; the 4 KB buffer is packed above it.

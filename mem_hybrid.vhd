@@ -20,6 +20,7 @@
 
 LIBRARY IEEE;
 USE  IEEE.STD_LOGIC_1164.all;
+USE  work.memmap.ALL;
 USE  IEEE.STD_LOGIC_ARITH.all;
 USE  IEEE.STD_LOGIC_UNSIGNED.all;
 
@@ -91,9 +92,7 @@ BEGIN
   --
   -- This also FREES M9K: 16 KB of BIOS plus 4 KB of buffer against the 36 KB
   -- the old split used.
-  sel_ps <= '1' WHEN (ADDR < x"A0000")
-                  OR ((ADDR >= x"F0000") AND (ADDR < x"FC000"))
-            ELSE '0';
+  sel_ps <= owned_by_psram(ADDR);
 
   u_m9k : m9k_mem
     PORT MAP( CLK_RAM => CLK_RAM, RESET => RESET, DATAIN => DATAIN, ADDR => ADDR,

@@ -1,5 +1,6 @@
 LIBRARY IEEE;
 USE  IEEE.STD_LOGIC_1164.all;
+USE  work.memmap.ALL;
 USE  IEEE.STD_LOGIC_ARITH.all;
 USE  IEEE.STD_LOGIC_UNSIGNED.all;
 
@@ -163,7 +164,7 @@ BEGIN
 	--MEMADDR <= TRUE WHEN (ADDR > x"09FFF" AND ADDR < x"A0000") OR (ADDR > x"DFFFF" AND ADDR < x"F0000") ELSE FALSE;
 
 	-- BIOS area (0xF0000..0xFFFFF) is now PSRAM as well, so treat it as memory.
-	MEMADDR <= TRUE WHEN (ADDR < x"A0000") OR (ADDR >= x"E0000") ELSE FALSE;
+	MEMADDR <= (needs_ram_handshake(ADDR) = '1');
 
 
 

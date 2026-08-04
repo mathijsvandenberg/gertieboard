@@ -1,0 +1,99 @@
+--------------------------------------------------------------------------------
+-- memmap.vhd  --  the memory map, in ONE place
+--
+-- Four modules need to agree about which addresses belong to whom:
+--
+--     mem_hybrid   routes the access to a controller
+--     psram_ctrl   decides whether the access is its business
+--     m9k_mem      decides the same, for its two windows
+--     busdecode    decides whether to wait on RAM_READY at all
+--
+-- They used to answer that question independently, in four hand-written
+-- expressions. Changing one of them is how the boot loader came to hang at POST
+-- code 02: mem_hybrid had been taught that low memory was PSRAM, psram_ctrl had
+-- not, so the first stack push was routed to a controller that did not claim the
+-- address. Nothing drove READY and the CPU stopped on 0x7C00 -- an address that
+-- looks entirely ordinary. There was no error and there could not be one, and
+-- finding it meant reasoning about which instruction was the first to touch the
+-- stack.
+--
+-- So the boundaries live here and the modules ask rather than restate. A change
+-- to the map is now a change to one file.
+--
+-- THE MAP
+--
+--     0x00000..0x9FFFF   PSRAM    all 640 KB of conventional memory, ONE speed
+--     0xA0000..0xDFFFF   nothing  EGA window and the CGA framebuffer, which
+--                                 vga.vhd answers for itself
+--     0xE0000..0xE0FFF   M9K      fixed-disk block buffer, invisible to DOS
+--     0xE1000..0xEFFFF   nothing
+--     0xF0000..0xFBFFF   PSRAM    0xFF fill. Kept backed because BIOSFLSH reads
+--                                 the whole 64 KB F-segment when copying the
+--                                 BIOS to flash
+--     0xFC000..0xFFFFF   M9K      the BIOS image, 16 KB, zero wait states
+--
+-- Conventional memory is deliberately uniform. It used to be split -- low 32 KB
+-- on-chip, the rest serial -- which made the 640 KB a machine with two speeds,
+-- where a program's timing depended on where DOS happened to load it. Software
+-- of this era calibrates delay loops against itself, so that is not a detail.
+--------------------------------------------------------------------------------
+
+LIBRARY IEEE;
+USE  IEEE.STD_LOGIC_1164.ALL;
+USE  IEEE.STD_LOGIC_UNSIGNED.ALL;
+
+PACKAGE memmap IS
+
+  -- Boundaries. Every one of them is used at least twice below, which is the
+  -- point: they cannot drift apart any more.
+  CONSTANT CONV_END : std_logic_vector(19 DOWNTO 0) := x"A0000";  -- 640 KB ends
+  CONSTANT BUF_BASE : std_logic_vector(19 DOWNTO 0) := x"E0000";  -- disk buffer
+  CONSTANT BUF_END  : std_logic_vector(19 DOWNTO 0) := x"E1000";
+  CONSTANT FSEG_BASE: std_logic_vector(19 DOWNTO 0) := x"F0000";  -- F-segment
+  CONSTANT BIOS_BASE: std_logic_vector(19 DOWNTO 0) := x"FC000";  -- BIOS image
+
+  -- Who owns this address?
+  FUNCTION owned_by_psram   (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic;
+  FUNCTION owned_by_bios    (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic;
+  FUNCTION owned_by_diskbuf (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic;
+
+  -- Does a memory cycle here have to wait on RAM_READY?
+  --
+  -- Deliberately BROADER than the union of the three owners: it also covers
+  -- 0xE1000..0xEFFFF, which nothing backs. That is the behaviour busdecode has
+  -- always had, and it is kept bit-for-bit so introducing this package changes
+  -- no logic. An unbacked address there falls to the T >= 128 backstop and
+  -- returns rubbish, which is what it did before and is a fair answer for
+  -- reading memory that is not there.
+  FUNCTION needs_ram_handshake (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic;
+
+END PACKAGE memmap;
+
+
+PACKAGE BODY memmap IS
+
+  FUNCTION owned_by_psram (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
+  BEGIN
+    IF (a < CONV_END) OR ((a >= FSEG_BASE) AND (a < BIOS_BASE)) THEN
+      RETURN '1';
+    ELSE
+      RETURN '0';
+    END IF;
+  END FUNCTION;
+
+  FUNCTION owned_by_bios (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
+  BEGIN
+    IF a >= BIOS_BASE THEN RETURN '1'; ELSE RETURN '0'; END IF;
+  END FUNCTION;
+
+  FUNCTION owned_by_diskbuf (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
+  BEGIN
+    IF (a >= BUF_BASE) AND (a < BUF_END) THEN RETURN '1'; ELSE RETURN '0'; END IF;
+  END FUNCTION;
+
+  FUNCTION needs_ram_handshake (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
+  BEGIN
+    IF (a < CONV_END) OR (a >= BUF_BASE) THEN RETURN '1'; ELSE RETURN '0'; END IF;
+  END FUNCTION;
+
+END PACKAGE BODY memmap;
