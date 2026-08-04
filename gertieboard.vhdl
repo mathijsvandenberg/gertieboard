@@ -215,9 +215,13 @@ BEGIN
       KBD_CLEAR            => n_kbd_clear
     );
 
+  -- CLK is the BUS clock so the register interface can see an I/O cycle;
+  -- CNT_TICK carries the 1.1905 MHz counting rate. Driving CLK from c2, as
+  -- this did, left the PIT sampling strobes on an 840 ns clock.
   timer1 : ENTITY work.timer8253
     PORT MAP (
-      CLK                  => n_c2,
+      CLK                  => n_c0,
+      CNT_TICK             => n_c2,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
       RD                   => n_io_rd,
@@ -408,7 +412,7 @@ BEGIN
   -- depends on the two timers keeping real time.
   opl2lite1 : ENTITY work.opl2_lite
     GENERIC MAP (
-      CLK_HZ               => 5_000_000
+      CLK_HZ               => 8_333_333
     )
     PORT MAP (
       CLK                  => n_c0,
@@ -425,7 +429,7 @@ BEGIN
     -- entity's own defaults are 50 MHz / 115200, which would divide down to
     -- ~11.5 kbaud on this clock. These were symbol parameters in the old .bdf.
     GENERIC MAP (
-      CLK_FREQ             => 5000000,
+      CLK_FREQ             => 8333333,
       BAUD                 => 1000000
     )
     PORT MAP (

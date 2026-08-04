@@ -1541,7 +1541,7 @@ scroll_one:
 ##  while being wrong, which is worse than not showing one.
 ## =====================================================================
 .equ CAL_ITER,   4096
-.equ CAL_CPI,    20              # clocks per LOOP iteration -- CALIBRATE
+.equ CAL_CPI,    17              # clocks per LOOP iteration, MEASURED
 .equ CAL_CLOCKS, CAL_ITER * CAL_CPI
 .equ CAL_NUM,    CAL_CLOCKS * 119   # 119 ~= 1190500/10000, the c2 rate
 
@@ -2565,7 +2565,7 @@ fdc_out:
     cmp byte ptr [0xB6], 0
     jne .fo_out               # already given up on this operation
     mov ah, al                # stash byte to send in AH
-    mov cx, 4                 # ~2.5 s at ~10 us per poll (5 MHz bus)
+    mov cx, 8                 # ~2.5 s at ~5 us per poll (10 MHz bus)
 .fo_outer:
     xor bx, bx
 .fo_wait:
@@ -2604,7 +2604,7 @@ fdc_in:
     xor al, al                # timed out earlier: hand back a zero, fast
     jmp short .fi_out
 .fi_go:
-    mov cx, 4                 # ~2.5 s at ~10 us per poll (5 MHz bus)
+    mov cx, 8                 # ~2.5 s at ~5 us per poll (10 MHz bus)
 .fi_outer:
     xor bx, bx
 .fi_wait:
@@ -2650,7 +2650,7 @@ fdc_results:
     mov byte ptr [0x41], 0      # assume success; boot AA55 check validates
     cmp byte ptr [0xB6], 0      # already given up? then there is nothing to
     jne .fr_done                # drain, and no reason to wait again
-    mov cx, 4                 # ~2.5 s at ~10 us per poll (5 MHz bus)
+    mov cx, 8                 # ~2.5 s at ~5 us per poll (10 MHz bus)
 .fr_outer:
     xor bx, bx
 .fr_drain:
@@ -4081,7 +4081,7 @@ u_txn:
     push si
     mov bl, al                   # command, in a register DX cannot touch
     mov bh, 3                    # attempts left after a corrupted packet
-    mov si, 16                   # outer NAK budget -- see .ut_attempt
+    mov si, 32                   # outer NAK budget -- see .ut_attempt
 .ut_attempt:
     # NAK budget: 16 rounds of 4096. These are ITERATIONS, not time, so the
     # budget scales with the bus clock -- it was doubled to 32 while c0 was

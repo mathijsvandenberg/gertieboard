@@ -37,9 +37,9 @@ END sevenseg;
 
 ARCHITECTURE behavior OF sevenseg IS
 
-  -- 5 MHz: 1 ms = 5000 cycles.
-  CONSTANT T_NIBBLE : integer := 5_000_000;            -- 500 ms per nibble
-  CONSTANT T_BLANK  : integer := 10_000_000;           -- 1 s blank gap
+  -- 8.333 MHz: 1 ms = 8333 cycles.
+  CONSTANT T_NIBBLE : integer := 8_333_333;            -- 500 ms per nibble
+  CONSTANT T_BLANK  : integer := 16_666_666;           -- 1 s blank gap
 
   CONSTANT P_LO     : integer := T_NIBBLE;             -- low nibble starts here
   CONSTANT P_BLANK  : integer := 2*T_NIBBLE;           -- blank starts here

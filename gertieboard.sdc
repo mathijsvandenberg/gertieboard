@@ -87,3 +87,16 @@ set_false_path -from [get_ports RESET] -to *
 # separate "phase-shifted read capture" exercise: add a phase-shifted PLL tap
 # (c4), capture RAM_SIO on it, and constrain RAM_SIO/RAM_SCK/RAM_CS here.
 # -----------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# timer8253's counting tick.
+#
+# The PIT's register interface runs on c0 so it can see a CPU I/O cycle, while
+# its counters advance at c2's 1.1905 MHz. c2 is therefore fed in as DATA and
+# sampled by a three-stage synchroniser (ct_sync). The analyser sees a clock
+# net driving a register's D input and times it against c2's own edges, which
+# is meaningless here and shows up as a hold violation of about -0.3 ns.
+#
+# Absorbing that is the synchroniser's entire job. What matters is the rate,
+# which is exact, not the phase, which no 8253 user can observe.
+set_false_path -from [get_clocks {pll1|altpll_component|auto_generated|pll1|clk[2]}]                -to   [get_registers {timer8253:timer1|ct_sync[0]}]

@@ -42,7 +42,7 @@
         CPU  8086               ; mandatory: see docs/gotchas.md
 
 ; The bus clock. MUST match c0 in the FPGA -- see docs/modules/clkgen-pll.md.
-CPU_HZ  equ 5000000
+CPU_HZ  equ 8333333
 ; tenths of a clock per tick per iteration, x1000. One BIOS tick is 54925 us,
 ; and the tick comes from the PIT on c2, which is NOT derived from c0 -- so it
 ; stays 18.2 Hz across a bus-clock change and remains an honest time reference.

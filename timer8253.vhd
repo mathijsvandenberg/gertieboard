@@ -10,9 +10,17 @@
 --
 -- RD / WR are ACTIVE LOW (gated /IOR /IOW from the 8088: low during the I/O
 -- strobe, high otherwise). They're inverted internally to rd_act / wr_act.
--- CLK is the bus/system clock; the counters decrement once per CLK edge. On
--- a real XT the PIT runs at 1.193 MHz — divide CLK externally for accurate
--- timing.
+-- CLK is the BUS clock, and it must be: the strobe edge detection, the latch
+-- command and the read path all run on it, so it has to be fast enough to see
+-- a CPU I/O cycle. CNT_TICK carries the 1.193 MHz counting rate separately.
+--
+-- This board used to drive CLK from c2 (1.1905 MHz) directly. The counters
+-- then ran at the right rate, but the register interface was sampling I/O
+-- strobes on an 840 ns clock against an 800 ns bus cycle -- so PIT accesses
+-- were missed, unpredictably, and got worse as c0 rose: 640 ns of strobe at
+-- 6.25 MHz, 400 ns at 10. Reading the counter returned stale or garbage
+-- values, and every game that reprograms the PIT for music or timing was
+-- rolling dice on each access. See docs/gotchas.md.
 --------------------------------------------------------------------------------
 
 LIBRARY IEEE;
@@ -31,6 +39,9 @@ ENTITY timer8253 IS
 
         RD          : IN  std_logic;                      -- active LOW I/O read
         WR          : IN  std_logic;                      -- active LOW I/O write
+        -- The counting rate, 1.193 MHz on a real XT. Sampled in the CLK
+        -- domain and used as an enable, so CLK stays fast enough for the bus.
+        CNT_TICK    : IN  std_logic;
         G0          : IN  std_logic;
         G1          : IN  std_logic;
         G2          : IN  std_logic;
@@ -72,6 +83,13 @@ ARCHITECTURE behavior OF timer8253 IS
   -- Edge detection for WR / RD strobes
   SIGNAL WR_PREV, RD_PREV : std_logic := '0';
 
+  -- CNT_TICK crosses from its own domain, so it is sampled here and its rising
+  -- edge becomes a one-CLK enable. The long-term counting rate is exactly
+  -- CNT_TICK's; only the phase jitters, by up to one CLK, which no 8253 user
+  -- can observe.
+  SIGNAL ct_sync : std_logic_vector(2 DOWNTO 0) := "000";
+  SIGNAL ct_en   : std_logic;
+
   -- Active-HIGH internal versions of the active-low RD / WR inputs.
   -- Using these everywhere internally keeps the rest of the logic readable.
   SIGNAL rd_act, wr_act : std_logic;
@@ -100,6 +118,8 @@ BEGIN
   rd_act <= not RD;
   wr_act <= not WR;
 
+  ct_en  <= ct_sync(1) AND NOT ct_sync(2);
+
   ----------------------------------------------------------------------------
   -- Main synchronous process
   ----------------------------------------------------------------------------
@@ -108,6 +128,8 @@ BEGIN
     VARIABLE rd_fall : std_logic;
   BEGIN
     IF rising_edge(CLK) THEN
+
+      ct_sync <= ct_sync(1 DOWNTO 0) & CNT_TICK;
 
       WR_PREV <= wr_act;
       RD_PREV <= rd_act;
@@ -121,7 +143,7 @@ BEGIN
         CE0  <= reload_of(CR0);
         NEW0 <= '0';
         O0   <= '0';                         -- mode 2/3 start with OUT low
-      ELSIF G0 = '1' THEN
+      ELSIF (G0 = '1' AND ct_en = '1') THEN
         IF CE0 = x"0000" THEN
           CE0 <= reload_of(CR0);
         ELSE
@@ -166,7 +188,7 @@ BEGIN
         CE1  <= reload_of(CR1);
         NEW1 <= '0';
         O1   <= '0';
-      ELSIF G1 = '1' THEN
+      ELSIF (G1 = '1' AND ct_en = '1') THEN
         IF CE1 = x"0000" THEN
           CE1 <= reload_of(CR1);
         ELSE
@@ -189,7 +211,7 @@ BEGIN
         CE2  <= reload_of(CR2);
         NEW2 <= '0';
         O2   <= '0';
-      ELSIF G2 = '1' THEN
+      ELSIF (G2 = '1' AND ct_en = '1') THEN
         IF CE2 = x"0000" THEN
           CE2 <= reload_of(CR2);
         ELSE
