@@ -148,6 +148,8 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_uart_rxd             : std_logic;
   SIGNAL n_uart_tx              : std_logic;
   SIGNAL n_vs                   : std_logic;
+  SIGNAL n_dispen               : std_logic;
+  SIGNAL n_vret                 : std_logic;
 BEGIN
 
   vga1 : ENTITY work.vga
@@ -167,6 +169,8 @@ BEGIN
       CUR_MOD              => n_cur_mod,
       HS                   => n_hs,
       VS                   => n_vs,
+      DISPEN               => n_dispen,
+      VRET                 => n_vret,
       RGB                  => n_rgb,
       DEBUG                => OPEN,
       DATAOUT              => n_periph_rdata
@@ -375,7 +379,8 @@ BEGIN
 
   cgastatus1 : ENTITY work.cga_status
     PORT MAP (
-      CLK                  => n_c3,
+      DISPEN               => n_dispen,
+      VRET                 => n_vret,
       RD                   => n_io_rd,
       ADDR                 => n_io_addr,
       DATAOUT              => n_periph_rdata
@@ -400,6 +405,8 @@ BEGIN
       RD                   => n_io_rd,
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
+      -- R12/R13 are latched and read back, but vga.vhd does not use them: see
+      -- the note on hardware scrolling at the scan address in vga.vhd.
       START                => OPEN,
       CURSOR               => n_cur_addr,
       CUR_TOP              => n_cur_top,

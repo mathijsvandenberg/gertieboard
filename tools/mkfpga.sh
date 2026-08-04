@@ -22,6 +22,12 @@
 #  source file. If it prints BUILD OK then the .sof on disk really is the design
 #  in the working tree, and it really does meet timing.
 #
+#  It then converts that .sof to a .jic for the EPCS16, by calling mkjic.sh
+#  rather than repeating it. The .jic is a SECOND copy of the bitstream and the
+#  one the board actually boots from, so leaving it a build behind reproduces
+#  the stale-artefact trap this file exists to close -- only now it survives a
+#  power cycle. Deleting it up front means a failed build cannot leave one.
+#
 #  Usage:  bash tools/mkfpga.sh
 # ============================================================================
 set -euo pipefail
@@ -33,7 +39,7 @@ PROJ=gertieboard
 OUT=output_files
 LOG=$OUT/mkfpga.log
 
-for t in map fit asm sta; do
+for t in map fit asm sta cpf; do
   [ -x "$QDIR/quartus_$t.exe" ] || { echo "FAIL: no quartus_$t in $QDIR"; exit 1; }
 done
 
@@ -43,7 +49,7 @@ mkdir -p "$OUT"
 # failed build leaves the previous ones in place and every check below passes
 # while describing the wrong design -- which is the whole reason this file
 # exists.
-rm -f "$OUT/$PROJ.sof" "$OUT/$PROJ.sta.summary" "$OUT/$PROJ.fit.summary"
+rm -f "$OUT/$PROJ.sof" "$OUT/$PROJ.jic" "$OUT/$PROJ.sta.summary" "$OUT/$PROJ.fit.summary"
 
 echo "== building $PROJ =="
 : > "$LOG"
@@ -136,5 +142,12 @@ if fails:
 PY
 
 echo
-echo "BUILD OK -> $OUT/$PROJ.sof"
-echo "Program it, and remember the BIOS is a separate artefact: tools/mkbios.sh"
+echo "== configuration flash =="
+bash tools/mkjic.sh
+
+echo
+echo "BUILD OK -> $OUT/$PROJ.sof  (JTAG, volatile)"
+echo "         -> $OUT/$PROJ.jic  (EPCS16, survives a power cycle)"
+echo "Program either one, and remember the BIOS is a separate artefact:"
+echo "   quartus_pgm -m jtag -o \"p;$OUT/$PROJ.sof\"     tools/mkbios.sh"
+echo "   quartus_pgm -m jtag -o \"ipv;$OUT/$PROJ.jic\""

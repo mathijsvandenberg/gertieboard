@@ -12,77 +12,65 @@
 --     bit 3 = vertical retrace window
 --     bits 1,2,4..7 = 0   -> the byte is NEVER 0xFF, so the card is "detected"
 --
--- The counters mirror the VGA scan timing (800 x 525 pixels = 59.5 Hz), so
--- games that pace themselves on bit 3 (Digger etc.) run at the true frame
--- rate.  NOTE this module is clocked from c3 = 50 MHz while vga.vhd scans on
--- c1 = 25 MHz, so the horizontal counts here are in doubled (50 MHz) ticks --
--- see the architecture body.
+-- ---------------------------------------------------------------------------
+-- WHERE THE BEAM IS, ASKED RATHER THAN GUESSED
 --
--- The FREQUENCY matches the display, but the PHASE is arbitrary (fixed at
--- power-up) because the two counters free-run independently, so vsync-synced
--- animation may tear at one fixed screen line. Wire vga's VS in here instead
--- if that ever matters.
+-- This module used to carry its own 800 x 525 scan counters, clocked from c3 at
+-- 50 MHz while vga.vhd scanned the same geometry from c1 at 25 MHz. Two copies
+-- of one fact, and the header here said as much: "the PHASE is arbitrary ...
+-- wire vga's VS in here instead if that ever matters."
+--
+-- It mattered. The copies did not merely drift, they disagreed from the start.
+-- This module called lines 400..524 the vertical retrace; vga.vhd draws the
+-- picture on lines 35..434. So a program that polled bit 3, saw it set, and
+-- concluded it was safe to rewrite the screen was in fact given the last 35
+-- visible lines -- 1.1 ms of active display -- before blanking really began.
+-- Horizontally the same 35-line offset appeared as 288 ticks of error on bit 0.
+--
+-- So there are no counters here now. DISPEN and VRET come straight from the
+-- counters that actually address the video memory, and the two cannot disagree
+-- because there is only one of them.
 --
 -- We deliberately answer ONLY 0x3DA (CGA), NOT 0x3BA (MDA). 0x3BA still reads
 -- 0xFF ("no MDA"), so BIOSes that check both pick CGA and use 0xB8000.
 --
--- Wiring (BDF):
---   CLK     <- 25 MHz VGA clock (c1)         (free-running timing source)
+-- Wiring (top level):
+--   DISPEN  <- vga's DISPEN     '1' while pixels are being drawn
+--   VRET    <- vga's VRET       '1' on every non-displayed line
 --   RD      <- the I/O READ strobe (IOR), active-low -- the read counterpart of
 --              the strobe that feeds sevenseg's WR. Must be I/O-only, so a
 --              memory read of address 0x003DA does NOT trigger it.
 --   ADDR    <- the 16-bit I/O address bus (same one sevenseg/ctrl_reg watch)
 --   DATAOUT -> the shared CPU read-data bus (alongside the other peripherals)
+--
+-- DISPEN and VRET are generated on c1 and sampled here by an asynchronous CPU
+-- read, which is not synchronised and does not need to be: this is a status bit
+-- that software polls in a loop. A read that catches the edge returns the value
+-- from either side of it, and the next read a microsecond later is unambiguous.
+-- That is how the real card behaves too.
 --------------------------------------------------------------------------------
 
 LIBRARY IEEE;
 USE  IEEE.STD_LOGIC_1164.ALL;
-USE  IEEE.NUMERIC_STD.ALL;
 
 ENTITY cga_status IS
   PORT(
-        CLK     : IN    std_logic;                          -- free-run timing (25 MHz VGA clk)
+        DISPEN  : IN    std_logic;                          -- from vga.vhd
+        VRET    : IN    std_logic;                          -- from vga.vhd
         RD      : IN    std_logic;                          -- I/O read strobe, active LOW (IOR)
         ADDR    : IN    std_logic_vector(15 DOWNTO 0);
         DATAOUT : INOUT std_logic_vector(7  DOWNTO 0));
 END cga_status;
 
 ARCHITECTURE behavior OF cga_status IS
-  -- IMPORTANT: this module is clocked from PLL c3 = 50 MHz, which is TWICE the
-  -- 25 MHz (c1) pixel clock vga.vhd scans with.  The counters therefore run in
-  -- 50 MHz ticks and every horizontal figure is DOUBLED: one 800-pixel line is
-  -- 1600 ticks, the 640-pixel active area is 1280 ticks.  Sizing these for
-  -- 25 MHz would make the retrace toggle at 119 Hz instead of 59.5 Hz and run
-  -- every vsync-paced game at double speed.
-  --   50 MHz / (1600 * 525) = 59.52 Hz
-  SIGNAL hcnt   : unsigned(10 DOWNTO 0) := (OTHERS => '0');  -- 0..1599 (50 MHz ticks)
-  SIGNAL vcnt   : unsigned(9  DOWNTO 0) := (OTHERS => '0');  -- 0..524  (lines)
   SIGNAL status : std_logic_vector(7 DOWNTO 0);
   SIGNAL sel    : std_logic;
 BEGIN
 
-  -- Shadow scan counters: same 800 x 525 geometry as vga.vhd, 640 x 400
-  -- active area (last 125 lines = vertical blanking, ~4 ms per frame).
-  PROCESS (CLK)
-  BEGIN
-    IF rising_edge(CLK) THEN
-      IF (hcnt = 1599) THEN
-        hcnt <= (OTHERS => '0');
-        IF (vcnt = 524) THEN
-          vcnt <= (OTHERS => '0');
-        ELSE
-          vcnt <= vcnt + 1;
-        END IF;
-      ELSE
-        hcnt <= hcnt + 1;
-      END IF;
-    END IF;
-  END PROCESS;
-
-  status(0)          <= '1' WHEN (hcnt >= 1280 OR vcnt >= 400) ELSE '0'; -- in blanking
+  status(0)          <= NOT DISPEN;                     -- in blanking
   status(2 DOWNTO 1) <= "00";
-  status(3)          <= '1' WHEN (vcnt >= 400) ELSE '0';                 -- vertical retrace
-  status(7 DOWNTO 4) <= "0000";                                 -- keep it well clear of 0xFF
+  status(3)          <= VRET;                           -- vertical retrace
+  status(7 DOWNTO 4) <= "0000";                         -- keep it well clear of 0xFF
 
   sel <= '1' WHEN (RD = '0' AND ADDR = x"03DA") ELSE '0';
 

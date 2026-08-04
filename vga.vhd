@@ -41,12 +41,18 @@ ENTITY vga IS
 		  IOADDR				  : IN std_logic_vector(15 DOWNTO 0);  -- latched I/O address
 		  -- Text cursor, from crtc6845. Tie CURSOR to all-ones and CUR_MOD to
 		  -- "01" to disable it: both mean "not here" and neither can draw.
+		  -- There is deliberately no START here; see the note at the scan address.
 		  CURSOR				  : IN std_logic_vector(13 DOWNTO 0);  -- R14/R15 cell
 		  CUR_TOP				  : IN std_logic_vector(4 DOWNTO 0);   -- R10(4:0)
 		  CUR_BOT				  : IN std_logic_vector(4 DOWNTO 0);   -- R11(4:0)
 		  CUR_MOD				  : IN std_logic_vector(1 DOWNTO 0);   -- R10(6:5)
  		  HS                 	  : OUT std_logic;
  		  VS                 	  : OUT std_logic;
+ 		  -- Scan state for cga_status (port 0x3DA). These come from the counters
+ 		  -- BELOW rather than from a second set kept in step by hand: there is one
+ 		  -- display and there must be one description of where the beam is.
+ 		  DISPEN				  : OUT std_logic;   -- '1' while pixels are being drawn
+ 		  VRET					  : OUT std_logic;   -- '1' on every non-displayed line
  		  RGB               	  : OUT std_logic_vector(5 DOWNTO 0);
 		  DATAOUT				  : INOUT std_logic_vector(7 DOWNTO 0);
 		  DEBUG 					  : OUT std_logic);
@@ -210,6 +216,31 @@ BEGIN
   -- address' bit 0 picks MEMC/MEMA; the rest is the array index.  The
   -- scan side performs ONE read per array per clock in either mode, so
   -- the read address is muxed by the mode bit.
+  --
+  -- NO HARDWARE SCROLLING, and that is a decision rather than an omission.
+  --
+  -- crtc6845 brings out R12/R13, the 6845's display start address, and this
+  -- once added it here: the address counter loads from R12/R13 at the top of
+  -- each field instead of from zero, so software scrolls by moving a register
+  -- rather than 4000 bytes of screen. That is how the real chip works and the
+  -- arithmetic below was written to match it -- a cell index in text, doubled
+  -- to bytes in graphics because the CGA fetches two bytes per count.
+  --
+  -- On this machine it made the picture worse in every mode that used it. Keen
+  -- 4 came back overlapping itself, and Arkanoid's TEXT screen came out shifted
+  -- -- text, where the unit is unambiguous and the arithmetic is a single
+  -- addition. A start address that is honoured but lands in the wrong place is
+  -- worse than one that is ignored, because software that never scrolls is
+  -- unaffected by the second and corrupted by the first.
+  --
+  -- What was NOT established before it was reverted: whether the fault is in
+  -- this addressing or in something else the CRTC ought to be supplying with it
+  -- (R1, the row length, is hardcoded to 80 bytes here and a scrolling program
+  -- may well be changing it). tools/scrolltst.com exists to settle that -- it
+  -- drives R12/R13 by a known amount against a readable pattern -- and until it
+  -- has been run, honouring the register is guesswork with the screen as the
+  -- only output. So R12/R13 are latched by crtc6845, read back as a real 6845
+  -- does, and go nowhere.
   goff    <= conv_std_logic_vector(80 * conv_integer(YY(10 DOWNTO 2))
                                       + conv_integer(XX(10 DOWNTO 3)), 13);
   txt_idx <= conv_std_logic_vector(80 * conv_integer(YY(10 DOWNTO 4))
@@ -271,6 +302,23 @@ BEGIN
           Y  <= "00000000000";
           YY <= "00000000000";
           frame_cnt <= frame_cnt + 1;   -- one per field, drives the cursor blink
+
+          -- If the display start address is ever wired in again, it is latched
+          -- HERE and nowhere else. A 6845 loads its address counter from
+          -- R12/R13 at the top of each field and then simply counts; the
+          -- register is not consulted again until the next field. Adding it at
+          -- every pixel instead -- which is what the first attempt did -- means
+          -- a write part way down the screen moves everything below it and
+          -- nothing above it, and the picture splits at whatever scanline the
+          -- write landed on.
+          --
+          -- It would also need synchronising: START is written by the CPU on c0
+          -- and would be read here on c1, and an unsynchronised sample of
+          -- fourteen bits taken once a field is a metastability hazard that
+          -- shows up as one field displayed from a nonsense address. CURSOR
+          -- crosses the same boundary unsynchronised and gets away with it,
+          -- because a cursor in the wrong cell for one field of 59 is invisible
+          -- and a scroll position is not.
         END IF;
       END IF;
     END IF;
@@ -314,6 +362,26 @@ BEGIN
   VS    <= '0' WHEN Y < 2  ELSE '1';
   -- Exactly the 640 active pixels, X = 144..783, now that XX is aligned to them.
   VALID <= '1' WHEN (X > 143 AND X < 784 AND Y > 34 AND Y < (515-80)) ELSE '0';
+
+  ----------------------------------------------------------------------------
+  -- Scan state for port 0x3DA.
+  --
+  -- cga_status used to keep its own 800x525 counters and derive both bits from
+  -- them. Same geometry, written twice -- and the two copies did not agree. It
+  -- called lines 400..524 the vertical retrace, but the picture is drawn on
+  -- lines 35..434, so it announced blanking while the BOTTOM 35 VISIBLE LINES
+  -- were still being scanned. Software that waits for retrace before touching
+  -- video memory -- which is every game that cares -- got 1.1 ms of the active
+  -- display it had been promised was safe. Horizontally it was 288 ticks out
+  -- for the same reason.
+  --
+  -- DISPEN is VALID, which is the definition of "pixels are being drawn", and
+  -- VRET covers every line that is not displayed: 435..524 and 0..34, 125 lines
+  -- of the 525. That is the same 3.97 ms window as before -- it is now in the
+  -- right place, and it cannot drift again because there is nothing to drift
+  -- from.
+  DISPEN <= VALID;
+  VRET   <= '1' WHEN (Y > 434 OR Y < 35) ELSE '0';
 
   -- ---------------- Color decode -------------------------------------
   -- Text attribute byte layout (CGA, 16/16 mode):

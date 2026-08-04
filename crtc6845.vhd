@@ -47,6 +47,15 @@
 --                       would still scroll wrongly even once it starts
 --     CURSOR (R14/R15)  a real hardware text cursor, instead of none
 --
+-- CURSOR is wired up and draws. START was wired up and then taken out again:
+-- honouring it made Keen 4 overlap itself and shifted Arkanoid's text screen,
+-- and the cause was not established before it was reverted. It is still brought
+-- out here, still latched, still read back as a real 6845 does -- what changed
+-- is that the top level maps it to OPEN. Before wiring it in a second time, run
+-- tools/scrolltst.com, which drives R12/R13 by a known amount against a pattern
+-- whose position can be read off the screen. See the note at the scan address
+-- in vga.vhd.
+--
 -- Leave them OPEN in the top level until vga.vhd is ready for them. The BIOS
 -- has been writing all four registers since day one -- see set_hw_cursor and
 -- v_curtype in xtbios_src.s -- so the values arriving here are already correct
