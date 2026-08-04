@@ -47,6 +47,11 @@ ENTITY psram_ctrl IS
         WR      : IN    std_logic;                          -- /MEMW (active LOW)
         DATAOUT : INOUT std_logic_vector(7  DOWNTO 0);
         READY   : OUT   std_logic;
+        -- Goes high ONCE, when the QPI init sequence has finished, and stays
+        -- there. This is NOT the same as READY: READY drops on every transfer,
+        -- whereas this answers "does main memory exist yet". clkgen holds the
+        -- CPU in reset until it is set -- see the note there.
+        INIT_DONE : OUT std_logic;
         CTRL    : IN    std_logic_vector(7  DOWNTO 0);       -- runtime tuning
         RAM_SCK : OUT   std_logic;
         RAM_CS  : OUT   std_logic;
@@ -87,6 +92,7 @@ ARCHITECTURE behavior OF psram_ctrl IS
   SIGNAL is_read_op: std_logic := '0';
   SIGNAL read_data : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
   SIGNAL ready_int : std_logic := '0';
+  SIGNAL init_ok   : std_logic := '0';   -- set once, never cleared
 
   SIGNAL sio_oe  : std_logic_vector(3 DOWNTO 0);
   SIGNAL sio_out : std_logic_vector(3 DOWNTO 0);
@@ -191,6 +197,8 @@ ARCHITECTURE behavior OF psram_ctrl IS
 
 BEGIN
 
+  INIT_DONE <= init_ok;
+
   ----------------------------------------------------------------------------
   -- Cache lookup (combinational)
   ----------------------------------------------------------------------------
@@ -252,10 +260,17 @@ BEGIN
   lu_ok  <= '1' WHEN (lu_hit = '1' AND lu_addr = ADDR) ELSE '0';
   rd_hit <= cpu_rd_op AND lu_ok;
 
-  -- conventional RAM above the 32 KB M9K low window, PLUS the full 64 KB
-  -- F-segment BIOS (0xF0000..0xFFFFF) -- loaded once, then read/executed.
-  is_ram    <= '1' WHEN ((ADDR >= x"08000") AND (ADDR < x"A0000"))
-                     OR  (ADDR >= x"F0000")
+  -- ALL of conventional RAM, plus the unused part of the F-segment.
+  --
+  -- THIS MUST MATCH mem_hybrid's sel_ps EXACTLY. The map is written down in
+  -- both places, and when they disagree the symptom is silence rather than an
+  -- error: mem_hybrid routes the access here, this decode does not claim it,
+  -- nothing drives READY, and the CPU hangs on an address that looks perfectly
+  -- ordinary. That is precisely how the boot loader died at POST code 02 --
+  -- its first stack push, to 0x7C00, which mem_hybrid had just handed to a
+  -- controller still convinced low memory was somebody else's.
+  is_ram    <= '1' WHEN (ADDR < x"A0000")
+                     OR  ((ADDR >= x"F0000") AND (ADDR < x"FC000"))
                 ELSE '0';
 
   cpu_rd_op <= is_ram AND (NOT RD);
@@ -315,6 +330,7 @@ BEGIN
       RAM_CS     <= '1';
       RAM_SCK    <= '0';
       ready_int  <= '0';
+      init_ok    <= '0';       -- so a warm reset holds the CPU again
       bit_cnt    <= 0;
       cycle_cnt  <= 0;
       half_cnt   <= 0;
@@ -390,6 +406,7 @@ BEGIN
           RAM_CS <= '1'; RAM_SCK <= '0';
           IF delay_cnt = 0 THEN
             IF init_step = 0 THEN state <= S_IDLE; ready_int <= '1';
+                                   init_ok <= '1';
             ELSE state <= S_SPI_INIT; END IF;
           ELSE delay_cnt <= delay_cnt - 1; END IF;
 

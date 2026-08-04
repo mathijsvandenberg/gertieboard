@@ -39,14 +39,17 @@ END m9k_mem;
 
 ARCHITECTURE m9k OF m9k_mem IS
 
-  CONSTANT LOW_DEPTH : integer := 16#8000#;   -- 32 KB low RAM        0x00000..0x07FFF
-  CONSTANT BUF_DEPTH : integer := 16#1000#;   -- 4 KB disk buffer     0xE0000..0xE0FFF
-  CONSTANT DEPTH     : integer := LOW_DEPTH + BUF_DEPTH;
+  -- The BIOS image, not low RAM. Conventional memory is now uniformly PSRAM
+  -- (see mem_hybrid) so that the 640 KB has ONE speed; M9K is spent instead on
+  -- the code that runs on every interrupt.
+  CONSTANT BIOS_DEPTH : integer := 16#4000#;  -- 16 KB BIOS image     0xFC000..0xFFFFF
+  CONSTANT BUF_DEPTH  : integer := 16#1000#;  -- 4 KB disk buffer     0xE0000..0xE0FFF
+  CONSTANT DEPTH      : integer := BIOS_DEPTH + BUF_DEPTH;
 
   TYPE mem_t IS ARRAY(0 TO DEPTH-1) OF std_logic_vector(7 DOWNTO 0);
   SIGNAL mem : mem_t;
 
-  SIGNAL in_low  : std_logic;
+  SIGNAL in_bios : std_logic;
   SIGNAL in_buf  : std_logic;
   SIGNAL in_win  : std_logic;
   SIGNAL midx    : integer RANGE 0 TO DEPTH-1;
@@ -62,13 +65,13 @@ ARCHITECTURE m9k OF m9k_mem IS
 
 BEGIN
 
-  in_low <= '1' WHEN (ADDR < x"08000") ELSE '0';
-  in_buf <= '1' WHEN ((ADDR >= x"E0000") AND (ADDR < x"E1000")) ELSE '0';
-  in_win <= in_low OR in_buf;
+  in_bios <= '1' WHEN (ADDR >= x"FC000") ELSE '0';
+  in_buf  <= '1' WHEN ((ADDR >= x"E0000") AND (ADDR < x"E1000")) ELSE '0';
+  in_win  <= in_bios OR in_buf;
 
-  -- Low RAM maps 1:1; the 4 KB buffer is packed on top of it at LOW_DEPTH.
-  midx   <= conv_integer(ADDR(14 DOWNTO 0)) WHEN in_low = '1'
-       ELSE LOW_DEPTH + conv_integer(ADDR(11 DOWNTO 0));
+  -- The BIOS maps 1:1 from 0xFC000; the 4 KB buffer is packed above it.
+  midx   <= conv_integer(ADDR(13 DOWNTO 0)) WHEN in_bios = '1'
+       ELSE BIOS_DEPTH + conv_integer(ADDR(11 DOWNTO 0));
 
   cpu_rd <= in_win AND (NOT RD);
   cpu_wr <= in_win AND (NOT WR);

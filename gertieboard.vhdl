@@ -111,6 +111,8 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_irq2                 : std_logic;
   SIGNAL n_kbd_clear            : std_logic;
   SIGNAL n_mem_addr             : std_logic_vector(19 downto 0);
+  SIGNAL n_mem_ready            : std_logic;   -- PSRAM init done; gates CPU reset
+  SIGNAL n_mem_rst              : std_logic;   -- active-HIGH, ungated, for mem_hybrid
   SIGNAL n_mem_rd               : std_logic;
   SIGNAL n_mem_wr               : std_logic;
   SIGNAL n_cur_addr             : std_logic_vector(13 downto 0);  -- CRTC R14/R15
@@ -174,6 +176,7 @@ BEGIN
     PORT MAP (
       CLK                  => n_c0,
       RESET                => n_reset,
+      MEM_READY            => n_mem_ready,
       RST_OUT              => n_rst_out
     );
 
@@ -344,16 +347,22 @@ BEGIN
       CTRL                 => n_ctrl
     );
 
+  -- RESET here is the RAW reset, not clkgen's gated RST_OUT. It must be:
+  -- clkgen now holds the CPU until this controller reports INIT_DONE, so
+  -- feeding it the gated reset would hold the memory in reset until it
+  -- reported ready, which it could never do. The memory comes up first and
+  -- the CPU waits for it -- which is the correct order regardless.
   inst : ENTITY work.mem_hybrid
     PORT MAP (
       CLK_RAM              => n_c3,
-      RESET                => n_rst_out,
+      RESET                => n_mem_rst,
       DATAIN               => n_cpu_wdata,
       ADDR                 => n_mem_addr,
       RD                   => n_mem_rd,
       WR                   => n_mem_wr,
       CTRL                 => n_ctrl,
       READY                => n_ready,
+      MEM_READY            => n_mem_ready,
       RAM_SCK              => n_ram_sck,
       RAM_CS               => n_ram_cs,
       DATAOUT              => n_periph_rdata,
@@ -399,7 +408,7 @@ BEGIN
   -- depends on the two timers keeping real time.
   opl2lite1 : ENTITY work.opl2_lite
     GENERIC MAP (
-      CLK_HZ               => 10_000_000
+      CLK_HZ               => 5_000_000
     )
     PORT MAP (
       CLK                  => n_c0,
@@ -416,7 +425,7 @@ BEGIN
     -- entity's own defaults are 50 MHz / 115200, which would divide down to
     -- ~11.5 kbaud on this clock. These were symbol parameters in the old .bdf.
     GENERIC MAP (
-      CLK_FREQ             => 10000000,
+      CLK_FREQ             => 5000000,
       BAUD                 => 1000000
     )
     PORT MAP (
@@ -497,6 +506,9 @@ BEGIN
   -- a real reset, bootrom re-arms its overlay and the BIOS is re-fetched from
   -- the host, video returns to text mode and ctrl_reg reloads its safe default.
   n_reset <= RESET AND NOT n_cad_rst;
+  -- n_reset is active low; the memory controller wants active high, and must
+  -- NOT be gated by clkgen's RST_OUT (see the mem_hybrid instantiation).
+  n_mem_rst <= NOT n_reset;
   n_fl_miso <= FL_MISO;
   FL_SCK <= n_fl_sck;
   FL_CS <= n_fl_cs;
