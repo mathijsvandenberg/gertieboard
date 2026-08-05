@@ -295,7 +295,22 @@ BEGIN
   -- The CPU sees a flat 16 KB page from 0xB8000-0xBBFFF.  For text mode
   -- even addresses are characters and odd addresses are attributes -
   -- exactly the layout DOS/BIOS expects for color text mode.
-  cga_sel <= '1' WHEN ADDR(19 DOWNTO 14) = "101110"   ELSE '0';  -- 0xB8000
+  ----------------------------------------------------------------------------
+  -- ONLY ONE WINDOW IS DECODED AT A TIME, which is what the Graphics
+  -- Controller's memory-map field is for.
+  --
+  -- In mode 0Dh a real card claims 0xA0000..0xAFFFF and NOTHING ELSE: a write
+  -- to 0xB8000 goes nowhere and is silently discarded. This decoded both at
+  -- once, so anything that touched 0xB8000 while the display was in EGA mode --
+  -- a status line drawn as text, a TSR, DOS echoing a character, leftover code
+  -- that assumes CGA -- landed in PL0 and PL1 instead of being ignored.
+  --
+  -- PL0 and PL1 are EGA's planes 0 and 1, blue and green. So the damage could
+  -- only ever be drawn in colours 1, 2 and 3, and that is its fingerprint:
+  -- garbage in blue, green and cyan, never in red or bright. King's Quest
+  -- showed exactly that band across the top of the screen.
+  cga_sel <= '1' WHEN (ADDR(19 DOWNTO 14) = "101110" AND
+                       EGA_ON = '0')                  ELSE '0';  -- 0xB8000
   ega_sel <= '1' WHEN (ADDR(19 DOWNTO 16) = "1010" AND
                        EGA_ON = '1')                  ELSE '0';  -- 0xA0000
   ega_wr  <= '1' WHEN (WR = '0' AND ega_sel = '1')    ELSE '0';

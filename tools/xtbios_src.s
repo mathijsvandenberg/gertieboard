@@ -1420,6 +1420,8 @@ g_render:
     shl si, 1
     shl si, 1                    # SI = char*8
     add si, offset font8x8       # -> glyph (read with DS=CS below)
+    cmp ch, 0x0D
+    je .r_ega                    # EGA is planar and lives somewhere else
     xor ax, ax
     mov al, dl                   # col
     cmp ch, 6
@@ -1472,6 +1474,51 @@ g_render:
     inc cl
     cmp cl, 8
     jb .r_row
+    jmp .r_done
+
+## ---------------------------------------------------------------------
+##  EGA mode 0Dh. Planar, at 0xA0000, and none of the CGA arithmetic above
+##  applies: no even/odd bank interleave, 40 bytes to a scanline, and an
+##  8-pixel character cell is ONE byte in each of four planes.
+##
+##  Falling through to the CGA path -- which is what happened before this
+##  existed, because 0x0D is neither 6 nor below 4 -- wrote 2bpp pixel pairs
+##  into 0xB8000 with a bank interleave. Every character came out as garbage
+##  in the shape of a character, in the place a character belonged.
+##
+##  ONE PASS, because white on black needs no colour arithmetic: with the map
+##  mask open to all four planes, the glyph byte goes to every plane at once,
+##  so a set bit becomes 1111 (white) and a clear bit 0000 (black). Colours
+##  other than 15 would need the cell cleared first and then the glyph written
+##  through a map mask of just that colour's planes -- two passes. The CGA path
+##  hardcodes its foreground too, for the same reason.
+## ---------------------------------------------------------------------
+.r_ega:
+    xor ax, ax
+    mov al, dh                   # row
+    mov bl, dl                   # col -- taken BEFORE the MUL below, which
+    xor bh, bh                   # returns into DX and would destroy it
+    push bx
+    mov bx, 320                  # 8 scanlines x 40 bytes = one text row
+    mul bx
+    pop bx
+    add ax, bx
+    mov di, ax                   # DI = the cell's byte offset
+    mov ax, EGAVID
+    mov es, ax
+    push cs
+    pop ds                       # DS = CS: font8x8 lives here
+    cld
+    mov ax, 0x020F               # SEQ 2: map mask = all four planes
+    call seq_out
+    mov cx, 8
+.re_row:
+    lodsb                        # AL = one glyph row
+    mov es:[di], al              # -> all four planes, so white on black
+    add di, 40                   # next scanline
+    loop .re_row
+
+.r_done:
     pop ds
     pop es
     pop di
