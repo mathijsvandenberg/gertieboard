@@ -57,9 +57,50 @@ EGABASE equ 0xA000
 start:
         mov  dx, msg_intro
         call puts
+
+        ; Does the BIOS admit to an EGA? The test is not the values it returns,
+        ; it is that BL comes back CHANGED from the 0x10 passed in -- a machine
+        ; with no EGA leaves it alone. This is the call Keen 4 and King's Quest
+        ; make before offering their EGA modes.
+        mov  ah, 0x12
+        mov  bl, 0x10
+        int  0x10
+        cmp  bl, 0x10
+        je   .noega
+        mov  dx, msg_det_yes
+        jmp  .det
+.noega: mov  dx, msg_det_no
+.det:   call puts
+
+        ; A "b" on the command line sets the mode through INT 10h instead of by
+        ; hand, which is how the BIOS path gets tested rather than assumed.
+        mov  cl, [0x80]         ; PSP command-tail length
+        xor  ch, ch
+        mov  si, 0x81
+        xor  bl, bl
+.parse: jcxz .pdone
+        lodsb
+        or   al, 0x20
+        cmp  al, 'b'
+        jne  .pnext
+        mov  bl, 1
+.pnext: dec  cx
+        jmp  .parse
+.pdone: mov  [use_bios], bl
+
         call getkey
 
+        cmp  byte [use_bios], 0
+        je   .direct
+        mov  ax, 0x000D         ; INT 10h sets it, including clearing the planes
+        int  0x10
+        mov  ax, EGABASE
+        mov  es, ax
+        cld
+        jmp  .ready
+.direct:
         call mode_0d
+.ready:
         call bars
         call maskbars
         call latchcopy
@@ -299,6 +340,8 @@ getkey: xor  ah, ah
         int  0x16
         ret
 
+use_bios db 0
+
 ; ---------------------------------------------------------------------------
 ; The default EGA palette. Entry 6 is 0x14 and not 0x06: that is what makes
 ; colour 6 BROWN rather than dark yellow, the same exception the CGA palette
@@ -323,7 +366,17 @@ msg_intro:
         db '                hold across the address change.',13,10,13,10
         db 'Then a key rotates the palette -- every colour changes and',13,10
         db 'no pixel does -- and another key puts it back.',13,10,13,10
+        db 'Run as "EGATEST B" to set the mode through INT 10h instead,',13,10
+        db 'which tests the BIOS rather than the hardware underneath it.',13,10,13,10
         db 'Press a key to begin.',13,10,'$'
+
+msg_det_yes:
+        db 13,10,'INT 10h AH=12h BL=10h: BL came back changed -- the BIOS',13,10
+        db 'reports an EGA. Software that asks will offer its EGA modes.',13,10,'$'
+msg_det_no:
+        db 13,10,'INT 10h AH=12h BL=10h: BL came back as 0x10, unchanged.',13,10
+        db 'The BIOS does NOT report an EGA, so software will not offer',13,10
+        db 'its EGA modes however well the hardware works.',13,10,'$'
 
 msg_done:
         db 13,10,'Back in text mode. If the bars were right but the bottom',13,10

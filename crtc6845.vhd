@@ -80,7 +80,8 @@ ENTITY crtc6845 IS
         RD      : IN    std_logic;                      -- active LOW I/O read
         WR      : IN    std_logic;                      -- active LOW I/O write
         DATAOUT : INOUT std_logic_vector(7 DOWNTO 0);   -- 'Z' when not addressed
-        START   : OUT   std_logic_vector(13 DOWNTO 0);  -- R12/R13, for vga.vhd
+        START   : OUT   std_logic_vector(15 DOWNTO 0);  -- R12/R13, display start
+        OFFSET  : OUT   std_logic_vector(7 DOWNTO 0);   -- R19 (0x13), row stride
         CURSOR  : OUT   std_logic_vector(13 DOWNTO 0);  -- R14/R15, cursor cell
         CUR_TOP : OUT   std_logic_vector(4 DOWNTO 0);   -- R10(4:0) first line
         CUR_BOT : OUT   std_logic_vector(4 DOWNTO 0);   -- R11(4:0) last line
@@ -89,11 +90,20 @@ END crtc6845;
 
 ARCHITECTURE behavior OF crtc6845 IS
 
-  TYPE regfile_t IS ARRAY(0 TO 15) OF std_logic_vector(7 DOWNTO 0);
+  -- 0..24. A 6845 has eighteen registers; the EGA's CRTC is a different chip
+  -- with more, and mode 0Dh needs one of them -- 0x13, the Offset register.
+  -- Widening the store does NOT widen the read path: see the read mux, which is
+  -- unchanged and still answers like a 6845, because that asymmetry is what
+  -- card-detection code looks for.
+  TYPE regfile_t IS ARRAY(0 TO 24) OF std_logic_vector(7 DOWNTO 0);
 
   -- Power-on values are the ones the XT BIOS writes for 80x25 text, so the
   -- outputs are sane before any software has touched them.
-  SIGNAL reg : regfile_t := (OTHERS => (OTHERS => '0'));
+  -- Offset defaults to 0x14 -- 20 words, 40 bytes, the width of mode 0Dh. A
+  -- zero there would put every scanline at the same address and stack the whole
+  -- picture on one row, which is a confusing first symptom for software that
+  -- never programs the register because it is happy with the default.
+  SIGNAL reg : regfile_t := (19 => x"14", OTHERS => (OTHERS => '0'));
 
   SIGNAL idx : unsigned(4 DOWNTO 0) := (OTHERS => '0');
 
@@ -121,7 +131,10 @@ BEGIN
   DATAOUT <= rdval WHEN sel_rd = '1' ELSE "ZZZZZZZZ";
 
   -- Straight out for vga.vhd.
-  START  <= reg(12)(5 DOWNTO 0) & reg(13);
+  -- Sixteen bits, not fourteen. The 6845 only drives MA0..MA13, but the EGA's
+  -- start address is a full 16 and mode 0Dh's scan address is built from it.
+  START  <= reg(12) & reg(13);
+  OFFSET <= reg(19);
   CURSOR <= reg(14)(5 DOWNTO 0) & reg(15);
 
   -- Cursor shape. R10 carries the first scanline in bits 4:0 and the blink
@@ -151,7 +164,11 @@ BEGIN
         ELSIF ADDR = x"03D5" THEN
           -- R16/R17 are the light pen and are read-only on real silicon, so a
           -- write to them is accepted and dropped rather than stored.
-          IF idx < 16 THEN
+          -- 16 and 17 are the light pen on a 6845 and read-only there, so a
+          -- write is accepted and dropped. Keeping that exactly as it was
+          -- matters: the detection behaviour this module exists for must not
+          -- change because EGA support was added around it.
+          IF (idx < 25) AND (idx /= 16) AND (idx /= 17) THEN
             reg(to_integer(idx)) <= DATA;
           END IF;
         END IF;

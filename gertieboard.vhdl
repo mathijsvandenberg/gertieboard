@@ -150,6 +150,8 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_vs                   : std_logic;
   -- EGA register file -> vga
   SIGNAL n_ega_on               : std_logic;
+  SIGNAL n_crtc_start           : std_logic_vector(15 downto 0); -- CRTC R12/R13
+  SIGNAL n_crtc_offs            : std_logic_vector(7 downto 0);  -- CRTC R19 (0x13)
   SIGNAL n_map_mask             : std_logic_vector(3 downto 0);
   SIGNAL n_set_res              : std_logic_vector(3 downto 0);
   SIGNAL n_en_sr                : std_logic_vector(3 downto 0);
@@ -179,6 +181,8 @@ BEGIN
       CUR_BOT              => n_cur_bot,
       CUR_MOD              => n_cur_mod,
       EGA_ON               => n_ega_on,
+      EGA_START            => n_crtc_start,
+      EGA_OFFS             => n_crtc_offs,
       MAP_MASK             => n_map_mask,
       SET_RES              => n_set_res,
       EN_SR                => n_en_sr,
@@ -452,9 +456,10 @@ BEGIN
       RD                   => n_io_rd,
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
-      -- R12/R13 are latched and read back, but vga.vhd does not use them: see
-      -- the note on hardware scrolling at the scan address in vga.vhd.
-      START                => OPEN,
+      -- R12/R13 and the Offset register drive the EGA scan address. The CGA
+      -- path still ignores both -- see the scan address in vga.vhd.
+      START                => n_crtc_start,
+      OFFSET               => n_crtc_offs,
       CURSOR               => n_cur_addr,
       CUR_TOP              => n_cur_top,
       CUR_BOT              => n_cur_bot,

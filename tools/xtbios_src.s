@@ -32,6 +32,7 @@
 ## ---- equates -------------------------------------------------------
 .equ BDA,        0x0040      # BIOS data area segment
 .equ VID,        0xB800      # CGA text video segment
+.equ EGAVID,     0xA000      # EGA bit-plane window (mode 0Dh)
 .equ KBBUF,      0x001E      # kbd buffer start (offset in BDA)
 .equ KBEND,      0x003E      # kbd buffer end+1
 .equ EOI,        0x20
@@ -419,6 +420,20 @@ vid_init:
     push dx
     push si
     push es
+    push ds
+    ## DS MUST BE THE ROM SEGMENT for the crtc_80x25 lookup below.
+    ##
+    ## POST calls this with DS already 0xF000 and it worked; INT 10h AH=0 calls
+    ## it with whatever DS the application had, and read the table out of the
+    ## caller's data segment. That was invisible for as long as the CRTC was
+    ## write-only and vga.vhd ignored every value -- writing rubbish to a
+    ## register nobody reads looks exactly like writing the right thing.
+    ##
+    ## It stopped being invisible when crtc6845 arrived: R10/R11 are the cursor
+    ## shape now, so a mode set from an application gave the cursor whatever
+    ## happened to lie at that offset in its data segment.
+    mov ax, cs
+    mov ds, ax
     mov dx, 0x03D4
     xor bx, bx              # register index 0
 .vi_loop:
@@ -445,11 +460,148 @@ vid_init:
     mov ax, 0x0720
     mov cx, 2000
     rep stosw
+    pop ds
     pop es
     pop si
     pop dx
     pop cx
     pop bx
+    pop ax
+    ret
+
+## =====================================================================
+##  EGA support -- mode 0Dh, 320x200 in 16 colours.
+##
+##  Four bit planes of 8 KB at 0xA0000, with the plane chosen by register
+##  rather than by address. See docs/modules/vga.md.
+##
+##  gc_out / seq_out take AH = index, AL = value.
+## =====================================================================
+gc_out:
+    push dx
+    push ax
+    mov dx, 0x03CE
+    mov al, ah
+    out dx, al
+    pop ax
+    mov dx, 0x03CF
+    out dx, al
+    pop dx
+    ret
+
+seq_out:
+    push dx
+    push ax
+    mov dx, 0x03C4
+    mov al, ah
+    out dx, al
+    pop ax
+    mov dx, 0x03C5
+    out dx, al
+    pop dx
+    ret
+
+## ega_off -- put the Graphics Controller's Miscellaneous register back to
+## alphanumeric with the window at 0xB8000.
+##
+## EVERY non-EGA mode set must do this. GC 6 is what decides whether this card
+## is showing bit planes or a CGA page, so a mode 3 that leaves it at 0x05
+## returns a machine that has cleared a text screen nobody is looking at while
+## the display carries on scanning four planes of whatever the game left there.
+ega_off:
+    push ax
+    mov ax, 0x060E
+    call gc_out
+    pop ax
+    ret
+
+## ega_pal -- load the sixteen default palette registers.
+##
+## The attribute controller has ONE port for index and data, alternating, and
+## the flip-flop that says which is next is reset by READING 0x3DA. That read is
+## not optional and not a workaround: it is how every EGA program resynchronises
+## before touching the palette, because it cannot know which half of the
+## alternation the previous program left behind.
+ega_pal:
+    push ax
+    push bx
+    push dx
+    push si
+    push ds
+    mov ax, cs
+    mov ds, ax
+    mov si, offset ega_pal_def
+    xor bx, bx                   # BH too: the lookup below is [si+bx], not [si+bl]
+.epal:
+    mov dx, 0x03DA
+    in  al, dx                   # resets the index/data flip-flop
+    mov dx, 0x03C0
+    mov al, bl
+    out dx, al                   # index
+    mov al, [si+bx]
+    out dx, al                   # data, same port
+    inc bl
+    cmp bl, 16
+    jb .epal
+    pop ds
+    pop si
+    pop dx
+    pop bx
+    pop ax
+    ret
+
+## ega_init -- everything except clearing the planes, which v_setmode does so it
+## can honour the caller's "do not clear" bit.
+ega_init:
+    push ax
+    mov ax, 0x020F               # SEQ 2  map mask = all four planes
+    call seq_out
+    mov ax, 0x0000               # GC 0   set/reset
+    call gc_out
+    mov ax, 0x0100               # GC 1   enable set/reset = off
+    call gc_out
+    mov ax, 0x0200               # GC 2   colour compare
+    call gc_out
+    mov ax, 0x0300               # GC 3   rotate 0, function = replace
+    call gc_out
+    mov ax, 0x0400               # GC 4   read map = plane 0
+    call gc_out
+    mov ax, 0x0500               # GC 5   write mode 0, read mode 0
+    call gc_out
+    mov ax, 0x070F               # GC 7   colour don't care
+    call gc_out
+    mov ax, 0x08FF               # GC 8   bit mask = every bit
+    call gc_out
+    mov ax, 0x0605               # GC 6   graphics, 0xA0000 -- LAST: it switches
+    call gc_out
+
+    ## CRTC: start address zero, and the row stride the mode expects.
+    ##
+    ## The Offset register (0x13) is the width of a LOGICAL line in words, and
+    ## 0x14 -- 20 words, 40 bytes -- is exactly the 320 pixels mode 0Dh shows.
+    ## Software that scrolls makes it BIGGER than the display on purpose and
+    ## moves the start address through the margin, so this is a default rather
+    ## than a constant. vga.vhd reads whatever ends up here.
+    mov dx, 0x03D4
+    mov al, 0x0C                 # start address high
+    out dx, al
+    inc dx
+    xor al, al
+    out dx, al
+    dec dx
+    mov al, 0x0D                 # start address low
+    out dx, al
+    inc dx
+    xor al, al
+    out dx, al
+    dec dx
+    mov al, 0x13                 # offset / logical line width
+    out dx, al
+    inc dx
+    mov al, 0x14
+    out dx, al
+
+    call ega_pal
     pop ax
     ret
 
@@ -584,9 +736,34 @@ _int10:
     jmp v_getmode
 .i10_n0f:
     cmp ah, 0x0B
-    jne .i10_done
+    jne .i10_n0b
     jmp v_palette
+.i10_n0b:
+    cmp ah, 0x12
+    jne .i10_done
+    jmp v_alt_select
 .i10_done:
+    iret
+
+## AH=12h, BL=10h: return EGA information.
+##
+## This is the call software uses to decide an EGA is fitted, and the test is
+## not the values -- it is that BL comes back CHANGED from the 0x10 that was
+## passed in. A machine with no EGA leaves it alone. Keen 4 and King's Quest
+## both ask this before offering their EGA modes.
+##
+## BL = 0 claims 64 KB, the smallest EGA ever shipped. That is the closest
+## available answer to the truth: this board has 32 KB of display memory and
+## there is no way to say so in this interface. Claiming more would invite a
+## game to choose mode 10h, which cannot work here.
+v_alt_select:
+    cmp bl, 0x10
+    jne .as_done
+    mov bh, 0                    # 0 = colour display attached (0x3Dx)
+    mov bl, 0                    # 64 KB of display memory
+    mov ch, 0                    # feature connector bits
+    mov cl, 0x09                 # configuration switches, as an IBM EGA
+.as_done:
     iret
 
 ## AH=00: set video mode.  AL = mode (bit 7 set = don't clear video RAM):
@@ -609,7 +786,15 @@ v_setmode:
     jb .sm_text
     cmp al, 6
     jbe .sm_gfx
+    cmp al, 0x0D
+    je .sm_ega
+    ## Anything else -- including EGA modes 0Eh, 0Fh and 10h -- falls through to
+    ## text. Those need 64 KB, 128 KB and 112 KB of display memory against the
+    ## 32 KB that fits here, so there is nothing better to do than fail where it
+    ## can be seen. A game that asks for one gets a text screen rather than a
+    ## plausible-looking wrong picture.
 .sm_text:
+    call ega_off                 # GC 6 back to alphanumeric at 0xB8000
     call vid_init                # CRTC + 3D8/3D9 + clear to spaces
     mov ch, 0x29                 # 3D8: 80x25 text, video on, blink
     mov cl, 0x30                 # 3D9
@@ -617,6 +802,7 @@ v_setmode:
     mov di, 0x1000               # page size 4 KB
     jmp .sm_bda
 .sm_gfx:
+    call ega_off                 # CGA graphics is still the CGA window
     mov ch, 0x2A                 # mode 4: graphics + video enable
     mov cl, 0x30                 # palette 1 (cyan/magenta/white), intensity
     mov si, 40
@@ -651,6 +837,30 @@ v_setmode:
     mov al, cl
     out dx, al
     mov di, 0x4000               # page size 16 KB
+    jmp .sm_bda
+
+## Mode 0Dh -- 320x200x16, four planes at 0xA0000.
+.sm_ega:
+    call ega_init
+    test bh, 0x80                # bit 7 set -> keep the planes as they are
+    jnz .sm_ega_nc
+    push cx
+    cld
+    mov ax, EGAVID
+    mov es, ax
+    xor di, di
+    xor ax, ax
+    ## 8000 bytes clears all FOUR planes at once: the map mask is 0x0F, the
+    ## write mode is 0 and the bit mask is every bit, so one store reaches every
+    ## plane at that offset. This is 32 KB of screen cleared by 4000 words.
+    mov cx, 4000
+    rep stosw
+    pop cx
+.sm_ega_nc:
+    mov ch, 0x29                 # 3D8/3D9 shadows: EGA does not use them, but
+    mov cl, 0x30                 # the BDA is read by software that assumes CGA
+    mov si, 40                   # 40 bytes of 8 pixels across
+    mov di, 0x2000               # 8 KB per plane
 .sm_bda:
     mov ax, BDA
     mov ds, ax
@@ -3951,6 +4161,15 @@ _reboot:
 crtc_80x25:
     .byte 0x71,0x50,0x5A,0x0A,0x1F,0x06,0x19,0x1C
     .byte 0x02,0x07,0x06,0x07,0x00,0x00,0x00,0x00
+
+# The sixteen default EGA palette registers, for mode 0Dh.
+#
+# Entry 6 is 0x14 and not 0x06. That one exception is what makes colour 6 BROWN
+# rather than dark yellow -- the same special case the CGA palette carries, and
+# the reason wood, earth and skin look right in every game of this period.
+ega_pal_def:
+    .byte 0x00,0x01,0x02,0x03,0x04,0x05,0x14,0x07
+    .byte 0x38,0x39,0x3A,0x3B,0x3C,0x3D,0x3E,0x3F
 
 # Floppy disk parameter table (pointed to by INT 1E)
 _floppy_dpt:

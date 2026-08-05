@@ -48,6 +48,10 @@ ENTITY vga IS
 		  CUR_MOD				  : IN std_logic_vector(1 DOWNTO 0);   -- R10(6:5)
 		  -- EGA, from ega_regs. All of these are ignored unless EGA_ON.
 		  EGA_ON				  : IN std_logic;
+		  -- CRTC display start (R12/R13) and row stride (R19 / 0x13). EGA only:
+		  -- the CGA path deliberately ignores both, see the scan address below.
+		  EGA_START				  : IN std_logic_vector(15 DOWNTO 0);
+		  EGA_OFFS				  : IN std_logic_vector(7 DOWNTO 0);
 		  MAP_MASK				  : IN std_logic_vector(3 DOWNTO 0);
 		  SET_RES				  : IN std_logic_vector(3 DOWNTO 0);
 		  EN_SR					  : IN std_logic_vector(3 DOWNTO 0);
@@ -233,6 +237,15 @@ ARCHITECTURE behavior OF vga IS
   SIGNAL s2, s3 : std_logic_vector(7 DOWNTO 0);   -- planes 2 and 3;
                                                   -- 0 and 1 are MEMCHR/MEMATT
   SIGNAL ega_idx        : std_logic_vector(12 DOWNTO 0);
+  -- Row base, accumulated once per CGA scanline; see the scan address.
+  SIGNAL row_base       : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL ega_stride     : std_logic_vector(15 DOWNTO 0);
+  -- START and OFFSET cross c0 -> c1 and are sampled once a field, so they get
+  -- two flops each. Fourteen-odd bits sampled at one instant is a metastability
+  -- hazard whose symptom is one field drawn from a nonsense address -- rare
+  -- enough to read as an intermittent glitch rather than a fault.
+  SIGNAL st_s1, st_s2   : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL of_s1, of_s2   : std_logic_vector(7 DOWNTO 0)  := (OTHERS => '0');
   SIGNAL ega_col        : std_logic_vector(3 DOWNTO 0);
   SIGNAL ega_pal        : std_logic_vector(5 DOWNTO 0);
   SIGNAL RGBEGA         : std_logic_vector(5 DOWNTO 0);
@@ -492,8 +505,33 @@ BEGIN
   -- 320x200 doubles into the 640x400 active area exactly, the same as CGA
   -- mode 4, so nothing about the timing changes.
   ----------------------------------------------------------------------------
-  ega_idx <= conv_std_logic_vector(40 * conv_integer(YY(10 DOWNTO 1))
-                                      + conv_integer(XX(10 DOWNTO 4)), 13);
+  ----------------------------------------------------------------------------
+  -- THE ROW STRIDE IS NOT 40. It is whatever the CRTC's Offset register says.
+  --
+  -- This used to be hardcoded at 40 bytes -- 320 pixels, eight to a byte -- and
+  -- Keen 4 came out sheared, every scanline displaced a little further than the
+  -- one above it. That progressive displacement is the signature of a stride
+  -- mismatch and nothing else.
+  --
+  -- The Offset register (0x13) sets the width of a LOGICAL line in words, and
+  -- software makes it wider than the display on purpose: the extra becomes the
+  -- margin it scrolls into. A game with a 320-pixel window and a 352-pixel
+  -- logical line moves horizontally by changing the start address instead of
+  -- redrawing, which is the whole reason EGA scrolls smoothly and CGA does not.
+  -- Hardcoding the stride assumes nobody ever wants that, and every scrolling
+  -- game wants it.
+  --
+  -- ACCUMULATED, NOT MULTIPLIED. The obvious form is
+  --
+  --     ega_idx = start + stride * row + XX/16
+  --
+  -- but a variable stride makes that a real multiplier sitting in the 25 MHz
+  -- pixel path, and the worst slack on this design is already +0.15 ns. So the
+  -- row base is a register that gains one stride per CGA scanline, which is
+  -- both cheaper and what an actual CRTC does: it latches the start address at
+  -- the top of the field and adds the offset per row.
+  ega_stride <= x"00" & of_s2(6 DOWNTO 0) & '0';      -- words -> bytes
+  ega_idx    <= row_base(12 DOWNTO 0) + XX(10 DOWNTO 4);
 
   vga_idx <= ega_idx                   WHEN EGA_ON = '1' ELSE
              YY(1) & goff(12 DOWNTO 1) WHEN gfx_on = '1' ELSE
@@ -522,6 +560,14 @@ BEGIN
       s3     <= PL3(conv_integer(vga_idx));
       GSEL   <= goff(0);
       cur_c1 <= cur_c0;                 -- rides with MEMCHR, stage 1 of 2
+
+      -- Clock-domain crossing, c0 -> c1. FREE-RUNNING, every pixel clock: a
+      -- two-flop synchroniser only resolves metastability if the second flop
+      -- gets a whole clock to settle after the first. Sampling these once a
+      -- field instead would give the pair one edge every 16.8 ms and defeat
+      -- the point of having two.
+      st_s1 <= EGA_START;  st_s2 <= st_s1;
+      of_s1 <= EGA_OFFS;   of_s2 <= of_s1;
     END IF;
   END PROCESS;
 
@@ -560,11 +606,26 @@ BEGIN
           Y <= Y + 1;
           IF (Y > 34 AND Y < 515) THEN
             YY <= YY + 1;
+            -- A new CGA scanline begins on every EVEN YY, because the 200-line
+            -- picture is doubled into 400. So the row base advances at the end
+            -- of every odd line: YY = 0,1 is row 0, and stepping off YY = 1
+            -- sets up row 1.
+            IF YY(0) = '1' THEN
+              row_base <= row_base + ega_stride;
+            END IF;
           END IF;
         ELSE
           Y  <= "00000000000";
           YY <= "00000000000";
           frame_cnt <= frame_cnt + 1;   -- one per field, drives the cursor blink
+
+          -- Load the address counter from the start address, once per field.
+          -- A 6845 does exactly this during vertical retrace and then simply
+          -- counts, which is why software may write the register at any time
+          -- without tearing the picture -- and why adding it per pixel instead,
+          -- as the first attempt at CGA scrolling did, splits the screen at
+          -- whatever line the write happened to land on.
+          row_base <= st_s2;
 
           -- If the display start address is ever wired in again, it is latched
           -- HERE and nowhere else. A 6845 loads its address counter from
