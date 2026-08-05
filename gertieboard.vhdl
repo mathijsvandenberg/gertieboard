@@ -148,6 +148,17 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_uart_rxd             : std_logic;
   SIGNAL n_uart_tx              : std_logic;
   SIGNAL n_vs                   : std_logic;
+  -- EGA register file -> vga
+  SIGNAL n_ega_on               : std_logic;
+  SIGNAL n_map_mask             : std_logic_vector(3 downto 0);
+  SIGNAL n_set_res              : std_logic_vector(3 downto 0);
+  SIGNAL n_en_sr                : std_logic_vector(3 downto 0);
+  SIGNAL n_rotate               : std_logic_vector(2 downto 0);
+  SIGNAL n_func_sel             : std_logic_vector(1 downto 0);
+  SIGNAL n_rd_map               : std_logic_vector(1 downto 0);
+  SIGNAL n_wr_mode              : std_logic_vector(1 downto 0);
+  SIGNAL n_bit_mask             : std_logic_vector(7 downto 0);
+  SIGNAL n_palette              : std_logic_vector(95 downto 0);
   SIGNAL n_dispen               : std_logic;
   SIGNAL n_vret                 : std_logic;
 BEGIN
@@ -167,6 +178,16 @@ BEGIN
       CUR_TOP              => n_cur_top,
       CUR_BOT              => n_cur_bot,
       CUR_MOD              => n_cur_mod,
+      EGA_ON               => n_ega_on,
+      MAP_MASK             => n_map_mask,
+      SET_RES              => n_set_res,
+      EN_SR                => n_en_sr,
+      ROTATE               => n_rotate,
+      FUNC_SEL             => n_func_sel,
+      RD_MAP               => n_rd_map,
+      WR_MODE              => n_wr_mode,
+      BIT_MASK             => n_bit_mask,
+      PALETTE              => n_palette,
       HS                   => n_hs,
       VS                   => n_vs,
       DISPEN               => n_dispen,
@@ -375,6 +396,32 @@ BEGIN
       RAM_CS               => n_ram_cs,
       DATAOUT              => n_periph_rdata,
       RAM_SIO              => RAM_SIO
+    );
+
+  -- The EGA register file. It observes reads of 0x3DA to reset the attribute
+  -- controller's index/data flip-flop, but does not drive that port -- that is
+  -- cga_status's job and the two are not connected.
+  egaregs1 : ENTITY work.ega_regs
+    PORT MAP (
+      CLK                  => n_c0,
+      DATA                 => n_cpu_wdata,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      EGA_ON               => n_ega_on,
+      MAP_MASK             => n_map_mask,
+      SET_RES              => n_set_res,
+      EN_SR                => n_en_sr,
+      COL_CMP              => OPEN,
+      ROTATE               => n_rotate,
+      FUNC_SEL             => n_func_sel,
+      RD_MAP               => n_rd_map,
+      WR_MODE              => n_wr_mode,
+      RD_MODE              => OPEN,
+      COL_DC               => OPEN,
+      BIT_MASK             => n_bit_mask,
+      PALETTE              => n_palette
     );
 
   cgastatus1 : ENTITY work.cga_status
