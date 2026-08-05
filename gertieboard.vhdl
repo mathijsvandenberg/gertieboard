@@ -58,6 +58,17 @@ ENTITY gertieboard IS
     USB1_DP        : INOUT std_logic;
     USB1_DM        : INOUT std_logic;
     RAM_SIO        : INOUT std_logic_vector(3 downto 0);
+    -- DE0-Nano SDRAM, 32 MB. Dedicated pins, not the GPIO headers.
+    DRAM_ADDR      : OUT   std_logic_vector(12 downto 0);
+    DRAM_BA        : OUT   std_logic_vector(1 downto 0);
+    DRAM_DQ        : INOUT std_logic_vector(15 downto 0);
+    DRAM_DQM       : OUT   std_logic_vector(1 downto 0);
+    DRAM_CLK       : OUT   std_logic;
+    DRAM_CKE       : OUT   std_logic;
+    DRAM_CS_N      : OUT   std_logic;
+    DRAM_RAS_N     : OUT   std_logic;
+    DRAM_CAS_N     : OUT   std_logic;
+    DRAM_WE_N      : OUT   std_logic;
     DBG            : OUT   std_logic_vector(7 downto 0)
   );
 END gertieboard;
@@ -163,6 +174,16 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_palette              : std_logic_vector(95 downto 0);
   SIGNAL n_dispen               : std_logic;
   SIGNAL n_vret                 : std_logic;
+  -- SDRAM client interface
+  SIGNAL n_sd_req               : std_logic;
+  SIGNAL n_sd_we                : std_logic;
+  SIGNAL n_sd_addr              : std_logic_vector(23 downto 0);
+  SIGNAL n_sd_din               : std_logic_vector(15 downto 0);
+  SIGNAL n_sd_dout              : std_logic_vector(15 downto 0);
+  SIGNAL n_sd_be                : std_logic_vector(1 downto 0);
+  SIGNAL n_sd_ack               : std_logic;
+  SIGNAL n_sd_init              : std_logic;
+  SIGNAL n_sd_state             : std_logic_vector(3 downto 0);
 BEGIN
 
   vga1 : ENTITY work.vga
@@ -426,6 +447,60 @@ BEGIN
       COL_DC               => OPEN,
       BIT_MASK             => n_bit_mask,
       PALETTE              => n_palette
+    );
+
+  -- The 32 MB SDRAM, and an I/O window onto it. The window exists so the memory
+  -- can be proved by itself before the EGA planes move into it -- a fault there
+  -- would show up as a corrupt picture, which looks exactly like a bug in the
+  -- addressing, the scanline buffer or the write path.
+  sdram1 : ENTITY work.sdram_ctrl
+    GENERIC MAP (
+      CLK_HZ               => 50000000
+    )
+    PORT MAP (
+      CLK                  => n_c3,
+      RESET                => n_mem_rst,
+      REQ                  => n_sd_req,
+      WE                   => n_sd_we,
+      ADDR                 => n_sd_addr,
+      DIN                  => n_sd_din,
+      BE                   => n_sd_be,
+      DOUT                 => n_sd_dout,
+      ACK                  => n_sd_ack,
+      BUSY                 => OPEN,
+      INIT_DONE            => n_sd_init,
+      DBG_STATE            => n_sd_state,
+      DRAM_ADDR            => DRAM_ADDR,
+      DRAM_BA              => DRAM_BA,
+      DRAM_DQ              => DRAM_DQ,
+      DRAM_DQM             => DRAM_DQM,
+      DRAM_CLK             => DRAM_CLK,
+      DRAM_CKE             => DRAM_CKE,
+      DRAM_CS_N            => DRAM_CS_N,
+      DRAM_RAS_N           => DRAM_RAS_N,
+      DRAM_CAS_N           => DRAM_CAS_N,
+      DRAM_WE_N            => DRAM_WE_N
+    );
+
+  sdramio1 : ENTITY work.sdram_io
+    PORT MAP (
+      CLK_IO               => n_c0,
+      CLK_MEM              => n_c3,
+      RESET                => n_mem_rst,
+      IOADDR               => n_io_addr,
+      DATA                 => n_cpu_wdata,
+      IORD                 => n_io_rd,
+      IOWR                 => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      REQ                  => n_sd_req,
+      WE                   => n_sd_we,
+      ADDR                 => n_sd_addr,
+      DIN                  => n_sd_din,
+      BE                   => n_sd_be,
+      DOUT                 => n_sd_dout,
+      ACK                  => n_sd_ack,
+      INIT_DONE            => n_sd_init,
+      DBG_STATE            => n_sd_state
     );
 
   cgastatus1 : ENTITY work.cga_status
