@@ -1414,12 +1414,58 @@ g_render:
     push es
     push ds
     mov ch, [0x49]               # CH = video mode (while DS=BDA)
-    xor ah, ah
-    mov si, ax                   # SI = char
+    mov bl, al                   # BL = the character
+    xor bh, bh
+
+    ## ---------------------------------------------------------------
+    ##  WHERE THE GLYPH LIVES, and why the top half is not in ROM.
+    ##
+    ##  A real PC carries only characters 0..127 in the BIOS. The upper
+    ##  128 are a USER table addressed by INT 1Fh, which DOS leaves at
+    ##  0000:0000 unless something like GRAFTABL installs one -- so on a
+    ##  stock machine a code above 127 draws NOTHING in graphics mode.
+    ##
+    ##  This BIOS has all 256 glyphs, so it drew them, and King's Quest
+    ##  came out with a C-cedilla in every cell that should have been
+    ##  blank: it pads with 0x80, and every machine it was written for
+    ##  renders that as nothing. EGATEXT proved the fault was not in any
+    ##  of the INT 10h paths -- all six of its rows were correct -- which
+    ##  left only what the character MEANS.
+    ##
+    ##  So: 0..127 from ROM, 128..255 from INT 1Fh, and a blank when that
+    ##  vector is null. The glyph's segment goes on the stack here and is
+    ##  popped into DS by whichever renderer runs below.
+    ## ---------------------------------------------------------------
+    cmp bl, 0x80
+    jae .r_high
+    mov si, bx
     shl si, 1
     shl si, 1
     shl si, 1                    # SI = char*8
-    add si, offset font8x8       # -> glyph (read with DS=CS below)
+    add si, offset font8x8
+    push cs                      # ...in ROM
+    jmp .r_seg
+
+.r_high:
+    xor si, si
+    mov ds, si
+    mov si, [0x7C]               # INT 1Fh vector: offset
+    mov ax, [0x7E]               #                 segment
+    mov di, ax
+    or  di, si
+    jz  .r_none                  # nobody installed one -> draw nothing
+    sub bl, 0x80
+    shl bx, 1
+    shl bx, 1
+    shl bx, 1
+    add si, bx
+    push ax                      # ...in the user's table
+    jmp .r_seg
+.r_none:
+    mov si, offset blank8
+    push cs
+
+.r_seg:
     cmp ch, 0x0D
     je .r_ega                    # EGA is planar and lives somewhere else
     xor ax, ax
@@ -1439,8 +1485,7 @@ g_render:
     mov dx, ax                   # DX = running framebuffer offset
     mov ax, VID
     mov es, ax
-    push cs
-    pop ds                       # DS = CS: font8x8 + spread16 live here
+    pop ds                       # glyph segment, pushed at .r_seg above
     xor cl, cl                   # CL = glyph row 0..7  (CH = mode preserved)
 .r_row:
     mov di, dx
@@ -1452,16 +1497,15 @@ g_render:
     cmp ch, 6
     je .r_one
     mov ah, al                   # 2bpp: expand 8 px -> 16 bits, fg colour 3
-    mov bx, offset spread16
     shr al, 1                    # four single-bit shifts: `shr al,4` is 80186+,
     shr al, 1                    # and CL is already the glyph-row counter here
     shr al, 1
     shr al, 1
-    xlatb                        # AL = spread16[high nibble]
+    call spread                  # AL = spread16[high nibble]
     mov es:[di], al
     mov al, ah
     and al, 0x0f
-    xlatb                        # AL = spread16[low nibble]
+    call spread                  # AL = spread16[low nibble]
     mov es:[di+1], al
     jmp .r_adv
 .r_one:
@@ -1506,8 +1550,7 @@ g_render:
     mov di, ax                   # DI = the cell's byte offset
     mov ax, EGAVID
     mov es, ax
-    push cs
-    pop ds                       # DS = CS: font8x8 lives here
+    pop ds                       # glyph segment, pushed at .r_seg above
     cld
     mov ax, 0x020F               # SEQ 2: map mask = all four planes
     call seq_out
@@ -1527,6 +1570,22 @@ g_render:
     pop cx
     pop bx
     pop ax
+    ret
+
+## spread: AL = 0..15 -> the matching 2-bpp byte.
+##
+## This was an XLATB, which reads DS:BX -- and DS now holds the GLYPH's segment,
+## which for characters 128..255 is whatever table INT 1Fh points at rather than
+## this ROM. Reading the expansion table through CS explicitly keeps DS free for
+## the glyph, and costs a call per nibble on a path that is already writing to
+## video memory a byte at a time.
+spread:
+    push bx
+    mov bl, al
+    xor bh, bh
+    add bx, offset spread16
+    mov al, cs:[bx]
+    pop bx
     ret
 
 ## g_scroll: scroll the graphics screen up one 8-pixel text row. Each
@@ -1572,6 +1631,11 @@ spread16:
     .byte 0x00,0x03,0x0C,0x0F,0x30,0x33,0x3C,0x3F
     .byte 0xC0,0xC3,0xCC,0xCF,0xF0,0xF3,0xFC,0xFF
     .align 2
+# Eight zero bytes: the glyph drawn for codes 128..255 when no INT 1Fh table
+# is installed, which is what a real machine shows.
+blank8:
+    .byte 0,0,0,0,0,0,0,0
+
 font8x8:
     .incbin "font8x8.bin"
 
