@@ -137,6 +137,61 @@ start:
         xor  ah, ah
         int  0x16
 
+; ===========================================================================
+;  PAGE 2 -- drawing text ONTO something, which is what a status bar is.
+;
+;  King's Quest paints a white strip and puts BLACK text on it. That cannot be
+;  said as "foreground here, background there": it is done by XOR, flipping the
+;  set pixels against what is already on screen. This draws a white strip and
+;  then the same word over it three ways, so the one that works is visible and
+;  the ones that do not are visible too.
+;
+;  EGATEST never covered XOR -- it tested replace, write mode 1 and write mode
+;  2 -- so if the XOR row is wrong, the fault is in the hardware's function
+;  select and not in the BIOS.
+; ===========================================================================
+        mov  ax, 0x0003         ; clear everything and come back, so page 2
+        int  0x10               ; is not read against page 1's leftovers
+        mov  ax, 0x000D
+        int  0x10
+
+        mov  dx, 0x0000
+        call gotoxy
+        mov  si, l_p2
+        call say
+
+        ; ---- a white strip across rows 4..5, drawn straight to the planes --
+        ; Not via the BIOS: this is the BACKGROUND the text has to work over,
+        ; and it has to be there regardless of whether the BIOS can draw.
+        call white_strip
+
+        ; ---- the same word, three ways, on top of the strip ---------------
+        mov  dx, 0x0400
+        call gotoxy
+        mov  bl, 0x0F           ; opaque WHITE  -> white on black cells
+        mov  si, s_word
+        call sayc
+
+        mov  dx, 0x040A
+        call gotoxy
+        mov  bl, 0x00           ; opaque BLACK  -> black on black cells
+        mov  si, s_word
+        call sayc
+
+        mov  dx, 0x0414
+        call gotoxy
+        mov  bl, 0x8F           ; XOR white     -> BLACK ON WHITE. This is the
+        mov  si, s_word         ; one King's Quest needs.
+        call sayc
+
+        mov  dx, 0x0700
+        call gotoxy
+        mov  si, l_p2exp
+        call say
+
+        xor  ah, ah
+        int  0x16
+
         mov  ax, 0x060E         ; GC 6 back to alphanumeric before mode 3
         mov  dx, 0x03CE
         out  dx, al
@@ -177,6 +232,86 @@ wr09:
         pop  ax
         ret
 
+; white_strip -- rows 4 and 5 solid white, written directly to all four planes.
+; Map mask open, write mode 0, replace, every bit: one store paints eight pixels
+; white on every plane at once.
+white_strip:
+        push ax
+        push cx
+        push di
+        push es
+        mov  ax, 0xA000
+        mov  es, ax
+        mov  ax, 0x020F         ; SEQ 2 map mask = all four planes
+        call seqout
+        mov  ax, 0x08FF         ; GC 8 bit mask = every bit
+        call gcout
+        mov  ax, 0x0300         ; GC 3 function = replace
+        call gcout
+        mov  ax, 0x0100         ; GC 1 enable set/reset off
+        call gcout
+        mov  di, 4*8*40         ; first scanline of character row 4
+        mov  cx, 16*40          ; two character rows
+        mov  al, 0xFF
+        cld
+        rep  stosb
+        pop  es
+        pop  di
+        pop  cx
+        pop  ax
+        ret
+
+; sayc -- like say, but through AH=09h so the colour in BL is honoured, and
+; advancing the cursor by hand because AH=09h does not move it.
+sayc:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        cld
+.c:     lodsb
+        or   al, al
+        jz   .cd
+        mov  ah, 9
+        xor  bh, bh
+        mov  cx, 1
+        int  0x10
+        inc  dl
+        call gotoxy
+        jmp  .c
+.cd:    pop  si
+        pop  dx
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+
+; seqout / gcout -- AH = index, AL = value
+seqout:
+        push dx
+        push ax
+        mov  dx, 0x3C4
+        mov  al, ah
+        out  dx, al
+        pop  ax
+        mov  dx, 0x3C5
+        out  dx, al
+        pop  dx
+        ret
+
+gcout:
+        push dx
+        push ax
+        mov  dx, 0x3CE
+        mov  al, ah
+        out  dx, al
+        pop  ax
+        mov  dx, 0x3CF
+        out  dx, al
+        pop  dx
+        ret
+
 ; say -- teletype the NUL-terminated string at DS:SI
 say:
         push ax
@@ -205,6 +340,9 @@ l_0asp   db '0A sp',0
 l_0estr  db '0E str',0
 s_spaced db 'X Y Z',0
 s_ref    db 'abc ABC 123',0
+s_word   db 'Score',0
+l_p2     db 'page 2: text over a white strip',0
+l_p2exp  db 'left 0F white  mid 00 black  right 8F XOR',0
 
 msg_intro:
         db 'EGATEXT - which INT 10h path mangles which character?',13,10
@@ -224,7 +362,11 @@ msg_intro:
         db 'If only "09 sp*" is wrong, the attribute is reaching the',13,10
         db 'glyph lookup. If every row is right, the BIOS is innocent',13,10
         db 'and the game is passing 0x80 on purpose.',13,10,13,10
-        db 'Press a key.',13,10,'$'
+        db 'Press a key. A second page then draws text OVER a white',13,10
+        db 'strip three ways -- opaque white, opaque black, and XOR.',13,10
+        db 'Only XOR can put black text on a light background, and it',13,10
+        db 'is the one King&s status bar needs. If the XOR word is not',13,10
+        db 'readable black-on-white, the fault is in the hardware.',13,10,'$'
 
 msg_done:
         db 13,10,'Back in text mode.',13,10,'$'
