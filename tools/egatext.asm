@@ -18,9 +18,12 @@
 ;
 ;    09 sp   AH=09h with a space          must be BLANK
 ;    09 A    AH=09h with 'A'              must be AAAA...
-;    09 80   AH=09h with 0x80             must be the C-cedilla -- this is the
-;                                         control, proving the font and the
-;                                         renderer are working
+;    09 80   AH=09h with 0x80             must be BLANK. The upper 128 glyphs
+;                                         are not in ROM on a real machine --
+;                                         they come from INT 1Fh, which DOS
+;                                         leaves null -- so a code above 127
+;                                         draws nothing until something like
+;                                         GRAFTABL installs a table.
 ;    09 sp*  AH=09h, space, attribute 80  must be BLANK: the attribute must not
 ;                                         reach the glyph lookup
 ;    0A sp   AH=0Ah with a space          must be BLANK
@@ -64,8 +67,8 @@ start:
         mov  dx, 0x010A
         call gotoxy
         mov  al, ' '
-        xor  bl, bl
-        call wr09
+        mov  bl, 15             ; a REAL colour: BL is honoured now, and a test
+        call wr09               ; that passes 0 draws black on black
 
         ; ---- row 3: AH=09h, 'A'. Must be a run of A. --------------------
         mov  dx, 0x0300
@@ -75,7 +78,7 @@ start:
         mov  dx, 0x030A
         call gotoxy
         mov  al, 'A'
-        xor  bl, bl
+        mov  bl, 15
         call wr09
 
         ; ---- row 5: AH=09h, 0x80. THE CONTROL: must be the C-cedilla. ---
@@ -88,7 +91,7 @@ start:
         mov  dx, 0x050A
         call gotoxy
         mov  al, 0x80
-        xor  bl, bl
+        mov  bl, 15
         call wr09
 
         ; ---- row 7: AH=09h, space, ATTRIBUTE 0x80. Must be BLANK. -------
@@ -354,8 +357,8 @@ msg_intro:
         db 'Six rows, each labelled. Expected:',13,10
         db '  09 sp    BLANK',13,10
         db '  09 A     AAAAAAAA',13,10
-        db '  09 80    C-cedillas  <- the control. If this row is blank,',13,10
-        db '                          ignore every other row.',13,10
+        db '  09 80    BLANK       <- codes above 127 come from INT 1Fh,',13,10
+        db '                          which DOS leaves null',13,10
         db '  09 sp*   BLANK       <- space, but attribute 0x80',13,10
         db '  0A sp    BLANK',13,10
         db '  0E str   X Y Z, with real gaps',13,10,13,10
