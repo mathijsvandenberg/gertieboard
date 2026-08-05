@@ -13,19 +13,31 @@
 ;  sequence and prints every intermediate value, so the wrong one is visible
 ;  rather than inferred.
 ;
-;  TEST 1 is the one that settles it, and it rests on nothing that can be
-;  argued about. Channel 2 is timed against the BIOS tick -- both come from the
-;  same 8253, and the tick is a known 54.925 ms -- so it needs no assumption
-;  about the CPU at all:
+;  TEST 1 times channel 2 against the BIOS tick. Both come from the same 8253,
+;  so it needs no assumption about the CPU at all -- but it needs one about the
+;  8253, and the obvious version of this test is WORTHLESS:
 ;
-;      expected delta = 54.925 ms x 1.1905 MHz = about 65388 counts
+;      The BIOS programs counter 0 with divisor 0, meaning 65536. Counter 2
+;      armed with 0xFFFF also wraps every 65536 counts. So one tick is EXACTLY
+;      one full wrap of channel 2, the two readings are the same number, and
+;      the delta is zero -- which is also what a dead counter returns.
 ;
-;  If that comes back right, channel 2 counts at the rate the arithmetic
-;  assumes and the fault is in the loop timing. If it comes back wrong, the
-;  latch-and-read is broken and every figure built on it is meaningless.
+;  This file shipped with that version. It expected "about 65388" and would have
+;  reported a perfectly good PIT as "essentially ZERO, not counting at all".
+;  The aliasing is total: no threshold could have rescued it.
 ;
-;  It sits just under 65536, so a correct reading nearly fills the counter.
-;  Anything much larger has wrapped; anything much smaller has not counted.
+;  So counter 0 is reprogrammed to 16384 for the duration, which is not a whole
+;  wrap of channel 2, and the tick that results is 72.6 Hz instead of 18.2:
+;
+;      expected delta = 16384 counts, exactly
+;
+;  Counter 0 is put back to divisor 0 afterwards. DOS's time of day will be a
+;  fraction of a second out; nothing else notices.
+;
+;  What this proves is that channel 2 counts at the SAME rate counter 0 does.
+;  It cannot prove the absolute 1.1905 MHz, and neither can anything else on
+;  this machine -- both counters come from c2, and there is no second clock to
+;  check it against. That is a real limit of the test, not a gap in it.
 ;
 ;  Build:  nasm -f bin cpuclk.asm -o cpuclk.com
 ; ============================================================================
@@ -50,6 +62,15 @@ start:
         mov  dx, msg_t1
         call puts
 
+        ; Counter 0 to 16384 so one tick is NOT a whole wrap of counter 2.
+        ; Mode 3, lo/hi, binary -- the same mode the BIOS uses, only shorter.
+        mov  al, 0x36
+        out  0x43, al
+        mov  al, 0x00
+        out  0x40, al
+        mov  al, 0x40
+        out  0x40, al
+
         call pit2_arm
         ; align to a tick edge, then measure across exactly one tick
         mov  bx, [es:0x6C]
@@ -62,6 +83,13 @@ start:
         je   .wait
         call pit2_read
         mov  di, ax                     ; and at the end
+
+        ; put the BIOS tick back before printing anything
+        mov  al, 0x36
+        out  0x43, al
+        xor  al, al
+        out  0x40, al
+        out  0x40, al
 
         mov  dx, msg_start
         call puts
@@ -81,16 +109,17 @@ start:
         call puts
 
         ; verdict, with a generous window -- this is looking for "wrong by a
-        ; factor", not for a percent
+        ; factor", not for a percent. 16384 expected; a few counts of latch
+        ; overhead either way is normal.
         mov  ax, [d1]
         mov  dx, msg_v_dead
         cmp  ax, 1000
         jb   .v1
         mov  dx, msg_v_slow
-        cmp  ax, 55000
+        cmp  ax, 14000
         jb   .v1
         mov  dx, msg_v_ok
-        cmp  ax, 65535
+        cmp  ax, 19000
         jbe  .v1
         mov  dx, msg_v_odd
 .v1:    call puts
@@ -244,26 +273,28 @@ msg_hdr db 'CPUCLK - why is the measured CPU clock impossible?',13,10
         db 'Both imply a LOOP cost no CPU can have, so the fault is in the',13,10
         db 'measurement. This prints every value POST cannot show.',13,10,'$'
 
-msg_t1  db 13,10,'1  Does PIT channel 2 count at 1.1905 MHz?',13,10
-        db '   Timed against ONE BIOS tick, which is 54.925 ms. No assumption',13,10
-        db '   about the CPU is involved.',13,10,'$'
+msg_t1  db 13,10,'1  Does PIT channel 2 count at the rate counter 0 does?',13,10
+        db '   Counter 0 is set to 16384 for this test, because the BIOS value',13,10
+        db '   of 65536 is exactly one wrap of counter 2 and the delta would be',13,10
+        db '   zero however well the PIT worked. No assumption about the CPU is',13,10
+        db '   involved. Counter 0 is restored afterwards.',13,10,'$'
 msg_t2  db 13,10,'2  The calibration loop, timed exactly as the BIOS times it',13,10
         db '   4096 iterations of a two-byte LOOP.',13,10,'$'
 
 msg_start db '     channel 2 at start : $'
 msg_end   db 13,10,'     channel 2 at end   : $'
 msg_delta db 13,10,'     counted           : $'
-msg_exp1  db '   (expect about 65388)',13,10,'$'
+msg_exp1  db '   (expect 16384)',13,10,'$'
 
 msg_v_ok   db '     -> plausible: channel 2 counts at about the right rate,',13,10
            db '        so the fault is in the loop timing, not the reference.',13,10,'$'
-msg_v_slow db '     -> TOO FEW. Channel 2 is counting far slower than 1.1905 MHz,',13,10
+msg_v_slow db '     -> TOO FEW. Channel 2 is counting far slower than counter 0,',13,10
            db '        or the latch-and-read is returning something else. Every',13,10
            db '        figure built on this reference is meaningless.',13,10,'$'
 msg_v_dead db '     -> essentially ZERO. Channel 2 is not counting at all: check',13,10
            db '        the gate at port 0x61 bit 0, and whether timer8253',13,10
            db '        implements mode 0 for counter 2.',13,10,'$'
-msg_v_odd  db '     -> impossible for one tick; the counter wrapped.',13,10,'$'
+msg_v_odd  db '     -> TOO MANY for one tick of 16384.',13,10,'$'
 
 msg_sum db 13,10,'What that implies',13,10,'$'
 msg_us  db '     loop took, microseconds : $'

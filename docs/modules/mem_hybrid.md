@@ -28,48 +28,55 @@ their `READY` signals.
 ## Address split
 
 ```vhdl
-sel_ps <= '1' WHEN ((ADDR >= x"08000") AND (ADDR < x"A0000"))
-               OR  (ADDR >= x"F0000") ELSE '0';
-
+sel_ps <= owned_by_psram(ADDR);       -- from memmap.vhd, NOT restated here
 READY  <= ready_ps WHEN sel_ps = '1' ELSE ready_m9k;
 ```
 
 | Region | Served by | Latency |
 |---|---|---|
-| `0x00000`–`0x07FFF` | `m9k_mem` (32 KB on-chip) | ~60 ns |
-| `0x08000`–`0x9FFFF` | `psram_ctrl` | see below |
+| `0x00000`–`0x9FFFF` | `psram_ctrl` | see below — **all 640 KB, one speed** |
 | `0xE0000`–`0xE0FFF` | `m9k_mem` (4 KB on-chip) | ~60 ns; fixed-disk block buffer |
-| `0xF0000`–`0xFFFFF` | `psram_ctrl` | BIOS F-segment |
+| `0xF0000`–`0xFBFFF` | `psram_ctrl` | `0xFF` fill; `BIOSFLSH` reads the whole F-segment |
+| `0xFC000`–`0xFFFFF` | `m9k_mem` (16 KB on-chip) | ~60 ns; **the BIOS image** |
 
-Their ranges are disjoint, so there is never contention. Note the consequence:
-**game code, DOS and the BIOS all execute from PSRAM** — only the lowest 32 KB and the
-disk buffer are on-chip.
+Their ranges are disjoint, so there is never contention.
 
-> The 4 KB buffer window falls to `m9k_mem` because `sel_ps` claims `0xF0000` and above,
-> not `0xE0000` and above. Widening `sel_ps` would hand the buffer to the PSRAM and put
-> 8 KB back on the DOS memory bill. See
-> [fixed disk](../fixed-disk.md#where-the-buffer-lives).
+The split used to run the other way — the low 32 KB on-chip and the BIOS in PSRAM — and
+both halves of that were wrong:
+
+- **Conventional memory had two speeds.** A program's timing depended on where DOS
+  happened to load it. Software of this era calibrates its delay loops against itself, so
+  a game's music could run fast or slow for no visible reason. It is now uniform.
+- **Every `INT` paid PSRAM latency**, on the code that is entered most often in the
+  machine. The BIOS is 16 KB and now runs at zero wait states.
+
+> All four modules that care about this boundary take it from
+> [`memmap.vhd`](../../memmap.vhd) rather than restating it. Getting `sel_ps` and
+> `psram_ctrl`'s `is_ram` out of step is exactly how the loader came to hang at POST code
+> `02`, with the CPU stopped on an address that looks entirely ordinary. See
+> [memory map](../memory-map.md#which-module-answers-a-memory-cycle).
 
 ## m9k_mem
 
-A simple 36 KB synchronous RAM with a small state machine
+A simple 20 KB synchronous RAM with a small state machine
 (`M_IDLE → M_WAIT → M_DONE`) that drops `READY` for one cycle and then completes.
 
-It backs **two disjoint windows** out of one inferred RAM: the low 32 KB maps 1:1, and
-the 4 KB disk buffer at `0xE0000` is packed on top of it at index `LOW_DEPTH`.
+It backs **two disjoint windows** out of one inferred RAM: the 16 KB BIOS image maps 1:1
+from `ADDR(13:0)`, and the 4 KB disk buffer at `0xE0000` is packed on top of it at index
+`BIOS_DEPTH`.
 
 ```vhdl
-in_low <= '1' WHEN (ADDR < x"08000") ELSE '0';
-in_buf <= '1' WHEN ((ADDR >= x"E0000") AND (ADDR < x"E1000")) ELSE '0';
-in_win <= in_low OR in_buf;
+in_bios <= owned_by_bios(ADDR);       -- both from memmap.vhd
+in_buf  <= owned_by_diskbuf(ADDR);
+in_win  <= in_bios OR in_buf;
 
-midx   <= conv_integer(ADDR(14 DOWNTO 0)) WHEN in_low = '1'
-     ELSE LOW_DEPTH + conv_integer(ADDR(11 DOWNTO 0));
+midx    <= conv_integer(ADDR(13 DOWNTO 0)) WHEN in_bios = '1'
+      ELSE BIOS_DEPTH + conv_integer(ADDR(11 DOWNTO 0));
 ```
 
-Quartus infers this as a single 36864×8 altsyncram — 294,912 bits, 36 M9K blocks — with
-50 logic elements for the whole module. Check that in the fit report if you touch it: if
-the address mux ever stops it inferring RAM, 36 KB of registers will not fit.
+Quartus infers this as a single altsyncram — 163,840 bits, 20 M9K blocks — with about 30
+logic elements for the whole module. Check that in the fit report if you touch it: if the
+address mux ever stops it inferring RAM, 20 KB of registers will not fit.
 
 ## psram_ctrl — QPI controller
 

@@ -31,9 +31,10 @@ byte-identical to the P3105 one (MD5 `59bf05a0c207efcb2981f1c9c6eb21e1`).
 | 8 | `Using Diskette Drive A:` |
 | 9 | `Internal Hard Disk : Ready  2048 KB  (9D 60 15)` |
 | 10 | `Booting...` |
+| 11 | `System clock set to: 8.29 MHz` |
 
 Rows 3 and 7 are left blank. Rows 0–2, 4–6, 8 and 10 are written by `putrow` during
-POST; row 9 is filled in later by `hd_detect`.
+POST; row 9 is filled in later by `hd_detect`, and row 11 by `cpu_speed`.
 
 Row 9 uses the original's own wording — `Internal Hard Disk : ` followed by `Ready` or
 `NOT READY`, both lifted from the P3105 ROM's string table — and the same `0x07`
@@ -116,7 +117,40 @@ theoretical — it happened twice and cost days both times. See
 6. BIOS data area (below)
 7. Interrupt vector table — all 256 entries to `_dummy_int`, then the real handlers
 8. `hd_detect` — SPI flash JEDEC ID, decoded size, printed on row 9
-9. `INT 19h`
+9. `cpu_speed` — the CPU clock, **measured**, printed on row 11
+10. `INT 19h`
+
+### The clock on row 11 is measured, not declared
+
+It would be easier to print a constant. The constant is what a build *intends*, and this
+machine has had the bus clock retargeted five times; a number that says what the source
+hoped for is worth nothing on the day the two disagree.
+
+So POST times a calibrated loop against **PIT channel 2**, and the reference is the point:
+the PIT counts from `c2`, a PLL output that is **not** derived from `c0`, so the ruler
+stays still while the thing being measured moves. Channel 2 is used rather than 0 because
+it is otherwise idle and its gate is under our control at port `0x61`; the speaker data
+bit is held low, so none of it is audible. Interrupts are off across the measurement.
+
+**The loop must run from M9K, and now it runs where it sits.** An 8088-class CPU is
+fetch-bound — most of what it spends is waiting for instruction bytes — so a loop timed
+out of PSRAM measures the memory, not the clock: PSRAM latency is fixed in *nanoseconds*,
+so it eats a growing share of each cycle as the clock rises and the reading stops being
+proportional to anything. This used to be worked around by copying the loop into low RAM
+and far-calling it, back when low RAM was the only on-chip memory. Now that
+[the BIOS itself is M9K](memory-map.md), the loop simply runs in place.
+
+> `CAL_CPI = 17` is a **calibration constant, not a derivation** — the clocks one `LOOP`
+> iteration costs, which depends on the CPU and not on anything this code can compute. Set
+> it by running a build whose rate is known exactly (50/10 = 5 MHz is the obvious one) and
+> scaling until the display agrees. Deriving it from a timing table would make the number
+> look authoritative while being wrong, which is worse than showing nothing.
+
+It reads **8.29 MHz** against an actual 8.333 — half a percent out, which is the
+calibration constant's granularity rather than drift. Two earlier readings, **1.54 MHz**
+and **94.82 MHz**, came from the same code and are what
+[`CPUCLK`](tools.md#cpuclk--why-is-the-measured-cpu-clock-impossible) was written to
+explain; both were the measurement rather than the machine.
 
 ## Interrupt services
 

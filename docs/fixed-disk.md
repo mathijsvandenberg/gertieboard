@@ -168,8 +168,9 @@ memory.
 Moving it was a small change on both sides:
 
 - [`m9k_mem.vhd`](../m9k_mem.vhd) backs a second window, `0xE0000`–`0xE0FFF`, packed on
-  top of the low 32 KB in the same inferred RAM — 36 KB total, +4 M9K blocks, 50 logic
-  elements for the whole module
+  top of the BIOS image in the same inferred RAM — 20 KB total, +4 M9K blocks, about 30
+  logic elements for the whole module. (It sat on top of the low 32 KB when the map was
+  split that way; the packing is the same, the window under it changed.)
 - `HDBUF_SEG` in the BIOS changed from `0x9E00` to `0xE000`, and the reported size and
   banner string went back to 640
 

@@ -24,7 +24,7 @@ marketing: if something is listed as working it has been run on hardware.
 | **8237A DMA** | Channel 2 for floppy transfers, channel 0 refresh — [dma8237](modules/dma8237.md) |
 | **8255 PPI** | Keyboard port, speaker gate, DIP switches — [ppi8255](modules/ppi8255.md) |
 | **PC speaker** | Timer channel 2 gated through the PPI |
-| **640 KB RAM** | All 640 KB reported to DOS; the disk write buffer sits in M9K outside it — [mem_hybrid](modules/mem_hybrid.md) |
+| **640 KB RAM, one speed** | All 640 KB reported to DOS and all of it PSRAM, so a program's timing no longer depends on where DOS loaded it. On-chip M9K is spent on the BIOS image and the disk buffer instead — [memory map](memory-map.md) |
 | **Standalone FPGA config** | `.jic` in the DE0-Nano's EPCS16, no JTAG needed at power-on — [building](building.md) |
 | **USB host, full speed** | NRZI, bit stuffing, CRC5/CRC16, SOF, enumeration and bulk transfers, with event counters for diagnosis — [usb_host](modules/usb_host.md) |
 | **Keyboard, extended keys** | Arrows, Home/End/PgUp/PgDn, Insert/Delete, right Ctrl, AltGr, keypad Enter — [ps2_kbd_ppi](modules/ps2_kbd_ppi.md) |
@@ -54,10 +54,13 @@ screen. Run that first if this is picked up again.
 
 ## Planned
 
-Roughly in the order they are likely to happen. Two budgets to keep in mind: **68 % of
-the logic elements** and **70 % of the 608 Kbit of M9K** are already committed. Memory is
-still the tighter of the two, so several of these are memory problems before they are
-logic problems.
+Roughly in the order they are likely to happen. Two budgets to keep in mind: **38 % of
+the logic elements** and **49 % of the 608 Kbit of M9K** are committed. Both were much
+tighter — 68 % and 70 % — before conventional memory moved wholly into PSRAM.
+
+For anything that wants on-chip memory, **blocks matter more than bits**: 40 of the
+device's 66 M9K blocks are in use, leaving **26 free**, and a block gives 8192 usable bits
+in byte-wide mode however few of them you need.
 
 ### USB throughput
 
@@ -133,23 +136,38 @@ Output stays PWM into the existing buzzer rather than a real DAC.
 
 ### EGA
 
-The awkward one, and the reason it is last.
+The awkward one, and the reason it is last — but **not** for the reason this section used
+to give.
 
-EGA's 640×350×16 needs **four bit planes of 64 KB each — 256 KB, or 2 Mbit**. The whole
-device has 608 Kbit of M9K and 70 % of it is spoken for, so planar video memory cannot
-live on-chip the way the current [16 KB of CGA VRAM](modules/vga.md) does. It has to be
-PSRAM-backed, which puts the scan-out fetch in direct competition with CPU accesses on
-the same controller — and the [read cache](modules/mem_hybrid.md) is tuned for CPU
+EGA's full 640×350×16 needs four bit planes of 64 KB each — **256 KB, or 2 Mbit** —
+against 608 Kbit of M9K on the whole device. That does not fit and never will, so the
+top mode has to be PSRAM-backed, which puts the scan-out fetch in direct competition with
+CPU accesses on one controller. The [read cache](modules/mem_hybrid.md) is tuned for CPU
 access patterns, not for a raster that streams linearly and must never miss a deadline.
 
-Beyond memory: the sequencer, graphics controller and attribute controller at
-`0x3C0`–`0x3CF`, the latch/ALU read-modify-write path that makes planar writes fast,
-and a 350-line CRTC mode.
+**Mode 0Dh is a different question, and it fits.** 320×200×16 is four planes of 8 KB:
 
-A useful intermediate step is **EGA's 640×200×16 mode alone** (128 KB, two planes'
-worth of pressure rather than four) or a plane-per-M9K-block layout at reduced colour
-depth, to get the register model and the latch path proven before taking on the
-bandwidth problem.
+| | blocks |
+|---|---|
+| free today | 26 |
+| mode 0Dh, four planes × 8 KB | 32 |
+| CGA's current 16 KB, if the two share the same memory | −16 |
+| **net** | **16 needed against 26 free** |
+
+That is the version worth building, because it is the one Keen 4 and King's Quest
+actually use, and it needs no PSRAM bandwidth argument at all. Modes 0Eh and 10h
+(64 KB and 112 KB) do not fit and can wait for the hard version.
+
+The sharing is the load-bearing assumption: CGA's 16 KB and EGA's 32 KB must be the same
+inferred RAM viewed two ways, not two allocations. If they end up separate, 48 blocks are
+needed against 26 and it does not fit.
+
+Beyond memory, and this is the actual work: the sequencer, graphics controller and
+attribute controller at `0x3C0`–`0x3CF`, and the **latch/ALU read-modify-write path**
+that makes planar writes fast. That write path — four latches loaded on every CPU read,
+then combined with write mode, bit mask, map mask and function select on every CPU write —
+is what EGA software depends on for speed, and it is more intricate than the memory.
+A 350-line CRTC mode is needed only for the modes that do not fit anyway.
 
 ### Publish the schematics
 

@@ -407,6 +407,36 @@ R10 matters as much as the values that echo — a board answering `55` there wou
 answering, but not like a 6845. Before [`crtc6845`](modules/crtc6845.md) existed every
 line read `FF`, and Prince of Persia and Keen 4 both refused to start.
 
+### CPUCLK — why is the measured CPU clock impossible?
+
+POST measures the CPU clock by timing a `LOOP` against PIT channel 2. It once produced
+**1.54 MHz** and **94.82 MHz** from the same code — about 81 and about 1.3 clocks per
+iteration. Neither is possible and they are 60× apart, so the fault was in the
+*measurement*, not in the calibration constant. Scaling the constant until either number
+looked right would have baked the error in where it could not be seen.
+
+POST prints one line and cannot be stepped. This runs the identical sequence and prints
+every intermediate value, so the wrong one is visible rather than inferred.
+
+> **Test 1 was wrong, and is worth knowing about.** It timed channel 2 against the BIOS
+> tick and expected about 65388 counts. But the BIOS programs counter 0 with divisor 0 —
+> 65536 — and counter 2 armed with `0xFFFF` also wraps every 65536 counts, so **one tick
+> is exactly one full wrap** and the two readings are the same number. The delta is zero,
+> which is also what a dead counter returns. The aliasing is total; no threshold could
+> have rescued it, and the test would have condemned a perfectly good PIT.
+>
+> It now reprograms counter 0 to **16384** for the duration, which is not a whole wrap,
+> and expects exactly that many counts. Counter 0 goes back to divisor 0 afterwards; DOS's
+> time of day ends up a fraction of a second out and nothing else notices.
+>
+> What it proves is that channel 2 counts at the same rate counter 0 does. It **cannot**
+> prove the absolute 1.1905 MHz, and neither can anything else on this machine — both
+> counters come from `c2` and there is no second clock to check them against. That is a
+> real limit of the test rather than a gap in it.
+
+Test 2 times the calibration loop exactly as the BIOS does and reports what the two
+together imply, in microseconds and in clocks per iteration.
+
 ### SCROLLTST — does the display start address land where it should?
 
 `CRTCTEST` proves the CRTC registers can be *written and read*. This proves what one of

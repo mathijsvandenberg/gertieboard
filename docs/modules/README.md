@@ -8,7 +8,7 @@ entity ports, decoded addresses and behaviour.
 | Module | Instance | Clock | Function |
 |---|---|---|---|
 | [busdecode](busdecode.md) | `busdecode1` | `c0` 8.33 MHz | Address latch, bus strobes, READY, DMA mux, boot ROM overlay, DMA page register |
-| [mem_hybrid](mem_hybrid.md) | `inst` | `c3` 50 MHz | Memory controller: on-chip M9K below 32 KB, QPI PSRAM above (with a read cache) |
+| [mem_hybrid](mem_hybrid.md) | `inst` | `c3` 50 MHz | Memory controller: QPI PSRAM for all 640 KB (with a read cache), on-chip M9K for the BIOS and disk buffer |
 | [bootrom](bootrom.md) | `bootrom1` | `c0` 8.33 MHz | 1 KB boot ROM overlaid at `0xFFC00`, plus the `ROM_EN` flag |
 | [ctrl_reg](ctrl_reg.md) | `ctrl1` | `c0` 8.33 MHz | Runtime PSRAM timing register at I/O `0xE4` |
 
@@ -17,7 +17,7 @@ entity ports, decoded addresses and behaviour.
 | Module | Instance | Clock | Function |
 |---|---|---|---|
 | [vga](vga.md) | `vga1` | `c1` 25 MHz + `c0` | CGA text and graphics, 16 KB VRAM, VGA output |
-| [cga_status](cga_status.md) | `cgastatus1` | `c3` 50 MHz | CGA status port `0x3DA` — blanking and vertical retrace |
+| [cga_status](cga_status.md) | `cgastatus1` | — | CGA status port `0x3DA` — blanking and vertical retrace, taken from `vga`'s counters |
 
 ## Classic chipset
 

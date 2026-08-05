@@ -4,17 +4,35 @@
 
 | Range | Size | Backing | Notes |
 |---|---|---|---|
-| `0x00000`–`0x07FFF` | 32 KB | on-chip **M9K** (`m9k_mem`) | fast, ~60 ns; IVT, BIOS data area, low DOS |
-| `0x08000`–`0x9FFFF` | 608 KB | **PSRAM** (`psram_ctrl`) | rest of conventional memory |
+| `0x00000`–`0x9FFFF` | 640 KB | **PSRAM** (`psram_ctrl`) | *all* of conventional memory, at **one** speed |
 | `0xA0000`–`0xB7FFF` | — | unmapped | reads float; not a `MEMADDR` region |
 | `0xB8000`–`0xBBFFF` | 16 KB | **inside `vga`** | CGA video RAM (text + graphics) |
 | `0xBC000`–`0xDFFFF` | — | unmapped | |
 | `0xE0000`–`0xE0FFF` | 4 KB | on-chip **M9K** (`m9k_mem`) | fixed-disk block buffer; **invisible to DOS** |
 | `0xE1000`–`0xEFFFF` | — | unmapped | |
-| `0xF0000`–`0xFFFFF` | 64 KB | **PSRAM** | BIOS F-segment, filled at boot |
+| `0xF0000`–`0xFBFFF` | 48 KB | **PSRAM** | `0xFF` fill. Kept backed because `BIOSFLSH` reads the whole F-segment |
+| `0xFC000`–`0xFFFFF` | 16 KB | on-chip **M9K** (`m9k_mem`) | the BIOS image — **zero wait states** |
 | `0xFFC00`–`0xFFFFF` | 1 KB | **boot ROM overlay** | *reads only*, while `ROM_EN = '1'` |
 
 Total conventional memory reported to DOS: **640 KB** — all of it.
+
+### Conventional memory is deliberately uniform
+
+The low 32 KB used to be on-chip M9K and the rest PSRAM, which made the 640 KB **a
+machine with two speeds**: a program's timing depended on where DOS happened to load it,
+and moving a `.COM` a few kilobytes could change how fast its music played. Software of
+this era calibrates delay loops against itself, so that is not a detail — it is the
+difference between a game running right and running wrong for no reason anybody can see.
+
+So conventional memory is now PSRAM end to end, and the on-chip memory is spent where the
+*speed* is what matters rather than the uniformity:
+
+- **the BIOS image**, because interrupt handlers are entered constantly and were paying
+  PSRAM latency on every `INT`
+- **the disk block buffer**, which is not visible to DOS at all
+
+That trade is the right way round. A BIOS call being fast helps everything; conventional
+memory being fast *in places* helps nothing and breaks timing.
 
 The fixed disk's 4 KB read-modify-write buffer used to sit at `0x9E000`, costing 8 KB
 and forcing the BIOS to report 632 KB. It now lives in on-chip M9K at `0xE0000`, above
@@ -29,22 +47,44 @@ conventional memory, so DOS gets the full 640 KB back. See
 ### The boot ROM overlay
 
 While `ROM_EN = '1'`, memory **reads** in `0xFFC00`–`0xFFFFF` return the boot ROM
-instead of PSRAM. **Writes always pass through to PSRAM**, which is what lets the
+instead of the memory underneath. **Writes always pass through**, which is what lets the
 bootloader fill the BIOS image underneath itself. Writing `1` to I/O `0xE2` bit 0
-clears `ROM_EN` and reveals the PSRAM copy. See [boot flow](boot.md).
+clears `ROM_EN` and reveals what was written. See [boot flow](boot.md).
+
+That window now sits inside the **M9K** BIOS region rather than PSRAM, so the image the
+loader writes lands on-chip. Nothing about the sequence changed; only what is underneath.
 
 ### Which module answers a memory cycle
 
-`mem_hybrid` splits the address internally:
+**Not by asking four modules the same question.** `mem_hybrid`, `psram_ctrl`, `m9k_mem`
+and `busdecode` all need to agree about who owns an address, and they used to decide
+independently, in four hand-written expressions:
 
 ```vhdl
-sel_ps <= '1' WHEN ((ADDR >= x"08000") AND (ADDR < x"A0000"))
-               OR  (ADDR >= x"F0000") ELSE '0';
+-- memmap.vhd -- the boundaries live here, once
+sel_ps  <= owned_by_psram(ADDR);      -- mem_hybrid: route the access
+is_ram  <= owned_by_psram(ADDR);      -- psram_ctrl: is this mine?
+in_bios <= owned_by_bios(ADDR);       -- m9k_mem:    its two windows
+in_buf  <= owned_by_diskbuf(ADDR);
+MEMADDR <= (needs_ram_handshake(ADDR) = '1');   -- busdecode: wait on RAM_READY?
 ```
 
-So PSRAM serves conventional RAM above 32 KB **and** the BIOS F-segment; M9K
-serves everything below `0x08000`. `vga` independently decodes
-`ADDR(19 downto 14) = "101110"` for its 16 KB of video RAM.
+Teaching one of them that low memory was PSRAM and not the others is how the boot loader
+came to hang at POST code `02`: the first stack push routed to a controller that did not
+claim the address, nothing drove `READY`, and the CPU stopped on `0x7C00` — an address
+that looks entirely ordinary. There was no error and there could not be one.
+
+[`memmap.vhd`](../memmap.vhd) is the fix. A change to the map is now a change to one
+file. Introducing it was verified behaviour-neutral: identical 8,586 LEs and 300,160
+memory bits before and after.
+
+> `needs_ram_handshake` is deliberately **broader** than the union of the three owners —
+> it also covers `0xE1000`–`0xEFFFF`, which nothing backs. That is what `busdecode` has
+> always done, and it is kept bit-for-bit so introducing the package changed no logic. An
+> unbacked address there falls to the `T >= 128` backstop and returns rubbish, which is a
+> fair answer for reading memory that is not there.
+
+`vga` independently decodes `ADDR(19 downto 14) = "101110"` for its 16 KB of video RAM.
 
 ## I/O port map
 
