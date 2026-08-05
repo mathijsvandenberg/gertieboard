@@ -1159,6 +1159,7 @@ g_tty_body:
     je .g_bs
     cmp al, 0x07
     je .g_ret                    # bell: ignore
+    mov bh, bl                   # BH = colour (BL, as INT 10h AH=0Eh passes it)
     call g_render                # draw glyph AL at (DH,DL); preserves DX
     call g_width                 # AH = columns for this mode
     inc dl
@@ -1211,6 +1212,7 @@ g_repeat:
     push bx
     push cx
     push dx
+    mov bh, bl                   # BH = the COLOUR, which BL is about to lose
     mov bl, al                   # g_render wants the character in AL, and AL
     mov dx, [0x50]               # is needed for the width, so park it in BL
     call g_width                 # AH = columns for this mode
@@ -1414,6 +1416,8 @@ g_render:
     push es
     push ds
     mov ch, [0x49]               # CH = video mode (while DS=BDA)
+    push bx                      # BH = the colour; the lookup below needs BX,
+                                 # so it is popped back by each renderer
     mov bl, al                   # BL = the character
     xor bh, bh
 
@@ -1486,6 +1490,9 @@ g_render:
     mov ax, VID
     mov es, ax
     pop ds                       # glyph segment, pushed at .r_seg above
+    pop bx                       # and the colour. The CGA renderer below still
+                                 # hardcodes foreground 3, as it always has --
+                                 # this pop is here to balance the stack.
     xor cl, cl                   # CL = glyph row 0..7  (CH = mode preserved)
 .r_row:
     mov di, dx
@@ -1551,15 +1558,83 @@ g_render:
     mov ax, EGAVID
     mov es, ax
     pop ds                       # glyph segment, pushed at .r_seg above
+    pop bx                       # BH = the colour byte INT 10h was given
     cld
-    mov ax, 0x020F               # SEQ 2: map mask = all four planes
+
+    ## THE COLOUR IS BL FROM INT 10h, and bit 7 of it means XOR.
+    ##
+    ## This used to write the glyph to all four planes and call it white on
+    ## black. King's Quest draws its status bar as a white strip and then puts
+    ## BLACK text on it -- so white-on-black rendered white text on a white bar
+    ## and the score line was simply invisible.
+    ##
+    ## Black on white is not expressible as "foreground here, background there".
+    ## It is done by XOR: flip the set pixels against whatever is already on the
+    ## screen, leave the clear ones alone. On a white bar that turns 15 into 0.
+    mov al, bh
+    and al, 0x0F                 # AL = colour
+    test bh, 0x80
+    jnz .re_xor
+
+    ## Opaque: clear the cell on every plane, then paint the glyph through a
+    ## map mask of just this colour's planes. Two passes, no latches needed.
+    push ax
+    mov ax, 0x020F               # map mask: every plane
     call seq_out
+    mov ax, 0x0100               # enable set/reset off
+    call gc_out
+    mov ax, 0x0300               # function = replace
+    call gc_out
+    mov ax, 0x08FF               # bit mask = every bit
+    call gc_out
+    push di
+    mov cx, 8
+.re_clr:
+    mov byte ptr es:[di], 0
+    add di, 40
+    loop .re_clr
+    pop di
+    pop ax                       # colour back
+    mov ah, 0x02
+    call seq_out                 # map mask = this colour's planes only
     mov cx, 8
 .re_row:
     lodsb                        # AL = one glyph row
-    mov es:[di], al              # -> all four planes, so white on black
-    add di, 40                   # next scanline
+    mov es:[di], al
+    add di, 40
     loop .re_row
+    mov ax, 0x020F               # leave the map mask open again
+    call seq_out
+    jmp .r_done
+
+.re_xor:
+    ## The function-select ALU does the flipping: set/reset supplies the colour,
+    ## the bit mask supplies the glyph, and each write is preceded by a READ to
+    ## load the latches -- masked-out bits come back from them, so without the
+    ## read the rest of the cell would be whatever was latched last.
+    mov ah, 0x00
+    call gc_out                  # GC 0: set/reset = the colour
+    mov ax, 0x010F               # GC 1: enable set/reset on all four planes
+    call gc_out
+    mov ax, 0x0318               # GC 3: function select = XOR
+    call gc_out
+    mov ax, 0x020F               # map mask: every plane
+    call seq_out
+    mov cx, 8
+.rx_row:
+    lodsb                        # AL = one glyph row
+    mov ah, 0x08
+    call gc_out                  # bit mask = the glyph
+    mov al, es:[di]              # read  -> latches
+    mov es:[di], al              # write -> set/reset supplies the data
+    add di, 40
+    loop .rx_row
+    mov ax, 0x08FF               # put the graphics controller back
+    call gc_out
+    mov ax, 0x0100
+    call gc_out
+    mov ax, 0x0300
+    call gc_out
 
 .r_done:
     pop ds
