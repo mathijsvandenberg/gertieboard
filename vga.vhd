@@ -61,6 +61,22 @@ ENTITY vga IS
 		  WR_MODE				  : IN std_logic_vector(1 DOWNTO 0);
 		  BIT_MASK				  : IN std_logic_vector(7 DOWNTO 0);
 		  PALETTE				  : IN std_logic_vector(95 DOWNTO 0);
+		  -- EGA planes, which live in SDRAM behind ega_mem. See the note at
+		  -- the plane arrays below for why CGA's two did NOT move.
+		  EM_REQ				  : OUT std_logic;
+		  EM_WE					  : OUT std_logic;
+		  EM_OFFS				  : OUT std_logic_vector(13 DOWNTO 0);
+		  EM_WDATA				  : OUT std_logic_vector(31 DOWNTO 0);
+		  EM_WMASK				  : OUT std_logic_vector(3 DOWNTO 0);
+		  EM_RDATA				  : IN  std_logic_vector(31 DOWNTO 0);
+		  EM_READY				  : IN  std_logic;
+		  EM_ROW_GO				  : OUT std_logic;
+		  EM_ROW_OFFS			  : OUT std_logic_vector(13 DOWNTO 0);
+		  EM_COL				  : OUT std_logic_vector(5 DOWNTO 0);
+		  EM_SCAN				  : IN  std_logic_vector(31 DOWNTO 0);
+		  -- To busdecode: this address is ours, and it is not ready yet.
+		  EGA_CLAIM				  : OUT std_logic;
+		  EGA_RDY				  : OUT std_logic;
  		  HS                 	  : OUT std_logic;
  		  VS                 	  : OUT std_logic;
  		  -- Scan state for cga_status (port 0x3DA). These come from the counters
@@ -125,6 +141,20 @@ ARCHITECTURE behavior OF vga IS
   SIGNAL ADDR0_REG     : std_logic;
 
   ----------------------------------------------------------------------------
+  -- TWO 8 KB ARRAYS, FOR CGA ONLY. The EGA planes are elsewhere.
+  --
+  -- These used to be four, doubling as EGA's bit planes, and that is what put a
+  -- hard 8 KB ceiling on a plane -- the largest an M9K array can be here. Both
+  -- games that matter want a second display page beyond it, so the EGA planes
+  -- moved to SDRAM (see ega_mem.vhd) and these two stayed exactly as they were.
+  --
+  -- Keeping CGA on-chip is deliberate. Text and modes 4/5/6 work, have worked
+  -- for a long time, and gain nothing from the move; rewriting their addressing
+  -- to go through a scanline buffer would put proven code at risk for no reason.
+  -- The two memories no longer share storage the way a real card's do, which
+  -- costs nothing: every mode set clears the screen anyway.
+  ----------------------------------------------------------------------------
+  -- ORIGINAL NOTE, kept because the sharing argument is still why this fits:
   -- FOUR 8 KB ARRAYS, VIEWED TWO WAYS
   --
   -- CGA sees 16 KB at 0xB8000 split by the low address bit:
@@ -148,14 +178,10 @@ ARCHITECTURE behavior OF vga IS
   TYPE MEMHALF IS ARRAY (0 TO 8191) OF STD_LOGIC_VECTOR(7 DOWNTO 0);
   SIGNAL PL0 : MEMHALF;
   SIGNAL PL1 : MEMHALF;
-  SIGNAL PL2 : MEMHALF;
-  SIGNAL PL3 : MEMHALF;
 
   ATTRIBUTE ramstyle : STRING;
   ATTRIBUTE ramstyle OF PL0 : SIGNAL IS "M9K";
   ATTRIBUTE ramstyle OF PL1 : SIGNAL IS "M9K";
-  ATTRIBUTE ramstyle OF PL2 : SIGNAL IS "M9K";
-  ATTRIBUTE ramstyle OF PL3 : SIGNAL IS "M9K";
 
   -- Decoded foreground / background colors (text mode).
   SIGNAL fg_color, bg_color : std_logic_vector(3 DOWNTO 0);
@@ -230,16 +256,19 @@ ARCHITECTURE behavior OF vga IS
 
   -- Resolved write port: one enable and one datum per plane, so each array has
   -- exactly one write statement. See the note above the assignments.
-  SIGNAL wen0, wen1, wen2, wen3 : std_logic;
-  SIGNAL wdat0, wdat1           : std_logic_vector(7 DOWNTO 0);
+  SIGNAL wen0, wen1             : std_logic;
+  -- EGA CPU access, on c0
+  SIGNAL ega_started            : std_logic := '0';
+  SIGNAL ega_req_i              : std_logic := '0';
+  SIGNAL ega_done               : std_logic := '0';
+  SIGNAL ega_rd32               : std_logic_vector(31 DOWNTO 0) := (OTHERS => '0');
 
   -- Scan-side plane reads for EGA.
-  SIGNAL s2, s3 : std_logic_vector(7 DOWNTO 0);   -- planes 2 and 3;
-                                                  -- 0 and 1 are MEMCHR/MEMATT
-  SIGNAL ega_idx        : std_logic_vector(12 DOWNTO 0);
-  -- Row base, accumulated once per CGA scanline; see the scan address.
-  SIGNAL row_base       : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
-  SIGNAL ega_stride     : std_logic_vector(15 DOWNTO 0);
+  -- The row the prefetch should fetch NEXT, accumulated one stride per row.
+  SIGNAL fetch_base     : std_logic_vector(13 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL row_offs_q     : std_logic_vector(13 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL row_go_i       : std_logic := '0';
+  SIGNAL ega_stride     : std_logic_vector(13 DOWNTO 0);
   -- START and OFFSET cross c0 -> c1 and are sampled once a field, so they get
   -- two flops each. Fourteen-odd bits sampled at one instant is a metastability
   -- hazard whose symptom is one field drawn from a nonsense address -- rare
@@ -392,15 +421,32 @@ BEGIN
   -- cpu_idx already carries the right index for either mode, so the address
   -- needs no mux of its own.
   ----------------------------------------------------------------------------
-  wen0 <= '1' WHEN ((WR = '0' AND cga_sel = '1' AND ADDR(0) = '0') OR
-                    (ega_wr = '1' AND MAP_MASK(0) = '1')) ELSE '0';
-  wen1 <= '1' WHEN ((WR = '0' AND cga_sel = '1' AND ADDR(0) = '1') OR
-                    (ega_wr = '1' AND MAP_MASK(1) = '1')) ELSE '0';
-  wen2 <= '1' WHEN  (ega_wr = '1' AND MAP_MASK(2) = '1')  ELSE '0';
-  wen3 <= '1' WHEN  (ega_wr = '1' AND MAP_MASK(3) = '1')  ELSE '0';
+  wen0 <= '1' WHEN (WR = '0' AND cga_sel = '1' AND ADDR(0) = '0') ELSE '0';
+  wen1 <= '1' WHEN (WR = '0' AND cga_sel = '1' AND ADDR(0) = '1') ELSE '0';
 
-  wdat0 <= wd0 WHEN ega_sel = '1' ELSE DATAIN;
-  wdat1 <= wd1 WHEN ega_sel = '1' ELSE DATAIN;
+  ----------------------------------------------------------------------------
+  -- The EGA CPU access.
+  --
+  -- The ALU stays HERE, not in ega_mem: the latches, set/reset, function select
+  -- and bit mask are all register state, so what crosses to memory is a finished
+  -- 32-bit result and a per-plane mask. ega_mem never needs to know what an EGA
+  -- write mode is.
+  --
+  -- WHY THIS WAITS. A CPU cycle in this window used to complete on busdecode's
+  -- T >= 3 clause, which is 360 ns at 8.33 MHz. An SDRAM access plus two clock
+  -- crossings is 500-600, so the CPU would sample the bus before the data
+  -- arrived and read rubbish -- silently, and only for EGA. So the window now
+  -- claims the READY handshake and the CPU waits for it.
+  ----------------------------------------------------------------------------
+  EM_OFFS  <= ADDR(13 DOWNTO 0);
+  EM_WDATA <= wd3 & wd2 & wd1 & wd0;
+  EM_WMASK <= MAP_MASK;
+  EM_WE    <= '1' WHEN WR = '0' ELSE '0';
+  EM_REQ   <= ega_req_i;
+  EM_COL   <= XX(9 DOWNTO 4);   -- 0..39; XX never exceeds 639 when displayed
+
+  EGA_CLAIM <= ega_sel;
+  EGA_RDY   <= ega_done;
 
   CPU_PORT : PROCESS (CLK_CPU)
   BEGIN
@@ -415,34 +461,41 @@ BEGIN
       -- because every input is fixed for the duration: the latches only load on
       -- reads, so the result never feeds back into itself. Writing a second
       -- time writes the same byte.
-      IF wen0 = '1' THEN PL0(conv_integer(cpu_idx)) <= wdat0; END IF;
-      IF wen1 = '1' THEN PL1(conv_integer(cpu_idx)) <= wdat1; END IF;
-      IF wen2 = '1' THEN PL2(conv_integer(cpu_idx)) <= wd2;   END IF;
-      IF wen3 = '1' THEN PL3(conv_integer(cpu_idx)) <= wd3;   END IF;
+      IF wen0 = '1' THEN PL0(conv_integer(cpu_idx)) <= DATAIN; END IF;
+      IF wen1 = '1' THEN PL1(conv_integer(cpu_idx)) <= DATAIN; END IF;
 
       -- ---- reads -----------------------------------------------------
-      -- All four planes every cycle. CGA needs two of them and EGA needs all
-      -- four for the latches, so reading them unconditionally costs nothing
-      -- and keeps one read port per array.
       p0_cpu    <= PL0(conv_integer(cpu_idx));
       p1_cpu    <= PL1(conv_integer(cpu_idx));
-      p2_cpu    <= PL2(conv_integer(cpu_idx));
-      p3_cpu    <= PL3(conv_integer(cpu_idx));
       ADDR0_REG <= ADDR(0);
 
-      -- THE LATCHES LOAD ONLY WHILE A READ IS IN PROGRESS.
-      --
-      -- Not every cycle. If they simply followed the read data they would
-      -- track the CPU's address, and write mode 1 -- read here, write there --
-      -- would find them holding the DESTINATION's contents by the time the
-      -- write landed. Every latch copy would write each address to itself and
-      -- the screen would never change. Gating on RD makes them hold across the
-      -- address change, which is the entire point of having them.
-      IF (RD = '0' AND ega_sel = '1') THEN
-        lat0 <= p0_cpu;
-        lat1 <= p1_cpu;
-        lat2 <= p2_cpu;
-        lat3 <= p3_cpu;
+      -- ---- the EGA access ---------------------------------------------
+      -- One request per bus cycle: started on the first clock the window is
+      -- addressed with a strobe low, finished when ega_mem answers. ega_done
+      -- stays high for the rest of the cycle because it IS the READY the CPU
+      -- is waiting on -- a one-clock pulse would be missed.
+      IF (ega_sel = '1' AND (RD = '0' OR WR = '0')) THEN
+        IF ega_started = '0' THEN
+          ega_started <= '1';
+          ega_req_i   <= '1';
+        END IF;
+        IF EM_READY = '1' THEN
+          ega_req_i <= '0';
+          ega_done  <= '1';
+          ega_rd32  <= EM_RDATA;
+          -- THE LATCHES load from the same read the CPU asked for, and only
+          -- on a read. See the note where they are declared.
+          IF RD = '0' THEN
+            lat0 <= EM_RDATA(7 DOWNTO 0);
+            lat1 <= EM_RDATA(15 DOWNTO 8);
+            lat2 <= EM_RDATA(23 DOWNTO 16);
+            lat3 <= EM_RDATA(31 DOWNTO 24);
+          END IF;
+        END IF;
+      ELSE
+        ega_started <= '0';
+        ega_req_i   <= '0';
+        ega_done    <= '0';
       END IF;
 
       -- CGA mode / color-select registers (same latch style as ctrl_reg).
@@ -457,10 +510,10 @@ BEGIN
 
   -- CGA read-back muxes on the registered low address bit; EGA read mode 0
   -- returns whichever plane READ MAP SELECT names.
-  MEM_DOUT_CPU <= p0_cpu WHEN (ega_sel = '1' AND RD_MAP = "00") ELSE
-                  p1_cpu WHEN (ega_sel = '1' AND RD_MAP = "01") ELSE
-                  p2_cpu WHEN (ega_sel = '1' AND RD_MAP = "10") ELSE
-                  p3_cpu WHEN  ega_sel = '1'                    ELSE
+  MEM_DOUT_CPU <= ega_rd32(7 DOWNTO 0)   WHEN (ega_sel = '1' AND RD_MAP = "00") ELSE
+                  ega_rd32(15 DOWNTO 8)  WHEN (ega_sel = '1' AND RD_MAP = "01") ELSE
+                  ega_rd32(23 DOWNTO 16) WHEN (ega_sel = '1' AND RD_MAP = "10") ELSE
+                  ega_rd32(31 DOWNTO 24) WHEN  ega_sel = '1'                    ELSE
                   p1_cpu WHEN ADDR0_REG = '1' ELSE p0_cpu;
 
   gfx_on <= mode_q(1);
@@ -545,12 +598,10 @@ BEGIN
   -- row base is a register that gains one stride per CGA scanline, which is
   -- both cheaper and what an actual CRTC does: it latches the start address at
   -- the top of the field and adds the offset per row.
-  ega_stride <= x"00" & of_s2(6 DOWNTO 0) & '0';      -- words -> bytes
-  ega_idx    <= row_base(12 DOWNTO 0) + XX(10 DOWNTO 4);
+  ega_stride <= "00000" & of_s2 & '0';       -- 5 + 8 + 1 = 14, words -> bytes
 
-  vga_idx <= ega_idx                   WHEN EGA_ON = '1' ELSE
-             YY(1) & goff(12 DOWNTO 1) WHEN gfx_on = '1' ELSE
-             txt_idx;
+  -- CGA only now: the EGA scan reads ega_mem's line buffer, not these arrays.
+  vga_idx <= YY(1) & goff(12 DOWNTO 1) WHEN gfx_on = '1' ELSE txt_idx;
 
   -- Is the cell being fetched RIGHT NOW the one the CRTC points at? Compared
   -- here, beside vga_idx, so it can be pipelined alongside the character it
@@ -571,8 +622,6 @@ BEGIN
       -- same two registers as its first two bit planes.
       MEMCHR <= PL0(conv_integer(vga_idx));
       MEMATT <= PL1(conv_integer(vga_idx));
-      s2     <= PL2(conv_integer(vga_idx));
-      s3     <= PL3(conv_integer(vga_idx));
       GSEL   <= goff(0);
       cur_c1 <= cur_c0;                 -- rides with MEMCHR, stage 1 of 2
 
@@ -590,6 +639,7 @@ BEGIN
   PROCESS (CLK_VGA)
   BEGIN
     IF (rising_edge(CLK_VGA)) THEN
+      row_go_i <= '0';                       -- one clock wide
       IF (X < 799) THEN
         X <= X + 1;
         -- XX must run TWO clocks ahead of the visible window, because the pixel
@@ -621,13 +671,28 @@ BEGIN
           Y <= Y + 1;
           IF (Y > 34 AND Y < 515) THEN
             YY <= YY + 1;
-            -- A new CGA scanline begins on every EVEN YY, because the 200-line
-            -- picture is doubled into 400. So the row base advances at the end
-            -- of every odd line: YY = 0,1 is row 0, and stepping off YY = 1
-            -- sets up row 1.
-            IF YY(0) = '1' THEN
-              row_base <= row_base + ega_stride;
-            END IF;
+          END IF;
+
+          ------------------------------------------------------------------
+          -- ASK FOR THE NEXT ROW, one row ahead of where the beam is.
+          --
+          -- Row r is displayed on lines Y = 35+2r and 36+2r. A pulse at the
+          -- END of line Y makes the filled half visible from line Y+1, so the
+          -- swap for row r must land at the end of Y = 34+2r -- an EVEN line.
+          -- Pulsing on odd lines put every row one line late and clipped the
+          -- last one off the bottom.
+          --
+          -- So: Y = 32, 34, 36 ... The pulse at 32 is the priming one; it shows
+          -- one buffer of nothing during blanking and fetches row 0.
+          --
+          -- fetch_base is loaded at Y = 31, which is after the field wrap has
+          -- latched the start address and before the first pulse needs it.
+          IF Y = 31 THEN
+            fetch_base <= st_s2(13 DOWNTO 0);
+          ELSIF (Y >= 32 AND Y(0) = '0') THEN
+            row_offs_q <= fetch_base;        -- the value BEFORE the step, or
+            row_go_i   <= '1';               -- every row would be off by one
+            fetch_base <= fetch_base + ega_stride;
           END IF;
         ELSE
           Y  <= "00000000000";
@@ -640,7 +705,7 @@ BEGIN
           -- without tearing the picture -- and why adding it per pixel instead,
           -- as the first attempt at CGA scrolling did, splits the screen at
           -- whatever line the write happened to land on.
-          row_base <= st_s2;
+
 
           -- If the display start address is ever wired in again, it is latched
           -- HERE and nowhere else. A 6845 loads its address counter from
@@ -707,10 +772,12 @@ BEGIN
       --
       -- Eight pixels per byte here against four in CGA mode 4, so the pixel
       -- field is psel(3:1) rather than psel(2:1).
-      ega_col <= s3(7 - conv_integer(psel(3 DOWNTO 1))) &
-                 s2(7 - conv_integer(psel(3 DOWNTO 1))) &
-                 MEMATT(7 - conv_integer(psel(3 DOWNTO 1))) &
-                 MEMCHR(7 - conv_integer(psel(3 DOWNTO 1)));
+      -- EM_SCAN is p3:p2:p1:p0 for this column, already fetched a whole row
+      -- ago, so it sits at the same pipeline depth the plane arrays did.
+      ega_col <= EM_SCAN(24 + 7 - conv_integer(psel(3 DOWNTO 1))) &
+                 EM_SCAN(16 + 7 - conv_integer(psel(3 DOWNTO 1))) &
+                 EM_SCAN( 8 + 7 - conv_integer(psel(3 DOWNTO 1))) &
+                 EM_SCAN( 0 + 7 - conv_integer(psel(3 DOWNTO 1)));
     END IF;
   END PROCESS;
 
@@ -737,6 +804,9 @@ BEGIN
   -- of the 525. That is the same 3.97 ms window as before -- it is now in the
   -- right place, and it cannot drift again because there is nothing to drift
   -- from.
+  EM_ROW_GO   <= row_go_i;
+  EM_ROW_OFFS <= row_offs_q;
+
   DISPEN <= VALID;
   VRET   <= '1' WHEN (Y > 434 OR Y < 35) ELSE '0';
 

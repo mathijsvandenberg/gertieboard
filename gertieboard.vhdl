@@ -184,6 +184,30 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_sd_ack               : std_logic;
   SIGNAL n_sd_init              : std_logic;
   SIGNAL n_sd_state             : std_logic_vector(3 downto 0);
+  -- ega_mem <-> vga
+  SIGNAL n_em_req               : std_logic;
+  SIGNAL n_em_we                : std_logic;
+  SIGNAL n_em_offs              : std_logic_vector(13 downto 0);
+  SIGNAL n_em_wdata             : std_logic_vector(31 downto 0);
+  SIGNAL n_em_wmask             : std_logic_vector(3 downto 0);
+  SIGNAL n_em_rdata             : std_logic_vector(31 downto 0);
+  SIGNAL n_em_ready             : std_logic;
+  SIGNAL n_em_row_go            : std_logic;
+  SIGNAL n_em_row_offs          : std_logic_vector(13 downto 0);
+  SIGNAL n_em_col               : std_logic_vector(5 downto 0);
+  SIGNAL n_em_scan              : std_logic_vector(31 downto 0);
+  SIGNAL n_ega_claim            : std_logic;
+  SIGNAL n_ega_rdy              : std_logic;
+  -- SDRAM, arbitrated between ega_mem (client 0) and the test window
+  SIGNAL n_ready_mem            : std_logic;
+  SIGNAL n_e_req, n_e_we, n_e_ack : std_logic;
+  SIGNAL n_e_a                  : std_logic_vector(23 downto 0);
+  SIGNAL n_e_d                  : std_logic_vector(15 downto 0);
+  SIGNAL n_e_be                 : std_logic_vector(1 downto 0);
+  SIGNAL n_ega_sd_req, n_ega_sd_we, n_ega_sd_ack, n_ega_sd_lock : std_logic;
+  SIGNAL n_ega_sd_a             : std_logic_vector(23 downto 0);
+  SIGNAL n_ega_sd_d             : std_logic_vector(15 downto 0);
+  SIGNAL n_ega_sd_be            : std_logic_vector(1 downto 0);
 BEGIN
 
   vga1 : ENTITY work.vga
@@ -213,6 +237,19 @@ BEGIN
       WR_MODE              => n_wr_mode,
       BIT_MASK             => n_bit_mask,
       PALETTE              => n_palette,
+      EM_REQ               => n_em_req,
+      EM_WE                => n_em_we,
+      EM_OFFS              => n_em_offs,
+      EM_WDATA             => n_em_wdata,
+      EM_WMASK             => n_em_wmask,
+      EM_RDATA             => n_em_rdata,
+      EM_READY             => n_em_ready,
+      EM_ROW_GO            => n_em_row_go,
+      EM_ROW_OFFS          => n_em_row_offs,
+      EM_COL               => n_em_col,
+      EM_SCAN              => n_em_scan,
+      EGA_CLAIM            => n_ega_claim,
+      EGA_RDY              => n_ega_rdy,
       HS                   => n_hs,
       VS                   => n_vs,
       DISPEN               => n_dispen,
@@ -350,6 +387,7 @@ BEGIN
       DTR                  => n_cpu_dtr,
       IOM                  => n_cpu_iom,
       RAM_READY            => n_ready,
+      EGA_CLAIM            => n_ega_claim,
       DATA_IN              => n_periph_rdata,
       HLDA                 => n_cpu_hlda,
       DMA_ADDR             => n_dma_addr,
@@ -415,7 +453,7 @@ BEGIN
       RD                   => n_mem_rd,
       WR                   => n_mem_wr,
       CTRL                 => n_ctrl,
-      READY                => n_ready,
+      READY                => n_ready_mem,
       MEM_READY            => n_mem_ready,
       RAM_SCK              => n_ram_sck,
       RAM_CS               => n_ram_cs,
@@ -460,13 +498,13 @@ BEGIN
     PORT MAP (
       CLK                  => n_c3,
       RESET                => n_mem_rst,
-      REQ                  => n_sd_req,
-      WE                   => n_sd_we,
-      ADDR                 => n_sd_addr,
-      DIN                  => n_sd_din,
-      BE                   => n_sd_be,
+      REQ                  => n_e_req,
+      WE                   => n_e_we,
+      ADDR                 => n_e_a,
+      DIN                  => n_e_d,
+      BE                   => n_e_be,
       DOUT                 => n_sd_dout,
-      ACK                  => n_sd_ack,
+      ACK                  => n_e_ack,
       BUSY                 => OPEN,
       INIT_DONE            => n_sd_init,
       DBG_STATE            => n_sd_state,
@@ -502,6 +540,62 @@ BEGIN
       INIT_DONE            => n_sd_init,
       DBG_STATE            => n_sd_state
     );
+
+  egamem1 : ENTITY work.ega_mem
+    PORT MAP (
+      CLK_CPU              => n_c0,
+      CLK_VGA              => n_c1,
+      CLK_MEM              => n_c3,
+      RESET                => n_mem_rst,
+      CPU_REQ              => n_em_req,
+      CPU_WE               => n_em_we,
+      CPU_OFFS             => n_em_offs,
+      CPU_WDATA            => n_em_wdata,
+      CPU_WMASK            => n_em_wmask,
+      CPU_RDATA            => n_em_rdata,
+      CPU_READY            => n_em_ready,
+      ROW_GO               => n_em_row_go,
+      ROW_OFFS             => n_em_row_offs,
+      COL                  => n_em_col,
+      SCAN_DATA            => n_em_scan,
+      SD_REQ               => n_ega_sd_req,
+      SD_LOCK              => n_ega_sd_lock,
+      SD_WE                => n_ega_sd_we,
+      SD_ADDR              => n_ega_sd_a,
+      SD_DIN               => n_ega_sd_d,
+      SD_BE                => n_ega_sd_be,
+      SD_DOUT              => n_sd_dout,
+      SD_ACK               => n_ega_sd_ack
+    );
+
+  sdramarb1 : ENTITY work.sdram_arb
+    PORT MAP (
+      CLK                  => n_c3,
+      RESET                => n_mem_rst,
+      R0_REQ               => n_ega_sd_req,
+      R0_LOCK              => n_ega_sd_lock,
+      R0_WE                => n_ega_sd_we,
+      R0_A                 => n_ega_sd_a,
+      R0_D                 => n_ega_sd_d,
+      R0_BE                => n_ega_sd_be,
+      R0_ACK               => n_ega_sd_ack,
+      R1_REQ               => n_sd_req,
+      R1_LOCK              => '0',      -- the diagnostic window is one word at a time
+      R1_WE                => n_sd_we,
+      R1_A                 => n_sd_addr,
+      R1_D                 => n_sd_din,
+      R1_BE                => n_sd_be,
+      R1_ACK               => n_sd_ack,
+      S_REQ                => n_e_req,
+      S_WE                 => n_e_we,
+      S_A                  => n_e_a,
+      S_D                  => n_e_d,
+      S_BE                 => n_e_be,
+      S_ACK                => n_e_ack
+    );
+
+  -- The EGA window answers for itself; everything else is mem_hybrid's.
+  n_ready <= n_ega_rdy WHEN n_ega_claim = '1' ELSE n_ready_mem;
 
   cgastatus1 : ENTITY work.cga_status
     PORT MAP (

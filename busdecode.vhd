@@ -41,6 +41,7 @@ ENTITY busdecode IS
 		  DATA_OUT		: OUT std_logic_vector(7 DOWNTO 0);
 
 		  IO_ADDR		: OUT std_logic_vector(15 DOWNTO 0);
+		  EGA_CLAIM		: IN std_logic;   -- vga owns this address and is not ready
 		  IO_RD			: OUT std_logic;
 		  IO_WR			: OUT std_logic;
 		  MEM_ADDR		: OUT std_logic_vector(19 DOWNTO 0);
@@ -164,7 +165,11 @@ BEGIN
 	--MEMADDR <= TRUE WHEN (ADDR > x"09FFF" AND ADDR < x"A0000") OR (ADDR > x"DFFFF" AND ADDR < x"F0000") ELSE FALSE;
 
 	-- BIOS area (0xF0000..0xFFFFF) is now PSRAM as well, so treat it as memory.
-	MEMADDR <= (needs_ram_handshake(ADDR) = '1');
+	-- The EGA window is a memory cycle too, when EGA is on. It cannot go in
+	-- memmap.vhd because it depends on the MODE and not only on the address:
+	-- the same 0xA0000 is unclaimed in CGA modes, and claiming it there would
+	-- send every access to the T >= 128 backstop -- 15 us apiece.
+	MEMADDR <= (needs_ram_handshake(ADDR) = '1') OR (EGA_CLAIM = '1');
 
 
 
