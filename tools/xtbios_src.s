@@ -359,6 +359,26 @@ _post:
     mov word ptr es:[bx],   offset _floppy_dpt
     mov word ptr es:[bx+2], 0xF000
 
+    ## INT 43h -- the 8x8 GRAPHICS FONT, and this vector is not optional.
+    ##
+    ## Software that draws its own text in a graphics mode does not ask the
+    ## BIOS to render characters; it reads this vector to find the glyphs and
+    ## plots them itself. King's Quest is one: its interpreter contains no
+    ## INT 10h at all, and its EGA driver only uses it to set the mode. So its
+    ## text windows drew as an empty box with a red border and its status bar
+    ## as a blank strip -- the boxes are pixels and worked, the letters needed
+    ## a font and there was not one.
+    ##
+    ## Every vector starts out pointing at _dummy_int, so what it had been
+    ## reading was a bare IRET, and the glyph bitmaps were whatever BIOS code
+    ## bytes happened to follow it.
+    ##
+    ## Only the offset is written: the fill above already left 0xF000 in the
+    ## segment half. The upper 128 glyphs stay with INT 1Fh, which is null on
+    ## purpose -- see g_render.
+    mov bx, 0x43*4
+    mov word ptr es:[bx],   offset font8x8
+
 ## ---- diskette A:: is the serial host actually serving an image? --------
 ##  A: is a link to a host program, not a drive, so the only honest test is to
 ##  read a sector and see whether the data ever arrives. A timeout is a normal
