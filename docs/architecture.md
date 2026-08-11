@@ -72,11 +72,24 @@ host. Two of the device's four PLLs are used.
 
 | Output | Divider | Frequency | Drives |
 |---|---|---|---|
-| `c0` | ÷6 | **8.333 MHz** | `CPU_CLK` (the real CPU) and the entire I/O bus: `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`, `fdc8272`, `flash`, `bootrom`, and `vga.CLK_CPU` |
+| `c0` | ×2 | **100 MHz** | `cpuclk` only — the master the bus clock is divided from |
 | `c1` | ÷2 | **25 MHz** | `vga.CLK_VGA` — VGA pixel clock |
-| `c2` | ÷42 | **1.1905 MHz** | `timer8253`'s *counting* rate (its registers run on `c0`) — within 0.23 % of the XT's 1.193182 MHz |
-| `c3` | ÷1 | **50 MHz** | `mem_hybrid` (PSRAM), `ps2_kbd_ppi` |
+| `c2` | ÷42 | **1.1905 MHz** | `timer8253`'s *counting* rate (its registers run on the bus clock) — within 0.23 % of the XT's 1.193182 MHz |
+| `c3` | ÷1 | **50 MHz** | `mem_hybrid` (PSRAM), `sdram_ctrl`, `ps2_kbd_ppi` |
 | `c4` | — | unused | |
+
+**The bus clock is not a PLL output.** [`cpuclk`](modules/clkgen-pll.md#cpuclk--the-programmable-bus-clock)
+divides `c0` by a high count plus a low count chosen at run time through I/O **0xE5**, giving a
+ladder from 5 to 16.667 MHz, and it is what drives `CPU_CLK` (the real CPU) and the
+entire I/O bus: `busdecode`, `ppi8255`, `sevenseg`, `ctrl_reg`, `int8259`, `dma8237`,
+`fdc8272`, `flash`, `bootrom`, `crtc6845`, `opl2_lite`, `usb_host` and `vga.CLK_CPU`.
+It resets to 8.333 MHz, which is what the machine ran at before the ladder existed.
+
+The high and low counts are set independently so that **both** edges land on `c3`'s
+20 ns grid at every step. Equal halves would put the falling edge off that grid on the
+odd steps, and on hardware every odd step then died — including 7.143 MHz, which is
+*slower* than a step that works. The duty cycle falls out of the grid rather than being
+chosen: 33 % at 16.667 MHz, which is what an 8284 gives a 16 MHz part.
 
 `pll48` is separate because 48 MHz is 50 × 24/25 and therefore **not** integer-related
 to the others. All of `pll1`'s outputs use `multiply_by => 1`, so adding a 24/25 output
@@ -89,31 +102,53 @@ that put −2.483 ns of setup slack on `c0`.
 > kHz once led to a confident but completely wrong conclusion that the 8253 was
 > running at 476 kHz. See [gotchas](gotchas.md).
 
-### Generics that must match the clock
+### What has to be re-tuned when the clock moves
 
-Three modules take the clock rate as a generic, and getting one wrong fails *silently*
-rather than loudly. The top level sets all three:
+Anything counted in bus clocks but owed in seconds breaks when the bus clock moves,
+and it breaks *silently* — nothing reports a mistuned divider, it just misbehaves.
+Since the clock now moves at run time, those dividers cannot be constants folded out
+of a generic any more. `cpuclk` holds a table indexed by the step and drives them:
+
+| Consumer | Input | What it sets | If it were left fixed |
+|---|---|---|---|
+| `opl2_lite` | `SAMPLE_DIV` | the 49716 Hz sample clock | music transposed by the speed ratio |
+| `opl2_lite` | `T1_DIV`, `T2_DIV` | the 80 µs / 320 µs detection timers | the AdLib fails its detection handshake, and a game decides there is no card |
+
+[`fdc8272`](modules/fdc8272.md) took the same treatment and then went one better.
+Re-deriving `BAUD_DIV` per step kept the link alive, but an integer divide of 5 / 6.25 /
+7.143 / 8.333 / 10 / 12.5 / 16.667 MHz never lands on the same number twice, and the best
+available was **+4.2 % at the step the machine boots at** — inside 8N1's ~5 % envelope,
+but not clear of it. It also did not scale: at 2 Mbaud a 6.25 MHz bus clock needs a
+divisor of 3.125 and gets 3, which is 25 % out.
+
+So its UART is not clocked by the CPU at all any more. It runs on `c3`, where
+`50e6 / 50` = **1,000,000 baud exactly**, at every step, forever — with a toggle
+handshake across to the command engine, which still runs on the bus clock. `BAUD =>
+2_000_000` (divisor 25, also exact) is a one-line change on both ends.
+
+The generics survive only as the values those inputs take when nothing drives them,
+which is what keeps each module usable on its own:
 
 ```vhdl
-fdc1      : fdc8272     GENERIC MAP (CLK_FREQ    => 8333333,  BAUD => 1000000)
+fdc1      : fdc8272     GENERIC MAP (UART_CLK_HZ => 50000000, BAUD => 1000000)
 inst3     : ps2_kbd_ppi GENERIC MAP (CLK_FREQ_HZ => 50000000)
 opl2lite1 : opl2_lite   GENERIC MAP (CLK_HZ      => 8_333_333)
 ```
 
-With `fdc8272`'s defaults (50 MHz / 115200) the serial link runs at ~11.5 kbaud
-instead of 1 Mbaud. Note that `BAUD_DIV` is an integer divide, so even when set
-correctly the real rate is `8333333 / 8` = **1,041,667** rather than the round number
-asked for — 4.2 % fast, which 8N1 framing absorbs. Only 10, 5 and 2 MHz divide exactly.
+`ps2_kbd_ppi` is the exception and needs nothing: it runs on `c3`, which does not
+move. Its generic still matters — with the entity default of 5 MHz the PS/2 glitch
+filter, frame watchdog and keyboard-hold timeout are all 10× too short.
 
-With `ps2_kbd_ppi`'s default (5 MHz) the PS/2 glitch filter,
-frame watchdog and keyboard-hold timeout are all 10× too short. `opl2_lite`'s `CLK_HZ`
-sets the 49716 Hz sample rate and both detection timers, and a wrong value makes the
-AdLib fail its detection handshake — a game then decides there is no card, which looks
-like the card not being implemented rather than being mistuned.
+Three things do **not** follow the bus clock, and that is deliberate:
 
-Each of these must be changed by hand whenever `c0` moves. See
-[status](status.md#ideas-unscheduled) for the full list of places the bus rate is
-written down.
+- **The host serial link**, now that `fdc8272`'s UART is on `c3` — see above.
+
+- **The 18.2 Hz BIOS tick**, which comes from `c2`. It is an honest time reference
+  across speed changes, which is what makes measuring the speed possible at all
+  (`tools/speed.asm`).
+- **`busdecode`'s READY backstop**, which counts CPU clocks and so shortens in real
+  time as the clock rises. It is sized for the fastest step: 256 clocks is 15.4 µs at
+  16.667 MHz against a worst legitimate access of ~4.9 µs.
 
 ## Reset
 

@@ -588,6 +588,15 @@ nowhere near the edit.
 > disclaimer underestimated it, because it framed the cost as tearing when the real cost
 > was software being told the wrong thing about when it could draw.
 
+**The speed ceiling.** `MAX_IDX` in `gertieboard.vhdl` sets the fastest step
+[`cpuclk`](modules/clkgen-pll.md#cpuclk--the-programmable-bus-clock) will accept;
+`-divide_by` on `CPU_CLK_INT` in `gertieboard.sdc` sets the step the timing report
+analyses. They are one setting written in two places and **nothing checks that they
+agree**. Raise the generic alone and the machine can be commanded into a step no one
+ever timed; raise the SDC alone and the report describes a step the hardware refuses.
+This one is at least loud in the right direction — `tools/mkfpga.sh` fails the build on
+negative slack — but only for the half that the SDC covers.
+
 **Lesson:** when two modules must agree about a fact, make one of them the source and
 have the other ask. If that is genuinely impractical, the second-best is a single
 assertion that fails loudly when they diverge — not a comment saying they might.
@@ -617,6 +626,136 @@ used as a count enable. The rate stays exact; only the phase of each tick moves,
 *be talked to at*. Wiring both to the slow one works until the bus gets faster than the
 model, and then it fails as a bus problem.
 
+## A check that reads through its own shadow
+
+The loader's flash path tested whether the flash held a BIOS at all:
+
+```asm
+cmp byte [es:0xFFF0], 0xEA      ; reset vector must be a far jump
+jne .nobios
+```
+
+`0xFFFF0` is **inside the boot ROM overlay window**, and the overlay was still enabled at
+that point — so the read returned the boot ROM's own reset vector, which is
+`EA 00 FC 00 F0`. It saw `0xEA` every time. The check passed unconditionally, the
+`.nobios` path and its `EF` marker were unreachable, and a blank flash would have booted
+into nothing with no indication.
+
+The overlay is a *read* shadow: writes pass through to PSRAM. So the loader could write
+the image into that window and never read back what it had written — it would always see
+itself. The blank test now works off the checksum of `0xC000`–`0xEFFF`, a range the
+overlay does not cover.
+
+**Lesson:** when a device shadows part of an address space, every read in that range is
+answering a different question than it looks like. Verifying what you just wrote requires
+reading somewhere the shadow does not reach — or turning the shadow off first.
+
+## A measurement nobody can read is not a measurement
+
+The boot loader has always checksummed the BIOS image **in PSRAM, immediately before
+jumping to it** — the exact bytes about to run — and shown it on the 7-segment display,
+high byte then low byte, before marker 7. It is the ideal instrument: it distinguishes
+"the transfer corrupted" from "the image is fine and the fault is elsewhere", with no
+BIOS involved at all.
+
+It has never been legible. `show_byte` held each value for **0.27 s** at the 8.333 MHz
+the loader actually runs at, while [`sevenseg`](modules/sevenseg.md) needs **2.0 s** to
+walk both nibbles of a byte — and a new write restarts that cycle from the high nibble.
+So every boot displayed a flicker of two high nibbles and then marker 7 wrote over them.
+
+The delay constant was sized as "~0.45 s at 5 MHz", which is a real calculation about a
+loop and says nothing about the display it was feeding. Two full debugging rounds were
+spent on a stalling boot with the answer being computed, correctly, on every attempt.
+
+**Lesson:** when instrumentation feeds a display, the display's own timing is part of the
+instrument. A number that is right and invisible is worth exactly as much as one that is
+wrong — and it is more expensive, because it looks like the check is being done.
+
+## An exception that outlived the reason for it
+
+`gertieboard.sdc` put the pixel clock `c1` in its own asynchronous clock group, and said
+why:
+
+> The VGA pixel clock is the one exception: it meets the system clock only inside the
+> dual-port framebuffer BRAM, so it is its own async group.
+
+That was true when it was written. It stopped being true the day the EGA planes moved to
+SDRAM, because [`ega_mem`](../ega_mem.vhd) carries `row_addr` — a **sixteen-bit bus** —
+from `c1` to `c3`, with `fill_tgt` beside it, and none of that is inside a BRAM. The
+comment stayed correct-looking and the constraint stayed in force.
+
+Declaring clocks asynchronous does not relax those paths. It **deletes** them from the
+analysis. Seventeen wires were placed by luck, and nothing anywhere would say so:
+
+```
+PAIR clk[1] -> clk[3] : 0        PAIR clk[3] -> clk[1] : 0
+PAIR clk[1] -> clk[0] : 0        PAIR clk[0] -> clk[1] : 0
+```
+
+The symptom was that **the build became a lottery**. Identical logic closed at `-0.040`,
+`+0.056`, `+0.200` or `+0.327` ns depending only on the fitter seed, and whether the
+machine booted tracked that number and not the source. An edit confined to the EGA
+prefetch could stop DOS finding `COMMAND.COM`, a bitstream could boot on the third
+attempt having failed twice, and every one of those builds passed timing. Hours went into
+theories — the seed, an arithmetic rewrite, the PSRAM capture window — each of which fit
+the evidence and each of which was wrong, because the evidence was a proxy for placement
+quality rather than a cause.
+
+`c1` is 25 MHz from the same PLL as `c3`'s 50 MHz: integer-related and phase-aligned, like
+every other output here. The header of that file already says the others are timed
+together *for exactly this reason*, and calls the previous version of the same mistake
+"the original bug that left the `busdecode`↔PSRAM paths unanalyzed". So the exception was
+removed and `c1` timed with the rest. The newly visible paths pass with 16–18 ns to spare
+— they were never tight, they were merely **unexamined**.
+
+Two things fell out of that which are worth noting separately:
+
+- The `EGA_START` bus (CRTC `R12`/`R13` → the pixel clock) is crossed by two flops *per
+  bit*. That resolves metastability per bit but does **not** make a bus coherent: bits can
+  resolve on different clocks and yield a value that was never written. A handshake was
+  about to be written for it. None was needed — once the clocks are timed together the
+  transfer meets setup and all sixteen bits land on one edge by construction. **The
+  synchronisers were compensating for a constraint, not for the hardware.**
+- With analysis finally covering the design, the real critical path could be found and
+  paid for: the PSRAM cache tag compare. Halving `NLINES` from 8 to 4 took setup at
+  slow/85 °C from `+0.150` to `+0.487` ns and cost **nothing measurable** — `RAMSPEED`
+  reads 18 ticks either way. The margin had been spent on cache lines the workload never
+  used.
+
+**Lesson:** a timing exception is a claim about the design, and claims rot. `set_false_path`
+and `set_clock_groups -asynchronous` are the only constructs here that can make a build
+pass by *not looking*, so each one needs a reason recorded next to it — and the reason
+needs re-reading whenever the thing it describes is touched. When a design starts
+behaving differently per fitter seed, suspect the constraints before the logic: **"it
+closes timing" means nothing until you know what is being timed.**
+
+## A test that certified the memory that used to exist
+
+[`EGAVFY`](tools.md) writes a pattern through the whole EGA write path and reads it back
+through the SDRAM window at `0x300`, which is the only way to tell "the CPU wrote the
+wrong thing" from "the display reads the wrong thing". It opened with:
+
+```asm
+NOFFS   equ 8000                ; one full 320x200 page, in pixel offsets
+```
+
+8000 bytes *was* the whole of a plane, back when a plane was 16 KB and the CPU window
+folded four times into it. When the planes grew to 64 KB the constant stayed, so the tool
+swept the first eighth of the memory and printed **CLEAN** — while the addresses Keen 4
+actually uses for its second and third display pages, and for the off-screen latch area,
+had never been read by anything.
+
+The failure mode is the bad one: not a wrong answer, a *confident* one. A tool whose only
+job is to say whether memory is sound will happily certify the memory it was told about
+years ago.
+
+**Lesson:** a test's coverage is a constant somewhere, and constants do not follow the
+hardware. When a size changes, grep the *tools* for it too — and prefer a bound derived
+from the thing under test over a number typed in once. Extended here to all 65536
+offsets, plus a third pass that reads back **through the CPU**, since reading through the
+diagnostic window deliberately bypasses the display path and therefore also bypasses the
+CPU's own read path — the one every latch load in a blitter depends on.
+
 ## Currently open
 
 Nothing broken. The last entry — the BIOS not booting from SPI flash — closed when the
@@ -626,13 +765,16 @@ boot ROM stopped reading the image as
 Two things are *unfinished* rather than wrong, and are recorded here so they are not
 rediscovered as bugs:
 
-- **CRTC `START` (R12/R13) is latched but unused.** Anything that scrolls by moving the
-  display start address will not scroll. Software that redraws is unaffected. It was
-  wired in once and reverted: it made Keen 4 overlap itself and shifted Arkanoid's *text*
-  screen, which rules out the word-versus-cell doubling that graphics mode makes the
-  obvious suspect and leaves the hardcoded 80-byte row length as the likely candidate.
+- **CRTC `START` (R12/R13) is used by EGA and still ignored by CGA.** In mode 0Dh the
+  start address is latched once a field into the prefetch base, so page flipping works and
+  Keen 4 relies on it. The CGA path still ignores it, so anything that scrolls a *text* or
+  mode 4/5/6 screen by moving the register will not scroll. That half was wired in once
+  and reverted — it shifted Arkanoid's text screen, which rules out the word-versus-cell
+  doubling that graphics mode makes the obvious suspect and leaves the hardcoded 80-byte
+  row length as the likely candidate.
   [`SCROLLTST`](tools.md#scrolltst--does-the-display-start-address-land-where-it-should)
-  exists to settle it; run that before wiring it in again, rather than reading the screen.
+  exists to settle it; run that before wiring in the CGA half, rather than reading the
+  screen.
 - **10 MHz does not boot.** The serial loader is never asked for a block. `c0` is 8.33 MHz
   and the CPU is a `-8` part, so the CPU is the obvious suspect and a faster one is the
   obvious test — but the 3.3 V logic levels driving a 5 V part have not been ruled out.

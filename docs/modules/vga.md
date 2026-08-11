@@ -5,7 +5,8 @@ Source: [`vga.vhd`](../../vga.vhd) · Instance `vga1` · Clocks `c1` (25 MHz pix
 Philips P2120 character ROM by [`tools/mkfont_p2120.py`](../../tools/mkfont_p2120.py)
 
 A CGA-compatible display adapter with its own 16 KB of video RAM, outputting VGA
-timing so a modern monitor can display it.
+timing so a modern monitor can display it. It also drives EGA mode 0Dh, whose four
+64 KB bit planes live in SDRAM behind [`ega_mem`](../../ega_mem.vhd) rather than here.
 
 ## Ports
 
@@ -86,8 +87,31 @@ active  X in (144, 784)  and  Y in (34, 435)
 | 5 | 320×200 | 4 | as mode 4 with the black-and-white palette (cyan/red/white) |
 | 6 | 640×200 | 2 | 1 bit per pixel, doubled vertically only |
 
-40-column text modes render as 80-column. There is no EGA/VGA support — no planar
-memory at `0xA0000` and no `0x3C0` register file.
+40-column text modes render as 80-column.
+
+### EGA mode 0Dh
+
+There **is** EGA support: mode 0Dh (320×200, 16 colours), with the `0x3C0`/`0x3C4`/`0x3CE`
+register file in [`ega_regs`](../../ega_regs.vhd) and planar memory at `0xA0000`. The four
+bit planes do not live in this module — they are in SDRAM behind a scanline buffer, in
+[`ega_mem`](../../ega_mem.vhd), because a plane is **64 KB** and four of them would need
+256 M9K blocks against the 42 this part has.
+
+64 KB per plane — a 256 KB EGA, the largest the card was ever built as — is not
+generosity, it is the window size. The CPU sees `0xA0000`–`0xAFFFF`, sixteen address bits,
+and a plane holds exactly that. An earlier version passed only fourteen bits to `ega_mem`
+and so folded the window four times into 16 KB, which is enough for **one** display page.
+Keen 4 keeps three, at 0, 16640 and 33280, and flips between them every frame; folded,
+they landed at 0, 256 and 512 and each was drawn over the other two. That was the
+duplicated menu entries and the repeated status box on screen, and the flicker was the
+flip. [`EGAVFY`](../tools.md) checks all 65536 offsets of the write path *and* the CPU
+read path, in every write mode, and is the tool to reach for before believing the picture.
+
+What stays in this module is the register **state**: the four latches, set/reset, the
+function select, the rotate and the bit mask. `ega_mem` never needs to know what an EGA
+write mode is — what crosses to memory is a finished 32-bit result and a per-plane mask.
+The CRTC's start address (`R12`/`R13`) and row offset (`R19`) are honoured here and only
+here; see [gotchas](../gotchas.md#currently-open) for the CGA half, which still is not.
 
 ## Video RAM organisation
 

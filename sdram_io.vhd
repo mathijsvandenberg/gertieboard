@@ -16,6 +16,9 @@
 --   0x302 W    address bits 23:16
 --   0x303 W/R  data low byte
 --   0x304 W/R  data high byte
+--   0x306 R    CRTC start address, low byte   (R13 / 0x0D)
+--   0x307 R    CRTC start address, high byte  (R12 / 0x0C)
+--   0x308 R    CRTC offset -- the logical line width in WORDS (R19 / 0x13)
 --   0x305 W    1 = read, 2 = write
 --         R    bit 0 = busy, bit 1 = init done, bit 2 = always 1 (see below),
 --              bit 3 = RESET as the controller sees it, bits 7:4 = state
@@ -77,7 +80,14 @@ ENTITY sdram_io IS
         DOUT      : IN    std_logic_vector(15 DOWNTO 0);
         ACK       : IN    std_logic;
         INIT_DONE : IN    std_logic;
-        DBG_STATE : IN    std_logic_vector(3 DOWNTO 0));
+        DBG_STATE : IN    std_logic_vector(3 DOWNTO 0);
+        -- Read-only windows onto what software has programmed into the CRTC.
+        -- Keen 4 sets these directly through 0x3D4/0x3D5 and they read back as
+        -- zero there, because a 6845's registers are write-only and that
+        -- asymmetry is what card detection looks for. So they are exposed
+        -- here instead, where DEBUG can simply IN them.
+        CRTC_START: IN    std_logic_vector(15 DOWNTO 0);
+        CRTC_OFFS : IN    std_logic_vector(7 DOWNTO 0));
 END sdram_io;
 
 ARCHITECTURE behavior OF sdram_io IS
@@ -118,10 +128,15 @@ BEGIN
            q_reg(15 DOWNTO 8)              WHEN IOADDR = x"0304" ELSE
            DBG_STATE & RESET & '1' & INIT_DONE & busy_i
                                            WHEN IOADDR = x"0305" ELSE
+           CRTC_START(7 DOWNTO 0)          WHEN IOADDR = x"0306" ELSE
+           CRTC_START(15 DOWNTO 8)         WHEN IOADDR = x"0307" ELSE
+           CRTC_OFFS                       WHEN IOADDR = x"0308" ELSE
            x"00";
 
   sel_rd  <= '1' WHEN (IORD = '0' AND (IOADDR = x"0303" OR IOADDR = x"0304" OR
-                                       IOADDR = x"0305")) ELSE '0';
+                                       IOADDR = x"0305" OR IOADDR = x"0306" OR
+                                       IOADDR = x"0307" OR IOADDR = x"0308"))
+             ELSE '0';
   DATAOUT <= rdval WHEN sel_rd = '1' ELSE "ZZZZZZZZ";
 
   ----------------------------------------------------------------------------

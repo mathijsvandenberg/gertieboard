@@ -28,10 +28,15 @@ USE  IEEE.STD_LOGIC_UNSIGNED.all;
 
 ENTITY fdc8272 IS
   GENERIC(
-        CLK_FREQ : integer := 50_000_000;   -- system clock feeding CLK
-        BAUD     : integer := 115200 );     -- raise for more throughput
+        -- The UART's OWN clock, which is not the bus clock and does not move.
+        UART_CLK_HZ : integer := 50_000_000;
+        BAUD        : integer := 1_000_000 );
   PORT(
         CLK      : IN    std_logic;
+        -- Fixed clock for the UART only -- c3, 50 MHz. See the note on
+        -- BAUD_DIV below: this is what makes the link rate a property of the
+        -- board rather than of whatever speed step the CPU happens to be on.
+        CLK_UART : IN    std_logic;
         RESET    : IN    std_logic;
 
         -- CPU bus (active-LOW strobes, gated I/O cycle)
@@ -58,7 +63,35 @@ END fdc8272;
 
 ARCHITECTURE behavior OF fdc8272 IS
 
-  CONSTANT BAUD_DIV : integer := CLK_FREQ / BAUD;
+  --------------------------------------------------------------------------
+  -- The link rate is a clean divide of a FIXED clock, and that is the point.
+  --
+  -- The UART used to be clocked by the bus clock and divide it by an integer,
+  -- which was survivable while the bus clock was a constant. Once the speed
+  -- became a register (cpuclk.vhd) it stopped being survivable: BAUD_DIV had
+  -- to be re-derived per step, an integer divide of 5 / 6.25 / 7.143 / 8.333 /
+  -- 10 / 12.5 / 16.667 MHz never lands on the same number twice, and the best
+  -- table available was +4.2 % at the step the machine BOOTS at. 8N1 tolerates
+  -- about 5 %, so every BIOS transfer ran near the edge of the envelope -- and
+  -- an intermittent stall right after "BIOS fetched" is exactly what that
+  -- looks like.
+  --
+  -- Worse, it did not scale: going faster made it collapse. At 2 Mbaud a
+  -- 6.25 MHz bus clock needs a divisor of 3.125 and gets 3, which is 25 % out.
+  -- At 3 Mbaud a 5 MHz bus clock has 1.67 clocks per bit and cannot sample the
+  -- line at all.
+  --
+  -- So the UART runs on CLK_UART (c3, 50 MHz, fixed) and the controller stays
+  -- on CLK. 50e6 divides exactly by 50 -> 1,000,000 and by 25 -> 2,000,000,
+  -- at every step of the ladder, forever. ZERO error, not 4.2 %.
+  --
+  --   BAUD = 1_000_000 -> BAUD_DIV 50   today's rate, now exact
+  --   BAUD = 2_000_000 -> BAUD_DIV 25   also exactly FTDI's 3 MHz / 1.5
+  --
+  -- Change BAUD here (or in the top level's GENERIC MAP) AND on the host; they
+  -- are one setting in two places and nothing checks that they agree.
+  --------------------------------------------------------------------------
+  CONSTANT BAUD_DIV : integer := UART_CLK_HZ / BAUD;
 
   -- Host protocol constants
   CONSTANT PREAMBLE : std_logic_vector(7 DOWNTO 0) := x"33";
@@ -69,9 +102,27 @@ ARCHITECTURE behavior OF fdc8272 IS
   ----------------------------------------------------------------------------
   -- UART
   ----------------------------------------------------------------------------
+  -- ---- CLK domain: what the controller sees. Unchanged interface, so the
+  -- command engine below did not have to be touched at all: tx_start is still
+  -- a one-shot, tx_busy still a level, rx_valid still a one-clock pulse.
   SIGNAL tx_start : std_logic := '0';
   SIGNAL tx_data  : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
   SIGNAL tx_busy  : std_logic := '0';
+  SIGNAL rx_valid : std_logic := '0';
+  SIGNAL rx_data  : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
+
+  -- ---- the crossing. Toggles, not pulses: a one-cycle 50 MHz pulse is 20 ns
+  -- and the bus clock can be 200 ns, so a pulse would simply be missed.
+  SIGNAL tx_req_tog : std_logic := '0';                       -- CLK -> UART
+  SIGNAL tx_ack_tog : std_logic := '0';                       -- UART -> CLK
+  SIGNAL rx_tog     : std_logic := '0';                       -- UART -> CLK
+  SIGNAL tx_req_s   : std_logic_vector(2 DOWNTO 0) := "000";
+  SIGNAL tx_ack_s   : std_logic_vector(2 DOWNTO 0) := "000";
+  SIGNAL rx_tog_s   : std_logic_vector(2 DOWNTO 0) := "000";
+
+  -- ---- CLK_UART domain: the UART itself
+  SIGNAL rst_u    : std_logic_vector(1 DOWNTO 0) := "11";
+  SIGNAL tx_busy_u : std_logic := '0';
   SIGNAL tx_out   : std_logic := '1';
   SIGNAL tx_shift : std_logic_vector(9 DOWNTO 0) := (OTHERS => '1');
   SIGNAL tx_cnt   : integer RANGE 0 TO 10 := 0;
@@ -82,8 +133,7 @@ ARCHITECTURE behavior OF fdc8272 IS
   SIGNAL rx_div   : integer RANGE 0 TO 65535 := 0;
   SIGNAL rx_cnt   : integer RANGE 0 TO 10 := 0;
   SIGNAL rx_shift : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
-  SIGNAL rx_valid : std_logic := '0';
-  SIGNAL rx_data  : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL rx_data_u : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
 
   ----------------------------------------------------------------------------
   -- 512-byte sector buffer (registered read)
@@ -203,27 +253,76 @@ BEGIN
   ----------------------------------------------------------------------------
   -- UART transmitter
   ----------------------------------------------------------------------------
-  UART_TX <= tx_out;
+  ----------------------------------------------------------------------------
+  -- The crossing, CLK side.
+  --
+  -- tx_busy is raised HERE, by this process, the moment tx_start is seen --
+  -- not by waiting for the UART's own busy to come back through the
+  -- synchroniser. That wait is two bus clocks, and during it the controller's
+  -- guard (tx_busy = '0' AND tx_start = '0') would be satisfied again and it
+  -- would push a second byte on top of the first.
+  ----------------------------------------------------------------------------
   PROCESS (CLK)
   BEGIN
     IF rising_edge(CLK) THEN
       IF RESET = '1' THEN
-        tx_busy <= '0'; tx_out <= '1'; tx_cnt <= 0; tx_div <= 0;
-      ELSIF tx_busy = '0' THEN
-        tx_out <= '1';
+        tx_req_tog <= '0'; tx_busy <= '0'; rx_valid <= '0';
+        tx_ack_s <= "000"; rx_tog_s <= "000";
+      ELSE
+        tx_ack_s <= tx_ack_s(1 DOWNTO 0) & tx_ack_tog;
+        rx_tog_s <= rx_tog_s(1 DOWNTO 0) & rx_tog;
+        rx_valid <= '0';
+
         IF tx_start = '1' THEN
+          tx_req_tog <= NOT tx_req_tog;
+          tx_busy    <= '1';
+        ELSIF tx_ack_s(2) /= tx_ack_s(1) THEN
+          tx_busy    <= '0';
+        END IF;
+
+        IF rx_tog_s(2) /= rx_tog_s(1) THEN
+          rx_valid <= '1';
+        END IF;
+      END IF;
+    END IF;
+  END PROCESS;
+
+  -- Read straight across: the UART holds it from the toggle until the NEXT
+  -- byte completes, which is a whole frame away (10 us at 1 Mbaud) -- orders
+  -- of magnitude more than the synchroniser takes to deliver rx_valid.
+  rx_data <= rx_data_u;
+
+  ----------------------------------------------------------------------------
+  -- UART transmitter -- on CLK_UART
+  ----------------------------------------------------------------------------
+  UART_TX <= tx_out;
+  PROCESS (CLK_UART)
+  BEGIN
+    IF rising_edge(CLK_UART) THEN
+      rst_u    <= rst_u(0) & RESET;
+      tx_req_s <= tx_req_s(1 DOWNTO 0) & tx_req_tog;
+
+      IF rst_u(1) = '1' THEN
+        tx_busy_u <= '0'; tx_out <= '1'; tx_cnt <= 0; tx_div <= 0;
+        tx_ack_tog <= '0';
+      ELSIF tx_busy_u = '0' THEN
+        tx_out <= '1';
+        IF tx_req_s(2) /= tx_req_s(1) THEN
+          -- tx_data is stable: the controller sets it before tx_start and
+          -- leaves it alone until tx_busy drops.
           tx_shift <= '1' & tx_data & '0';   -- [0]=start, [1..8]=data, [9]=stop
           tx_cnt   <= 10;
           tx_div   <= BAUD_DIV - 1;
-          tx_busy  <= '1';
+          tx_busy_u <= '1';
           tx_out   <= '0';                    -- start bit
         END IF;
       ELSE
         IF tx_div = 0 THEN
           tx_div <= BAUD_DIV - 1;
           IF tx_cnt = 1 THEN
-            tx_busy <= '0';
-            tx_out  <= '1';
+            tx_busy_u  <= '0';
+            tx_out     <= '1';
+            tx_ack_tog <= NOT tx_ack_tog;     -- stop bit done: release CLK side
           ELSE
             tx_shift <= '1' & tx_shift(9 DOWNTO 1);
             tx_out   <= tx_shift(1);
@@ -237,16 +336,18 @@ BEGIN
   END PROCESS;
 
   ----------------------------------------------------------------------------
-  -- UART receiver
+  -- UART receiver -- on CLK_UART.
+  -- 50 MHz against 1 Mbaud is 50 samples per bit, where the old bus-clock
+  -- version had 5 at the slowest step. The mid-bit sampling point is now
+  -- placed to within 2 % of a bit instead of 20 %.
   ----------------------------------------------------------------------------
-  PROCESS (CLK)
+  PROCESS (CLK_UART)
   BEGIN
-    IF rising_edge(CLK) THEN
-      IF RESET = '1' THEN
-        rx_busy <= '0'; rx_valid <= '0'; rx_sync <= "11";
+    IF rising_edge(CLK_UART) THEN
+      IF rst_u(1) = '1' THEN
+        rx_busy <= '0'; rx_sync <= "11"; rx_tog <= '0';
       ELSE
         rx_sync  <= rx_sync(0) & UART_RX;
-        rx_valid <= '0';
         IF rx_busy = '0' THEN
           IF rx_sync(1) = '0' THEN              -- start bit
             rx_busy <= '1';
@@ -262,9 +363,9 @@ BEGIN
               rx_shift <= rx_sync(1) & rx_shift(7 DOWNTO 1);  -- LSB first
               rx_cnt   <= rx_cnt + 1;
             ELSE
-              rx_data  <= rx_shift;              -- stop bit -> latch
-              rx_valid <= '1';
-              rx_busy  <= '0';
+              rx_data_u <= rx_shift;             -- stop bit -> latch
+              rx_tog    <= NOT rx_tog;           -- tell the CLK side
+              rx_busy   <= '0';
             END IF;
           ELSE
             rx_div <= rx_div - 1;

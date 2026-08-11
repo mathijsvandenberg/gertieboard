@@ -20,7 +20,10 @@ cd "$(dirname "$0")"
 
 SRC="${1:-xtbios_src.s}"
 BASE="$(basename "$SRC" .s)"
-[ "$BASE" = "xtbios_src" ] && BASE="xtbios_claude"      # historical output name
+# Output is named after the board, not the source file: the BIOS ships together
+# with the bitstream as one release, so gertieboard_bios.64k sits alongside
+# gertieboard.sof / gertieboard.jic.
+[ "$BASE" = "xtbios_src" ] && BASE="gertieboard_bios"
 BIN="$BASE.bin"
 K64="$BASE.64k"
 
@@ -58,6 +61,7 @@ echo "== assembling $SRC =="
 wsl bash -c "cd /mnt/c/altera/gertieboard/tools && \
   as --32 '$SRC' -o /tmp/$BASE.o && \
   ld -m elf_i386 -Ttext=$ROMOFF --section-start=.reset=0xFFF0 \
+     --section-start=.font_rom=0xFA6E \
      --oformat=binary -e _post /tmp/$BASE.o -o '$BIN'"
 
 sz=$(wc -c < "$BIN")
@@ -80,6 +84,12 @@ if d[off:0x10000] != b:                   fails.append(f"image is not at F-seg o
 if d[0xFFF0:0xFFF2] != b'\xea\x00':       fails.append("reset vector at 0xFFF0 is not a far jump")
 if d[0xFFF3:0xFFF5] != b'\x00\xf0':       fails.append("reset vector does not target segment F000")
 if any(x != 0xFF for x in d[:off]):       fails.append(f"fill below 0x{off:04X} is not 0xFF")
+# The 8x8 font MUST be readable at F000:FA6E. Software hardcodes that address
+# rather than reading INT 43h -- King's Quest does -- and a zero-filled gap
+# there is silent: it looks like a font full of blank glyphs, not like an
+# error. Checking the ADDRESS is the only thing that catches a bad link.
+font = open("font8x8.bin","rb").read()[:1024]
+if d[0xFA6E:0xFA6E+1024] != font:         fails.append("8x8 font (chars 0..127) is NOT at F000:FA6E")
 # the .64k must be built from THIS .bin -- the bug this script prevents
 if fails:
     print("BUILD FAILED:")

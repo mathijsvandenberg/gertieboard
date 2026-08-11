@@ -65,13 +65,13 @@ ENTITY vga IS
 		  -- the plane arrays below for why CGA's two did NOT move.
 		  EM_REQ				  : OUT std_logic;
 		  EM_WE					  : OUT std_logic;
-		  EM_OFFS				  : OUT std_logic_vector(13 DOWNTO 0);
+		  EM_OFFS				  : OUT std_logic_vector(15 DOWNTO 0);
 		  EM_WDATA				  : OUT std_logic_vector(31 DOWNTO 0);
 		  EM_WMASK				  : OUT std_logic_vector(3 DOWNTO 0);
 		  EM_RDATA				  : IN  std_logic_vector(31 DOWNTO 0);
 		  EM_READY				  : IN  std_logic;
 		  EM_ROW_GO				  : OUT std_logic;
-		  EM_ROW_OFFS			  : OUT std_logic_vector(13 DOWNTO 0);
+		  EM_ROW_OFFS			  : OUT std_logic_vector(15 DOWNTO 0);
 		  EM_COL				  : OUT std_logic_vector(5 DOWNTO 0);
 		  EM_SCAN				  : IN  std_logic_vector(31 DOWNTO 0);
 		  -- To busdecode: this address is ours, and it is not ready yet.
@@ -265,10 +265,10 @@ ARCHITECTURE behavior OF vga IS
 
   -- Scan-side plane reads for EGA.
   -- The row the prefetch should fetch NEXT, accumulated one stride per row.
-  SIGNAL fetch_base     : std_logic_vector(13 DOWNTO 0) := (OTHERS => '0');
-  SIGNAL row_offs_q     : std_logic_vector(13 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL fetch_base     : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL row_offs_q     : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
   SIGNAL row_go_i       : std_logic := '0';
-  SIGNAL ega_stride     : std_logic_vector(13 DOWNTO 0);
+  SIGNAL ega_stride     : std_logic_vector(15 DOWNTO 0);
   -- START and OFFSET cross c0 -> c1 and are sampled once a field, so they get
   -- two flops each. Fourteen-odd bits sampled at one instant is a metastability
   -- hazard whose symptom is one field drawn from a nonsense address -- rare
@@ -438,7 +438,11 @@ BEGIN
   -- arrived and read rubbish -- silently, and only for EGA. So the window now
   -- claims the READY handshake and the CPU waits for it.
   ----------------------------------------------------------------------------
-  EM_OFFS  <= ADDR(13 DOWNTO 0);
+  -- THE WHOLE WINDOW, NOT A QUARTER OF IT. ega_sel claims 0xA0000..0xAFFFF --
+  -- sixteen address bits -- and this used to pass on fourteen, so the window
+  -- folded four times into the first 16 KB of every plane. One page is
+  -- invisible to that; Keen 4 keeps three. See the note in ega_mem.vhd.
+  EM_OFFS  <= ADDR(15 DOWNTO 0);
   EM_WDATA <= wd3 & wd2 & wd1 & wd0;
   EM_WMASK <= MAP_MASK;
   EM_WE    <= '1' WHEN WR = '0' ELSE '0';
@@ -567,8 +571,10 @@ BEGIN
   --
   --     offset = 40 * cga_y + cga_x / 8,  cga_y = YY/2,  cga_x = XX/2
   --
-  -- which is 40 * YY(10:1) + XX(10:4). Maximum 40*199 + 39 = 7999, inside the
-  -- 8192 each plane holds.
+  -- which is 40 * YY(10:1) + XX(10:4). That is the SINGLE-PAGE arithmetic and
+  -- it is superseded twice over by the two notes below: the stride comes from
+  -- the Offset register, not the constant 40, and the base comes from the start
+  -- address, so a page is not assumed to begin at zero either.
   --
   -- 320x200 doubles into the 640x400 active area exactly, the same as CGA
   -- mode 4, so nothing about the timing changes.
@@ -598,7 +604,7 @@ BEGIN
   -- row base is a register that gains one stride per CGA scanline, which is
   -- both cheaper and what an actual CRTC does: it latches the start address at
   -- the top of the field and adds the offset per row.
-  ega_stride <= "00000" & of_s2 & '0';       -- 5 + 8 + 1 = 14, words -> bytes
+  ega_stride <= "0000000" & of_s2 & '0';     -- 7 + 8 + 1 = 16, words -> bytes
 
   -- CGA only now: the EGA scan reads ega_mem's line buffer, not these arrays.
   vga_idx <= YY(1) & goff(12 DOWNTO 1) WHEN gfx_on = '1' ELSE txt_idx;
@@ -688,7 +694,10 @@ BEGIN
           -- fetch_base is loaded at Y = 31, which is after the field wrap has
           -- latched the start address and before the first pulse needs it.
           IF Y = 31 THEN
-            fetch_base <= st_s2(13 DOWNTO 0);
+            -- All sixteen bits of R12/R13. Truncating this to fourteen put
+            -- every page above the first back on top of page 0 -- the scan
+            -- side of the same fold EM_OFFS had, and useless fixed alone.
+            fetch_base <= st_s2;
           ELSIF (Y >= 32 AND Y(0) = '0') THEN
             row_offs_q <= fetch_base;        -- the value BEFORE the step, or
             row_go_i   <= '1';               -- every row would be off by one

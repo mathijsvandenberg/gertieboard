@@ -3,38 +3,42 @@
 Every module instantiated by [`gertieboard.vhdl`](../../gertieboard.vhdl), with its
 entity ports, decoded addresses and behaviour.
 
+"Bus clock" means the programmable CPU/I/O clock from
+[`cpuclk`](clkgen-pll.md#cpuclk--the-programmable-bus-clock): 8.333 MHz after reset,
+selectable from 5 to 16.667 MHz through I/O `0xE5`.
+
 ## Bus and memory
 
 | Module | Instance | Clock | Function |
 |---|---|---|---|
-| [busdecode](busdecode.md) | `busdecode1` | `c0` 8.33 MHz | Address latch, bus strobes, READY, DMA mux, boot ROM overlay, DMA page register |
+| [busdecode](busdecode.md) | `busdecode1` | bus clock | Address latch, bus strobes, READY, DMA mux, boot ROM overlay, DMA page register |
 | [mem_hybrid](mem_hybrid.md) | `inst` | `c3` 50 MHz | Memory controller: QPI PSRAM for all 640 KB (with a read cache), on-chip M9K for the BIOS and disk buffer |
-| [bootrom](bootrom.md) | `bootrom1` | `c0` 8.33 MHz | 1 KB boot ROM overlaid at `0xFFC00`, plus the `ROM_EN` flag |
-| [ctrl_reg](ctrl_reg.md) | `ctrl1` | `c0` 8.33 MHz | Runtime PSRAM timing register at I/O `0xE4` |
+| [bootrom](bootrom.md) | `bootrom1` | bus clock | 2 KB boot ROM overlaid at `0xFF800`, plus the `ROM_EN` flag |
+| [ctrl_reg](ctrl_reg.md) | `ctrl1` | bus clock | Runtime PSRAM timing register at I/O `0xE4` |
 
 ## Video
 
 | Module | Instance | Clock | Function |
 |---|---|---|---|
-| [vga](vga.md) | `vga1` | `c1` 25 MHz + `c0` | CGA text and graphics, 16 KB VRAM, VGA output |
+| [vga](vga.md) | `vga1` | `c1` 25 MHz + bus clock | CGA text and graphics, 16 KB VRAM, VGA output |
 | [cga_status](cga_status.md) | `cgastatus1` | — | CGA status port `0x3DA` — blanking and vertical retrace, taken from `vga`'s counters |
 
 ## Classic chipset
 
 | Module | Instance | Clock | Function |
 |---|---|---|---|
-| [ppi8255](ppi8255.md) | `ppi1` | `c0` 8.33 MHz | 8255 PPI: keyboard port, speaker gate, DIP switches |
+| [ppi8255](ppi8255.md) | `ppi1` | bus clock | 8255 PPI: keyboard port, speaker gate, DIP switches |
 | [timer8253](timer8253.md) | `timer1` | `c2` 1.19 MHz | 8253 PIT: system tick and speaker tone |
-| [int8259](int8259.md) | `int1` | `c0` 8.33 MHz | 8259A interrupt controller |
-| [dma8237](dma8237.md) | `dma1` | `c0` 8.33 MHz | 8237A DMA controller and bus master |
+| [int8259](int8259.md) | `int1` | bus clock | 8259A interrupt controller |
+| [dma8237](dma8237.md) | `dma1` | bus clock | 8237A DMA controller and bus master |
 
 ## Storage and I/O
 
 | Module | Instance | Clock | Function |
 |---|---|---|---|
-| [fdc8272](fdc8272.md) | `fdc1` | `c0` 8.33 MHz | Floppy controller, backed by a 1 Mbaud serial link to the host |
+| [fdc8272](fdc8272.md) | `fdc1` | bus clock | Floppy controller, backed by a 1 Mbaud serial link to the host |
 | [usb_host](usb_host.md) | USB 1.1 full-speed host controller | I/O `0xE8`–`0xEF` |
-| [flash](flash.md) | `flash1` | `c0` 8.33 MHz | SPI byte engine for the on-board serial FLASH |
+| [flash](flash.md) | `flash1` | bus clock | SPI byte engine for the on-board serial FLASH |
 | [ps2_kbd_ppi](ps2_kbd_ppi.md) | `inst3` | `c3` 50 MHz | PS/2 receiver, Set 2 → Set 1 translation, hardware Ctrl+Alt+Del |
 | [com1_stub](com1_stub.md) | `com1_stub1` | none | Answers COM1 probes as "absent" |
 
@@ -42,10 +46,10 @@ entity ports, decoded addresses and behaviour.
 
 | Module | Instance | Clock | Function |
 |---|---|---|---|
-| [sevenseg](sevenseg.md) | `sevenseg1` | `c0` 8.33 MHz | 7-segment POST/debug display at I/O `0x80` |
-| [opl2_lite](opl2_lite.md) | `opl2lite1` | `c0` 8.33 MHz | AdLib at I/O `0x388`–`0x389`, square waves on the buzzer |
-| [crtc6845](crtc6845.md) | `crtc1` | `c0` 8.33 MHz | 6845 register file at I/O `0x3D4`–`0x3D5` |
-| [clkgen / pll](clkgen-pll.md) | `clkgen1`, `pll1`, `pll2` | — | Clock generation and reset stretch |
+| [sevenseg](sevenseg.md) | `sevenseg1` | bus clock | 7-segment POST/debug display at I/O `0x80` |
+| [opl2_lite](opl2_lite.md) | `opl2lite1` | bus clock | AdLib at I/O `0x388`–`0x389`, square waves on the buzzer |
+| [crtc6845](crtc6845.md) | `crtc1` | bus clock | 6845 register file at I/O `0x3D4`–`0x3D5` |
+| [clkgen / cpuclk / pll](clkgen-pll.md) | `clkgen1`, `cpuclk1`, `pll1`, `pll48_1` | — | Clock generation, the programmable bus clock at I/O `0xE5`, and reset stretch |
 
 ## Shared conventions
 

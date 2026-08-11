@@ -361,21 +361,22 @@ _post:
 
     ## INT 43h -- the 8x8 GRAPHICS FONT, and this vector is not optional.
     ##
-    ## Software that draws its own text in a graphics mode does not ask the
-    ## BIOS to render characters; it reads this vector to find the glyphs and
-    ## plots them itself. King's Quest is one: its interpreter contains no
-    ## INT 10h at all, and its EGA driver only uses it to set the mode. So its
-    ## text windows drew as an empty box with a red border and its status bar
-    ## as a blank strip -- the boxes are pixels and worked, the letters needed
-    ## a font and there was not one.
+    ## It is read in two directions, and both matter:
     ##
-    ## Every vector starts out pointing at _dummy_int, so what it had been
-    ## reading was a bare IRET, and the glyph bitmaps were whatever BIOS code
-    ## bytes happened to follow it.
+    ##  * software that plots its own text in a graphics mode reads it to find
+    ##    the glyphs. Every vector starts out pointing at _dummy_int, so what
+    ##    such a program had been reading was a bare IRET, and the glyph bitmaps
+    ##    were whatever BIOS code bytes happened to follow it.
+    ##
+    ##  * WE read it, in g_render, whenever the mode is 0Dh -- because on an EGA
+    ##    this vector, not the ROM, is what names the character generator. That
+    ##    also lets a program hand us a glyph we do not have by re-aiming the
+    ##    vector for the duration of one INT 10h call, which is exactly how
+    ##    King's Quest draws its inverse-video text. See g_render.
     ##
     ## Only the offset is written: the fill above already left 0xF000 in the
-    ## segment half. The upper 128 glyphs stay with INT 1Fh, which is null on
-    ## purpose -- see g_render.
+    ## segment half. INT 1Fh stays null on purpose -- it is the CGA-era upper-128
+    ## table, and a stock machine has none.
     mov bx, 0x43*4
     mov word ptr es:[bx],   offset font8x8
 
@@ -772,10 +773,17 @@ _int10:
 ## passed in. A machine with no EGA leaves it alone. Keen 4 and King's Quest
 ## both ask this before offering their EGA modes.
 ##
-## BL = 0 claims 64 KB, the smallest EGA ever shipped. That is the closest
-## available answer to the truth: this board has 32 KB of display memory and
-## there is no way to say so in this interface. Claiming more would invite a
-## game to choose mode 10h, which cannot work here.
+## BL = 0 claims 64 KB, the smallest EGA ever shipped, and this is now an
+## UNDERSTATEMENT rather than the overstatement it used to be: the planes moved
+## to SDRAM and a plane is 64 KB, so the board really has 256 KB and could
+## answer BL = 3.
+##
+## It does not, because memory size is not the only thing this call decides. A
+## game told 256 KB may reasonably choose mode 10h -- 640x350 -- and only mode
+## 0Dh exists here, so the honest answer buys nothing and costs the software
+## that works today. Nothing is waiting on the larger number either: Keen 4 does
+## not consult it, which is precisely why it was already using three pages while
+## being told it had room for one.
 v_alt_select:
     cmp bl, 0x10
     jne .as_done
@@ -1442,24 +1450,61 @@ g_render:
     xor bh, bh
 
     ## ---------------------------------------------------------------
-    ##  WHERE THE GLYPH LIVES, and why the top half is not in ROM.
+    ##  WHERE THE GLYPH LIVES. Two different rules, and which one applies
+    ##  depends on the mode -- this is not a detail, it is the whole of
+    ##  why King's Quest had no text.
     ##
-    ##  A real PC carries only characters 0..127 in the BIOS. The upper
-    ##  128 are a USER table addressed by INT 1Fh, which DOS leaves at
-    ##  0000:0000 unless something like GRAFTABL installs one -- so on a
-    ##  stock machine a code above 127 draws NOTHING in graphics mode.
+    ##  CGA (modes 4/5/6): a real PC carries only characters 0..127 in the
+    ##  BIOS. The upper 128 are a USER table addressed by INT 1Fh, which
+    ##  DOS leaves at 0000:0000 unless something like GRAFTABL installs
+    ##  one -- so on a stock machine a code above 127 draws NOTHING.
     ##
-    ##  This BIOS has all 256 glyphs, so it drew them, and King's Quest
-    ##  came out with a C-cedilla in every cell that should have been
-    ##  blank: it pads with 0x80, and every machine it was written for
-    ##  renders that as nothing. EGATEXT proved the fault was not in any
-    ##  of the INT 10h paths -- all six of its rows were correct -- which
-    ##  left only what the character MEANS.
+    ##  EGA (mode 0Dh): there is no such split. INT 43h points at the
+    ##  character generator for the current mode and the BIOS indexes it
+    ##  by char*8 for ALL 256 codes. INT 1Fh does not come into it.
     ##
-    ##  So: 0..127 from ROM, 128..255 from INT 1Fh, and a blank when that
-    ##  vector is null. The glyph's segment goes on the stack here and is
-    ##  popped into DS by whichever renderer runs below.
+    ##  Applying the CGA rule to mode 0Dh is what made King's Quest
+    ##  invisible, and the mechanism is worth writing down because nothing
+    ##  about it is guessable from the outside. Decrypting and
+    ##  disassembling its interpreter (2026-08-07) settled it: AGI draws
+    ##  every character with INT 10h AH=09h and never touches A0000
+    ##  itself. Its attribute builder returns 0x8F -- bit 7 set -- for any
+    ##  text on a NON-ZERO BACKGROUND, i.e. the whole message window and
+    ##  the status bar, and it renders that inverse video by INVERTING THE
+    ##  GLYPH BITMAP rather than by an attribute. To get that private
+    ##  glyph to us it copies the ROM one from a hardcoded F000:FA6E into
+    ##  its own 8-byte buffer, modifies it, substitutes CHARACTER CODE
+    ##  0x80, and points INT 43h at (buffer - 0x400) so that 0x80*8 lands
+    ##  back on the buffer. It restores the vector immediately after.
+    ##
+    ##  So EVERY character of an in-game text window arrives here as 0x80.
+    ##  Sending those to INT 1Fh drew blank8 and lost all of it; before
+    ##  that they indexed font8x8+0x400 and came out as a C-cedilla, which
+    ##  is where "it pads with 0x80" came from -- those cells were never
+    ##  padding, they were the text.
+    ##
+    ##  The glyph's segment goes on the stack here and is popped into DS
+    ##  by whichever renderer runs below. DS (the BDA) is free to clobber:
+    ##  the video mode was taken out of it above and the cursor is in DX.
     ## ---------------------------------------------------------------
+    cmp ch, 0x0D
+    jne .r_cga_font
+    xor ax, ax
+    mov ds, ax
+    mov ax, [0x10C]              # INT 43h vector: offset
+    mov di, [0x10E]              #                 segment
+    mov si, di
+    or  si, ax
+    jz  .r_cga_font              # null: no generator named -> use the ROM font
+    mov si, bx
+    shl si, 1
+    shl si, 1
+    shl si, 1                    # SI = char*8, all 256 codes
+    add si, ax
+    push di                      # ...wherever INT 43h points, which POST aimed
+    jmp .r_seg                   # at font8x8 and a program may re-aim per call
+
+.r_cga_font:
     cmp bl, 0x80
     jae .r_high
     mov si, bx
@@ -6423,6 +6468,35 @@ msg_boot:     .asciz "Booting...\r\n"
 msg_bootfail: .asciz "\r\nBoot Error.\r\n"
 msg_i10test:  .asciz "INT10-OK"
 msg_reboot:   .asciz "Press Ctrl-Alt-Del to Reboot ... \r\n"
+
+## =====================================================================
+##  THE 8x8 FONT AT ITS IBM ADDRESS, F000:FA6E.
+##
+##  Placed by the linker via the .font_rom section, because the ADDRESS is
+##  the entire point: on a real IBM PC the 8x8 graphics font for characters
+##  0..127 lives at exactly F000:FA6E, and software that wants a glyph
+##  bitmap of its own reads it from there DIRECTLY. INT 43h names the same
+##  table, but plenty of code never looks at the vector.
+##
+##  King's Quest is one of them, and it cost a whole debugging round to see
+##  it. Its interpreter draws inverse video -- the status bar, the menus,
+##  every text window -- by copying the ROM glyph from a HARDCODED F000:FA6E
+##  into a private buffer, XOR-ing it with 0xFFFF, and then handing that
+##  buffer to INT 10h through the INT 43h vector. This ROM had a perfectly
+##  good font at font8x8 and NOTHING at 0xFA6E, so what it copied was 1 KB of
+##  zeros; inverted, every character became all-ones and painted as a SOLID
+##  BLOCK. The status bar came out as a clean white strip with no letters in
+##  it and the File menu as blank rows -- which reads like "the text is
+##  missing" and is really "the font it asked for was not there".
+##
+##  Only 0..127. That is all a real machine has here, and 0xFA6E + 256*8
+##  would run past the end of the segment anyway. font8x8 keeps the full 256
+##  and stays the target of INT 43h, so g_render is unaffected -- this is an
+##  ALIAS of the low half, not a move.
+## =====================================================================
+.section .font_rom, "a"
+font8x8_rom:
+    .incbin "font8x8.bin", 0, 1024
 
 ## =====================================================================
 ##  Tail of ROM:  reset vector, date, model byte, checksum

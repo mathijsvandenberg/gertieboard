@@ -1,17 +1,26 @@
 --------------------------------------------------------------------------------
 -- ega_mem.vhd  --  the EGA bit planes, in SDRAM, behind a scanline buffer
 --
--- Four planes of 16 KB. They used to be four M9K arrays of 8 KB, which is all
--- that fits on-chip, and 8 KB is not enough for the software that exists:
+-- Four planes of 64 KB -- a 256 KB EGA, the largest the card was ever built as.
+-- They used to be four M9K arrays of 8 KB, which is all that fits on-chip, and
+-- 8 KB is not enough for the software that exists:
 --
 --   King's Quest keeps the area under its text windows at plane offset 0x2000
 --   and clears 8000 bytes there -- read straight out of its own EGA driver.
 --   Keen 4 programs a 640-pixel logical line, which is 16000 bytes a page.
 --
--- Both want a second page. Four 16 KB planes would need 64 M9K blocks and only
--- 42 could ever be freed, so they live in the DE0-Nano's SDRAM instead, where
--- 64 KB is nothing. This module is what makes that invisible to the rest of the
--- design.
+-- THE PLANE IS THE WINDOW. The CPU sees 0xA0000..0xAFFFF, sixteen address bits,
+-- and a plane holds exactly that: 64 KB, no fold. An earlier version carried
+-- fourteen bits and gave 16 KB, which is enough for ONE page and no more -- and
+-- one page is not what this software uses. Keen 4's Galaxy engine keeps three,
+-- at 0, 16640 and 33280, and flips between them every frame; folded to 16 KB
+-- they land at 0, 256 and 512 and each is drawn over the other two. That was
+-- the repeated menu entries and the repeated status box on screen, and the
+-- flicker was the flip.
+--
+-- Four 64 KB planes would need 256 M9K blocks and the part has 42, so they live
+-- in the DE0-Nano's SDRAM instead, where 256 KB is nothing. This module is what
+-- makes that invisible to the rest of the design.
 --
 -- ---------------------------------------------------------------------------
 -- THE SCANLINE BUFFER IS THE WHOLE IDEA
@@ -77,7 +86,7 @@ ENTITY ega_mem IS
         -- when the access is finished and RDATA is valid.
         CPU_REQ   : IN  std_logic;
         CPU_WE    : IN  std_logic;
-        CPU_OFFS  : IN  std_logic_vector(13 DOWNTO 0);   -- byte offset in a plane
+        CPU_OFFS  : IN  std_logic_vector(15 DOWNTO 0);   -- byte offset in a plane
         CPU_WDATA : IN  std_logic_vector(31 DOWNTO 0);   -- p3:p2:p1:p0
         CPU_WMASK : IN  std_logic_vector(3 DOWNTO 0);    -- which planes to write
         CPU_RDATA : OUT std_logic_vector(31 DOWNTO 0);
@@ -91,7 +100,7 @@ ENTITY ega_mem IS
         -- finishes -- a fill completes 16 us into a 63.5 us row, and swapping
         -- there would change the picture half way down a character row.
         ROW_GO    : IN  std_logic;
-        ROW_OFFS  : IN  std_logic_vector(13 DOWNTO 0);
+        ROW_OFFS  : IN  std_logic_vector(15 DOWNTO 0);
         COL       : IN  std_logic_vector(5 DOWNTO 0);
         SCAN_DATA : OUT std_logic_vector(31 DOWNTO 0);
 
@@ -128,7 +137,7 @@ ARCHITECTURE behavior OF ega_mem IS
   -- c1 -> c3
   SIGNAL row_tog   : std_logic := '0';
   SIGNAL row_s     : std_logic_vector(2 DOWNTO 0) := "000";
-  SIGNAL row_addr  : std_logic_vector(13 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL row_addr  : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
 
   -- c0 -> c3
   SIGNAL cpu_tog   : std_logic := '0';
@@ -147,11 +156,11 @@ ARCHITECTURE behavior OF ega_mem IS
   SIGNAL pf_pend  : std_logic := '0';
   SIGNAL cp_pend  : std_logic := '0';
   SIGNAL pf_col   : unsigned(6 DOWNTO 0) := (OTHERS => '0');
-  SIGNAL pf_base  : unsigned(13 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL pf_base  : unsigned(15 DOWNTO 0) := (OTHERS => '0');
   SIGNAL pf_half  : std_logic := '1';
   SIGNAL pf_run   : std_logic := '0';   -- a row fetch is part way through
   -- The CPU's request, CAPTURED WHEN IT ARRIVES. See the note at the capture.
-  SIGNAL cp_offs  : std_logic_vector(13 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL cp_offs  : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
   SIGNAL cp_wdata : std_logic_vector(31 DOWNTO 0) := (OTHERS => '0');
   SIGNAL cp_wmask : std_logic_vector(3 DOWNTO 0)  := (OTHERS => '0');
   SIGNAL cp_we    : std_logic := '0';

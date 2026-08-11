@@ -3,7 +3,7 @@
 Source: [`bootrom.vhd`](../../bootrom.vhd) · Instance `bootrom1` · Clock `c0` (8.33 MHz)
 · Loader source: [`tools/bootldr_64k.asm`](../../tools/bootldr_64k.asm)
 
-Holds the **1 KB bootloader** that is overlaid at `0xFFC00`–`0xFFFFF` at reset, and
+Holds the **2 KB bootloader** that is overlaid at `0xFF800`–`0xFFFFF` at reset, and
 owns the `ROM_EN` flag that controls the overlay.
 
 ## Ports
@@ -23,7 +23,7 @@ owns the `ROM_EN` flag that controls the overlay.
 
 | Address | Access | Function |
 |---|---|---|
-| `0xFFC00`–`0xFFFFF` | R | 1 KB boot ROM, while `ROM_EN = '1'` |
+| `0xFF800`–`0xFFFFF` | R | 2 KB boot ROM, while `ROM_EN = '1'` |
 | I/O `0xE2` | W | bit 0 = 1 → clear `ROM_EN`, revealing the PSRAM underneath |
 
 The overlay window itself is enforced by [`busdecode`](busdecode.md):

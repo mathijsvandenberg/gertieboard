@@ -5,14 +5,15 @@
 | Range | Size | Backing | Notes |
 |---|---|---|---|
 | `0x00000`–`0x9FFFF` | 640 KB | **PSRAM** (`psram_ctrl`) | *all* of conventional memory, at **one** speed |
-| `0xA0000`–`0xB7FFF` | — | unmapped | reads float; not a `MEMADDR` region |
+| `0xA0000`–`0xAFFFF` | 64 KB | **SDRAM** (via `ega_mem`) | EGA planes, **only while `EGA_ON`**; otherwise unmapped |
+| `0xB0000`–`0xB7FFF` | — | unmapped | reads float; not a `MEMADDR` region |
 | `0xB8000`–`0xBBFFF` | 16 KB | **inside `vga`** | CGA video RAM (text + graphics) |
 | `0xBC000`–`0xDFFFF` | — | unmapped | |
 | `0xE0000`–`0xE0FFF` | 4 KB | on-chip **M9K** (`m9k_mem`) | fixed-disk block buffer; **invisible to DOS** |
 | `0xE1000`–`0xEFFFF` | — | unmapped | |
 | `0xF0000`–`0xFBFFF` | 48 KB | **PSRAM** | `0xFF` fill. Kept backed because `BIOSFLSH` reads the whole F-segment |
 | `0xFC000`–`0xFFFFF` | 16 KB | on-chip **M9K** (`m9k_mem`) | the BIOS image — **zero wait states** |
-| `0xFFC00`–`0xFFFFF` | 1 KB | **boot ROM overlay** | *reads only*, while `ROM_EN = '1'` |
+| `0xFF800`–`0xFFFFF` | 2 KB | **boot ROM overlay** | *reads only*, while `ROM_EN = '1'` |
 
 Total conventional memory reported to DOS: **640 KB** — all of it.
 
@@ -43,10 +44,18 @@ conventional memory, so DOS gets the full 640 KB back. See
 > `ADDR >= 0xE0000`, so a window there is treated as a real memory cycle and the CPU
 > waits on `RAM_READY`. Anywhere in `0xA0000`–`0xDFFFF` the handshake is bypassed by the
 > `T >= 3` clause, and the CPU could sample the bus before the RAM drives it.
+>
+> The EGA window is the exception, and it has to be: an SDRAM access plus two clock
+> crossings is 500–600 ns, well past the 360 ns that `T >= 3` allows at 8.33 MHz, so a
+> read there would return whatever the bus held. `vga` therefore raises `EGA_CLAIM` for
+> `0xA0000`–`0xAFFFF` while `EGA_ON`, which is ORed into `MEMADDR` and claims the `READY`
+> handshake for those cycles. It is deliberately gated on the mode: the same addresses are
+> unclaimed in CGA modes, and claiming them there would send every stray access to the
+> `T >= 128` backstop at 15 µs apiece.
 
 ### The boot ROM overlay
 
-While `ROM_EN = '1'`, memory **reads** in `0xFFC00`–`0xFFFFF` return the boot ROM
+While `ROM_EN = '1'`, memory **reads** in `0xFF800`–`0xFFFFF` return the boot ROM
 instead of the memory underneath. **Writes always pass through**, which is what lets the
 bootloader fill the BIOS image underneath itself. Writing `1` to I/O `0xE2` bit 0
 clears `ROM_EN` and reveals what was written. See [boot flow](boot.md).

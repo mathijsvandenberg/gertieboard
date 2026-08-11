@@ -42,12 +42,23 @@
 ;  AND THE PHASE GOES TO THE 7-SEGMENT at port 0x80, because the first version
 ;  hung and the screen could not say where:
 ;
-;      1  writing the pattern through the EGA path
+;      1  writing the pattern through the EGA path      (write mode 0)
 ;      2  reading it back through the 0x300 window
+;      4  writing again in write mode 2
+;      5  reading that back through the 0x300 window
+;      6  writing again for the CPU read test
+;      7  reading back THROUGH THE CPU, all four planes
 ;      3  back in text mode, printing
 ;
-;  A display stuck on 2 means the window stopped answering while the prefetch
-;  was running, which is an arbitration problem and not a memory one.
+;  A display stuck on 2 or 5 means the window stopped answering while the
+;  prefetch was running, which is an arbitration problem and not a memory one.
+;  A display stuck on 7 means a CPU read of EGA memory never completed -- the
+;  READY handshake, not the data.
+;
+;  MISMATCH TAGS in the "word" column:
+;      00, 01   pass 1, the two SDRAM words of an offset (write mode 0)
+;      02       pass 2 (write mode 2)
+;      10..13   pass 3, a CPU read of plane 0..3
 ;
 ;  Build:  nasm -f bin egavfy.asm -o egavfy.com
 ; ============================================================================
@@ -63,7 +74,18 @@ P_DL    equ 0x303
 P_DH    equ 0x304
 P_CMD   equ 0x305
 
-NOFFS   equ 8000                ; one full 320x200 page, in pixel offsets
+; THE WHOLE PLANE, NOT THE FIRST PAGE. This was 8000 -- one 320x200 screen --
+; which was the whole of a plane back when a plane was 16 KB and the CPU window
+; folded into it. A plane is 64 KB now and Keen 4 uses all of it: three display
+; pages at 0, 16640 and 33280, and the off-screen latch area above those. Every
+; offset past 7999 was therefore UNTESTED by the tool whose entire job is to say
+; whether the write path is sound -- so it certified a quarter of the memory and
+; reported CLEAN.
+;
+; 0 means 65536: LOOP takes CX = 0 as a full turn, and the verify loops end when
+; SI wraps back to zero rather than by comparing against a count that no longer
+; fits in the register.
+NOFFS   equ 0                   ; one full 64 KB plane, in pixel offsets
 EGABASE equ 0xA000
 
 start:
@@ -159,8 +181,8 @@ start:
         call report
 .next:
         inc  si
-        cmp  si, NOFFS
-        jae  .done
+        or   si, si                     ; wrapped to 0 = all 65536 swept
+        jz   .done
         cmp  word [nbad], 8
         jb   .vf                        ; stop after eight; a pattern is enough
 .done:
@@ -201,11 +223,78 @@ start:
         mov  bp, 2                      ; word 02 marks a mode-2 mismatch
         call report
 .v2n:   inc  si
-        cmp  si, NOFFS
-        jae  .v2d
+        or   si, si                     ; wrapped to 0 = all 65536 swept
+        jz   .v2d
         cmp  word [nbad], 8
         jb   .v2
 .v2d:
+; ---------------------------------------------------------------------------
+;  pass 3: THE CPU READ PATH, which nothing above has touched.
+;
+;  Passes 1 and 2 read back through the 0x300 window ON PURPOSE -- it reaches
+;  the SDRAM without the display path, which is what makes them able to blame
+;  the write path or clear it. But it also means they never exercise the way
+;  the CPU ITSELF reads EGA memory: EM_RDATA -> ega_rd32 -> the read-map-select
+;  mux, gated by the EGA_CLAIM/EGA_RDY handshake that makes the processor wait.
+;
+;  That path is not decoration. Every latch load Keen 4's blitter performs is a
+;  CPU read of EGA memory, and a read that returns rubbish -- or one whose READY
+;  never arrives, so busdecode's backstop releases the CPU onto a bus nobody is
+;  driving -- puts that rubbish in a register and then wherever the program
+;  keeps it. Both passes above can be CLEAN while this one is not.
+;
+;  All four planes, because read map select is part of the path being tested.
+;  Tag 0x10..0x13 = a CPU read of plane 0..3.
+; ---------------------------------------------------------------------------
+        mov  al, 6
+        out  0x80, al                   ; phase 6: rewriting for the read test
+        mov  ax, 0x0500
+        call gcout                      ; GC 5 back to write mode 0
+        mov  ax, 0x08FF
+        call gcout                      ; GC 8 bit mask = every bit
+        mov  ax, 0x020F
+        call seqout                     ; SEQ 2 map mask = all four planes
+        xor  di, di
+        mov  cx, NOFFS
+        xor  si, si
+.w3:    mov  ax, si
+        call patt
+        mov  [es:di], al
+        inc  di
+        inc  si
+        loop .w3
+
+        mov  al, 7
+        out  0x80, al                   ; phase 7: reading back through the CPU
+        mov  word [curpl], 0
+.p3:    mov  al, [curpl]
+        mov  ah, 4
+        call gcout                      ; GC 4 read map select = this plane
+        xor  di, di
+        xor  si, si
+.r3:    mov  ax, si
+        call patt                       ; AL = the byte that must come back
+        mov  bl, al
+        mov  ah, al
+        mov  [wexp], ax                 ; expected, in both halves, for report
+        mov  al, [es:di]                ; THE READ UNDER TEST
+        cmp  al, bl
+        je   .r3n
+        mov  ah, 0                      ; AX = what actually came back
+        mov  bp, [curpl]
+        add  bp, 0x10
+        call report
+.r3n:   inc  di
+        inc  si
+        or   si, si                     ; wrapped to 0 = all 65536 swept
+        jz   .p3n
+        cmp  word [nbad], 8
+        jb   .r3
+        jmp  .p3d                        ; eight is already a pattern
+.p3n:   inc  word [curpl]
+        cmp  word [curpl], 4
+        jb   .p3
+.p3d:
 
         mov  al, 3
         out  0x80, al                   ; phase 3: text mode and results
@@ -441,6 +530,7 @@ puthex8:
         ret
 
 ; ---------------------------------------------------------------------------
+curpl   dw 0
 nbad    dw 0
 wexp    dw 0
 rgot    dw 0
@@ -457,7 +547,7 @@ msg_hdr db 'EGAVFY - is the picture wrong, or the memory?',13,10
         db '              honestly showing what is really stored',13,10,13,10,'$'
 msg_nowin db 'The 0x300 window did not answer, so there is nothing to compare',13,10
         db 'against. Check the bitstream.',13,10,'$'
-msg_write db 'writing 8000 offsets through the EGA path ... $'
+msg_write db 'writing 65536 offsets through the EGA path ... $'
 msg_read  db 'done',13,10,'verifying through the SDRAM window ...',13,10,'$'
 msg_at    db '  offset $'
 msg_word  db '  word $'
@@ -465,7 +555,7 @@ msg_exp   db '  expected $'
 msg_got   db '  read $'
 msg_crlf  db 13,10,'$'
 msg_clean:
-        db 13,10,'CLEAN. Every one of 8000 offsets holds exactly what was',13,10
+        db 13,10,'CLEAN. Every one of 65536 offsets holds exactly what was',13,10
         db 'written, in both words. The EGA write path, the address',13,10
         db 'arithmetic and the SDRAM are all sound -- so the speckle is',13,10
         db 'downstream: the prefetch, the line buffer, or the scan.',13,10,13,10

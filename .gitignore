@@ -96,3 +96,6 @@ tools/cycles/
 tools/xtpro/
 tools/Arkanoid/
 tools/KQ1/
+
+# staged artifacts for tools/publish-release.ps1
+release-staging/

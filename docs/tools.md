@@ -50,6 +50,43 @@ All are small `.COM` files on the boot floppy. Several write progress codes to p
 `0x80`, which appear on the [7-segment display](modules/sevenseg.md) — useful when
 output stops.
 
+### SPEED — the bus clock
+
+`SPEED` with no argument prints the ladder and marks the step in force. `SPEED n` moves
+to step `n` and then **measures** the result: it times a fixed loop at step 0 and again
+at the new step, against PIT channel 2 — which runs from `c2` and does not follow the
+CPU clock — and prints the ratio.
+
+The ratio is the point. An absolute figure needs a clocks-per-iteration constant that
+nobody knows here (the loop is fetched from PSRAM through a cache, so it is not the
+number in any 8088 table), and assuming one is exactly how POST once reported 1.54 MHz
+and 94.82 MHz from the same code. A ratio cancels the constant. If the measured ratio
+disagrees with the nominal one, believe the measurement — it is the only thing in the
+output that touched the hardware.
+
+Run it with the **floppy idle**: the host serial link is re-timed by the same register,
+so a step taken mid-byte re-times the bit in flight. If a step wedges the machine, the
+reset button and Ctrl+Alt+Del both restore the default — in hardware, which is the only
+place it could be restored from once the CPU can no longer fetch.
+
+A step that cannot run DOS would otherwise take its own measurement down with it, so the
+order is deliberate: measure at step 0, measure at the target, **drop back to 5 MHz**,
+print everything, and only then re-apply the target as the very last action. The numbers
+reach the screen even when the step does not survive being used.
+
+The phases are marked on the [7-segment display](modules/sevenseg.md), which is what you
+read when nothing reaches the screen at all:
+
+| | | | |
+|---|---|---|---|
+| `C0` | about to time the reference | `C3` | target step timed |
+| `C1` | reference timed | `C4` | back at 5 MHz, printing |
+| `C2` | target step applied | `C5` | printed; re-applying the target |
+
+`C1` means the machine died the instant the step was applied. `C2` means the step was
+accepted and the CPU died running it. `C3` or `C4` means the step ran the measurement
+loop fine and fell over on real work — which points at load, not at the clock rate.
+
 ### HDTEST — fixed disk
 
 Seven tests of the [fixed disk](fixed-disk.md). Expected: all PASS.

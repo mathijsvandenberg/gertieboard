@@ -228,6 +228,7 @@ set_global_assignment -name VHDL_FILE m9k_mem.vhd
 set_global_assignment -name VHDL_FILE font.vhd
 set_global_assignment -name VHDL_FILE gertieboard.vhdl
 set_global_assignment -name VHDL_FILE clkgen.vhd
+set_global_assignment -name VHDL_FILE cpuclk.vhd
 set_global_assignment -name VHDL_FILE sevenseg.vhd
 set_global_assignment -name VHDL_FILE memmap.vhd
 set_global_assignment -name VHDL_FILE busdecode.vhd
@@ -252,6 +253,12 @@ set_global_assignment -name VHDL_FILE sdram_ctrl.vhd
 set_global_assignment -name VHDL_FILE sdram_io.vhd
 set_global_assignment -name VHDL_FILE sdram_arb.vhd
 set_global_assignment -name VHDL_FILE ega_mem.vhd
+
+# The bus clock is a fabric counter output now, not a PLL output, and it feeds
+# most of the design plus the CPU_CLK pin. Quartus normally promotes a net like
+# that on its own; saying so makes it a build-time error rather than a silent
+# fallback to routing fabric, which would show up as skew nobody constrained.
+set_instance_assignment -name GLOBAL_SIGNAL "GLOBAL CLOCK" -to cpuclk1|clk_q
 
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
 # -----------------------------------------------------------------------------
@@ -338,3 +345,15 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DRAM_DQ[8]
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DRAM_DQ[9]
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DRAM_RAS_N
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DRAM_WE_N
+
+
+
+
+
+
+
+
+
+
+
+

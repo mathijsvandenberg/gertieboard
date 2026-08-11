@@ -79,7 +79,14 @@ ARCHITECTURE structural OF gertieboard IS
   -- when working at night. '0' = normal working buzzer.
   CONSTANT SPEAKER_MUTE : std_logic := '0';
 
-  SIGNAL n_c0                   : std_logic;
+  -- n_cpuclk is the CPU and I/O bus clock. It is NOT a PLL output any more:
+  -- cpuclk1 divides the PLL's 100 MHz c0 down to the selected step, so the
+  -- speed is a register the CPU can write. See cpuclk.vhd.
+  SIGNAL n_cpuclk               : std_logic;
+  SIGNAL n_c100                 : std_logic;   -- pll1 c0, 100 MHz
+  SIGNAL n_opl_smp              : integer RANGE 1 TO 1023;
+  SIGNAL n_opl_t1               : integer RANGE 1 TO 8191;
+  SIGNAL n_opl_t2               : integer RANGE 1 TO 8191;
   SIGNAL n_c1                   : std_logic;
   SIGNAL n_c2                   : std_logic;
   SIGNAL n_c3                   : std_logic;
@@ -187,13 +194,13 @@ ARCHITECTURE structural OF gertieboard IS
   -- ega_mem <-> vga
   SIGNAL n_em_req               : std_logic;
   SIGNAL n_em_we                : std_logic;
-  SIGNAL n_em_offs              : std_logic_vector(13 downto 0);
+  SIGNAL n_em_offs              : std_logic_vector(15 downto 0);
   SIGNAL n_em_wdata             : std_logic_vector(31 downto 0);
   SIGNAL n_em_wmask             : std_logic_vector(3 downto 0);
   SIGNAL n_em_rdata             : std_logic_vector(31 downto 0);
   SIGNAL n_em_ready             : std_logic;
   SIGNAL n_em_row_go            : std_logic;
-  SIGNAL n_em_row_offs          : std_logic_vector(13 downto 0);
+  SIGNAL n_em_row_offs          : std_logic_vector(15 downto 0);
   SIGNAL n_em_col               : std_logic_vector(5 downto 0);
   SIGNAL n_em_scan              : std_logic_vector(31 downto 0);
   SIGNAL n_ega_claim            : std_logic;
@@ -213,7 +220,7 @@ BEGIN
   vga1 : ENTITY work.vga
     PORT MAP (
       CLK_VGA              => n_c1,
-      CLK_CPU              => n_c0,
+      CLK_CPU              => n_cpuclk,
       RESET                => n_rst_out,
       WR                   => n_mem_wr,
       RD                   => n_mem_rd,
@@ -261,7 +268,7 @@ BEGIN
 
   clkgen1 : ENTITY work.clkgen
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       RESET                => n_reset,
       MEM_READY            => n_mem_ready,
       RST_OUT              => n_rst_out
@@ -269,7 +276,7 @@ BEGIN
 
   flash1 : ENTITY work.flash
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       DATAIN               => n_cpu_wdata,
       ADDR                 => n_io_addr,
       RD                   => n_io_rd,
@@ -283,7 +290,7 @@ BEGIN
 
   ppi1 : ENTITY work.ppi8255
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       RESET                => n_rst_out,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
@@ -307,7 +314,7 @@ BEGIN
   -- this did, left the PIT sampling strobes on an 840 ns clock.
   timer1 : ENTITY work.timer8253
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       CNT_TICK             => n_c2,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
@@ -324,7 +331,7 @@ BEGIN
 
   sevenseg1 : ENTITY work.sevenseg
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
       WR                   => n_io_wr,
@@ -339,7 +346,7 @@ BEGIN
 
   dma1 : ENTITY work.dma8237
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       RESET                => n_rst_out,
       IO_ADDR              => n_io_addr,
       IO_RD                => n_io_rd,
@@ -361,7 +368,7 @@ BEGIN
 
   int1 : ENTITY work.int8259
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       RESET                => n_rst_out,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
@@ -378,7 +385,7 @@ BEGIN
 
   busdecode1 : ENTITY work.busdecode
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       A                    => n_cpu_a,
       RD                   => n_cpu_rd,
       WR                   => n_cpu_wr,
@@ -409,7 +416,7 @@ BEGIN
 
   bootrom1 : ENTITY work.bootrom
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       RESET                => n_rst_out,
       MEM_ADDR             => n_mem_addr,
       IO_ADDR              => n_io_addr,
@@ -419,19 +426,46 @@ BEGIN
       ROM_EN               => n_rom_en
     );
 
+  -- c0 is 100 MHz and is NOT the bus clock: it is the master the programmable
+  -- bus clock is divided from. Half-periods of 100 MHz are what let every step
+  -- of the ladder keep a 50 % duty cycle AND land every rising edge on c3's
+  -- 20 ns grid -- see cpuclk.vhd for why both matter.
   pll1 : ENTITY work.pll
     PORT MAP (
       inclk0               => n_clock50,
-      c0                   => n_c0,
+      c0                   => n_c100,
       c1                   => n_c1,
       c2                   => n_c2,
       c3                   => n_c3,
       c4                   => OPEN
     );
 
+  -- The machine's speed. Writes to I/O 0xE5 pick a step; RESET_N is the RAW
+  -- reset (like mem_hybrid's) because clkgen is clocked by what this produces.
+  -- MAX_IDX must match the divide in gertieboard.sdc -- the SDC is what proves
+  -- the design actually closes at the fastest step this will accept.
+  cpuclk1 : ENTITY work.cpuclk
+    GENERIC MAP (
+      MAX_IDX              => 6,          -- 16.667 MHz, the -16 parts' rating
+      DEF_IDX              => 3           -- 8.333 MHz on every reset
+    )
+    PORT MAP (
+      CLK100               => n_c100,
+      RESET_N              => n_reset,
+      ADDR                 => n_io_addr,
+      DATA                 => n_cpu_wdata,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      CLK_CPU              => n_cpuclk,
+      OPL_SMP              => n_opl_smp,
+      OPL_T1               => n_opl_t1,
+      OPL_T2               => n_opl_t2
+    );
+
   ctrl1 : ENTITY work.ctrl_reg
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       RESET                => n_rst_out,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
@@ -466,7 +500,7 @@ BEGIN
   -- cga_status's job and the two are not connected.
   egaregs1 : ENTITY work.ega_regs
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
       RD                   => n_io_rd,
@@ -522,7 +556,7 @@ BEGIN
 
   sdramio1 : ENTITY work.sdram_io
     PORT MAP (
-      CLK_IO               => n_c0,
+      CLK_IO               => n_cpuclk,
       CLK_MEM              => n_c3,
       RESET                => n_mem_rst,
       IOADDR               => n_io_addr,
@@ -538,12 +572,14 @@ BEGIN
       DOUT                 => n_sd_dout,
       ACK                  => n_sd_ack,
       INIT_DONE            => n_sd_init,
-      DBG_STATE            => n_sd_state
+      DBG_STATE            => n_sd_state,
+      CRTC_START           => n_crtc_start,
+      CRTC_OFFS            => n_crtc_offs
     );
 
   egamem1 : ENTITY work.ega_mem
     PORT MAP (
-      CLK_CPU              => n_c0,
+      CLK_CPU              => n_cpuclk,
       CLK_VGA              => n_c1,
       CLK_MEM              => n_c3,
       RESET                => n_mem_rst,
@@ -619,7 +655,7 @@ BEGIN
   -- OPEN until vga.vhd can use them for hardware scrolling and a text cursor.
   crtc1 : ENTITY work.crtc6845
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
       RD                   => n_io_rd,
@@ -635,21 +671,25 @@ BEGIN
       CUR_MOD              => n_cur_mod
     );
 
-  -- AdLib at 0x388/0x389. CLK_HZ must match the clock wired to CLK: every
-  -- period inside the module is derived from it, and the detection protocol
-  -- depends on the two timers keeping real time.
+  -- AdLib at 0x388/0x389. Every period inside the module is derived from the
+  -- three dividers, and the detection protocol depends on the two timers
+  -- keeping real time -- so they come from cpuclk1's table and follow the speed
+  -- step. CLK_HZ is now only the value they would have if nothing drove them.
   opl2lite1 : ENTITY work.opl2_lite
     GENERIC MAP (
       CLK_HZ               => 8_333_333
     )
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       DATA                 => n_cpu_wdata,
       ADDR                 => n_io_addr,
       RD                   => n_io_rd,
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
-      SND                  => n_opl_snd
+      SND                  => n_opl_snd,
+      SAMPLE_DIV           => n_opl_smp,
+      T1_DIV               => n_opl_t1,
+      T2_DIV               => n_opl_t2
     );
 
   fdc1 : ENTITY work.fdc8272
@@ -657,17 +697,28 @@ BEGIN
     -- entity's own defaults are 50 MHz / 115200, which would divide down to
     -- ~11.5 kbaud on this clock. These were symbol parameters in the old .bdf.
     --
-    -- BAUD_DIV is CLK_FREQ / BAUD and is an INTEGER divide, so the link does not
-    -- run at 1 Mbaud: 8333333 / 8 = 1,041,667, which is 4.2 % fast. The host
-    -- stays set to 1000000 and it works, because 4.2 % is inside what an 8N1
-    -- receiver tolerates -- but it is inside it, not comfortably clear of it.
-    -- Only 10, 5 and 2 MHz divide exactly.
+    -- The UART has its OWN clock now: CLK_UART is c3, 50 MHz, which does not
+    -- move when the speed step does. 50e6 / 50 = 1,000,000 EXACTLY, at every
+    -- step of the ladder. It used to be an integer divide of the bus clock,
+    -- which was +4.2 % at the step the machine boots at -- inside 8N1's ~5 %
+    -- envelope, but not clear of it, and an intermittent stall just after the
+    -- BIOS arrives is what living there looks like.
+    --
+    -- For 2 Mbaud set BAUD => 2_000_000 (divisor 25, also exact) AND set the
+    -- host to match. Do not raise it further without checking the adapter: an
+    -- FTDI can only make 3 MHz / (n + eighths), so 2,000,000 lands exactly and
+    -- 2,500,000 cannot be made at all.
+    --
+    -- Changing speed is now safe for the link at any moment -- the bit timing
+    -- does not depend on the CPU clock any more -- but a step change still
+    -- re-times nothing mid-byte only because the UART is on the other clock.
     GENERIC MAP (
-      CLK_FREQ             => 8333333,
+      UART_CLK_HZ          => 50000000,
       BAUD                 => 1000000
     )
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
+      CLK_UART             => n_c3,
       RESET                => n_rst_out,
       ADDR                 => n_io_addr,
       RD                   => n_io_rd,
@@ -695,7 +746,7 @@ BEGIN
 
   usb1 : ENTITY work.usb_host
     PORT MAP (
-      CLK                  => n_c0,
+      CLK                  => n_cpuclk,
       CLK48                => n_clk48,
       LOCKED               => n_usb_locked,
       RESET                => n_rst_out,
@@ -734,7 +785,7 @@ BEGIN
   n_g0 <= '1';
 
   -- top-level pin connections
-  CPU_CLK <= n_c0;
+  CPU_CLK <= n_cpuclk;
   CPU_RST <= n_rst_out;
   VGA_HS <= n_hs;
   VGA_VS <= n_vs;

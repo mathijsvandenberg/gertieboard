@@ -1,0 +1,13 @@
+# Files published by tools/publish-release.ps1.
+#
+# One path or glob per line, relative to the repository root. Blank lines and
+# lines starting with # are ignored. Keep this list curated: the build tree also
+# contains diagnostic ROMs and stale images that should not reach end users.
+#
+# Recognised kinds are inferred from the extension:
+#   .sof -> fpga-sram    .jic/.pof -> fpga-flash
+#   .64k/.rom -> bios    .ima/.img -> floppy
+
+output_files/gertieboard.sof
+output_files/gertieboard.jic
+tools/xtbios_claude.64k

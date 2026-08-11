@@ -16,7 +16,12 @@ USE  IEEE.STD_LOGIC_UNSIGNED.all;
 -- a POST code that the firmware halts on is shown cleanly from the start and
 -- keeps repeating.
 --
--- Timing assumes CLK = 8.333 MHz (c0). The two constants below are raw cycle
+-- Timing assumes CLK = 8.333 MHz, the bus clock's default step. The bus clock is
+-- selectable at run time now (cpuclk.vhd), so this cadence moves with it: 1.67 s per
+-- nibble at 5 MHz down to 0.5 s at 16.667. Deliberately left alone -- it is a POST-code
+-- display, the whole range is legible, and wiring two 24-bit divisors in from cpuclk's
+-- table would cost more than the drift does.
+-- The two constants below are raw cycle
 -- counts, so they must be rescaled if c0 ever changes again.
 --
 -- The figures above used to say 500 ms and 1 s, and had since the file was

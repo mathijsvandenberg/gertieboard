@@ -48,7 +48,33 @@ sequenceDiagram
 
 ## 1. Reset
 
-`ROM_EN` starts at `'1'`, so memory **reads** in `0xFFC00`–`0xFFFFF` return the 1 KB
+### Beep codes
+
+The loader speaks before anything can be displayed. The 7-segment needs 2 s per byte to
+be legible and the screen does not exist yet; a speaker needs neither.
+
+| beeps | meaning |
+|---|---|
+| 1 short | BIOS loaded over **serial**, image looks real, handing off |
+| 2 short | BIOS loaded from **flash** — no serial host answered |
+| 2 long | *reserved* — BIOS checksum fail (not implemented; see below) |
+| 3 long | **no BIOS**: the image region is blank. Repeats forever, with the computed checksum on the 7-seg between rounds |
+
+The tone is ~1 kHz from PIT channel 2 gated through 8255 port B, the same path the BIOS
+and games use. No 8255 control word is needed first — `ppi8255` is hard-wired to the XT
+layout and takes a write to `0x61` unconditionally.
+
+**"2 long" is reserved, not implemented.** Reporting a checksum *failure* needs the image
+to carry an expected value, which the loader cannot know — the BIOS changes with every
+build. Doing it properly means `mkbios.sh` adjusting a spare byte so the code region sums
+to a fixed constant, which is how a real PC ROM does it. Until then the loader can only
+distinguish "blank" from "not blank".
+
+On success the checksum is **not** displayed any more. It was, for about 5 s of every
+boot, and the beep answers the question the display existed to answer. It is still shown,
+repeatedly, when there is nothing to hand off to.
+
+`ROM_EN` starts at `'1'`, so memory **reads** in `0xFF800`–`0xFFFFF` return the 2 KB
 boot ROM instead of PSRAM. Writes always pass through — that is what lets the loader
 fill the BIOS image underneath itself.
 
