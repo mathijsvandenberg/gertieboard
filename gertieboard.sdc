@@ -34,13 +34,16 @@
 # Key points:
 #   * The PLL outputs are integer-related, so they are timed TOGETHER, not
 #     declared asynchronous (that was the original bug that left the
-#     busdecode<->PSRAM paths unanalyzed).
-#   * The VGA pixel clock is the one exception: it meets the system clock only
-#     inside the dual-port framebuffer BRAM, so it is its own async group.
+#     busdecode<->PSRAM paths unanalyzed). ALL of them, including the pixel
+#     clock -- it used to be excepted, and the exception cost a day; see the
+#     note at the clock groups.
 #   * The off-chip V20 bus is a slow, handshake-governed interface (READY
 #     controls correctness, not single-cycle setup), so the CPU pins are
 #     false-pathed both directions. This is what clears the red WITHOUT any
 #     bogus input/output-delay numbers.
+#   * Every external memory is constrained: the SDRAM the textbook way (it has
+#     a real clock), the PSRAM and flash as bounded pad delays (they do not).
+#     Nothing off-chip is unanalysed any more.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -70,12 +73,11 @@ derive_clock_uncertainty
 
 # -----------------------------------------------------------------------------
 # Clock groups
-#   - VGA pixel clock (c1): its own async domain (framebuffer BRAM handles CDC)
-#   - USB 48 MHz: its own async domain. usb_host crosses GO as a toggle
-#     through a three-stage synchroniser, samples its command registers only
-#     while the engine is idle, and moves packet data through dual-port
+#   - USB 48 MHz: its own async domain, and the only one. usb_host crosses GO as
+#     a toggle through a three-stage synchroniser, samples its command registers
+#     only while the engine is idle, and moves packet data through dual-port
 #     buffers never accessed from both sides at once -- BUSY enforces that.
-#   - everything else: synchronous, timed together
+#   - everything else, pixel clock included: synchronous, timed together
 # -----------------------------------------------------------------------------
 # c1 IS NOT ASYNCHRONOUS AND NO LONGER PRETENDS TO BE.
 #
@@ -132,11 +134,69 @@ set_false_path -from * -to [get_ports {VGA_HS VGA_VS VGA_RGB[*] DBG[*]}]
 set_false_path -from [get_ports RESET] -to *
 
 # -----------------------------------------------------------------------------
-# PSRAM pins: left unconstrained for now (the design runs reliably at the
-# current 50 MHz system clock). To push the PSRAM faster, that becomes the
-# separate "phase-shifted read capture" exercise: add a phase-shifted PLL tap
-# (c4), capture RAM_SIO on it, and constrain RAM_SIO/RAM_SCK/RAM_CS here.
+# SDRAM -- ISSI IS42S16160B-7, 32 MB, on the DE0-Nano's dedicated pins.
+#
+# A REAL synchronous interface, and the only external one here that is: the part
+# has a free-running clock and both directions are referenced to it. So it is
+# constrained the textbook way, with the device's own numbers.
+#
+# DRAM_CLK is the INVERTED controller clock (see the note in sdram_ctrl.vhd), so
+# the part latches on its rising edge while this design changes its outputs on
+# ours -- half a clock of setup and half of hold, with no PLL phase tap. That is
+# why the generated clock below is declared -invert: it is not cosmetic, it is
+# what tells the analyser that the launch and latch edges are 10 ns apart rather
+# than coincident. Declared without it, every path here would be analysed at a
+# 0 ns requirement and the interface would look catastrophically broken.
+#
+# Numbers are the -7 grade at CAS latency 2, which is what sdram_ctrl programs:
+#
+#   tAC  6.0 ns   access time from CLK        -> set_input_delay  -max
+#   tOH  2.5 ns   output data hold from CLK   -> set_input_delay  -min
+#   tSU  1.5 ns   input setup to CLK          -> set_output_delay -max
+#   tHD  0.8 ns   input hold from CLK         -> set_output_delay -min
+#
+# plus ~0.2 ns for the board, which is short and on-module. If the part is ever
+# swapped for a different speed grade these four numbers are the only thing that
+# changes -- they are the datasheet, not a tuning knob.
+#
+# THE READ CAPTURE IS NOW THE WORST PATH IN THE DESIGN, at +0.26 ns, and that is
+# a better place for it to be than where it was. The 10 ns half-cycle is spent:
+#
+#     2.45 ns  DRAM_CLK through the output cell to the pin
+#     6.20 ns  tAC + board -- the part, before the data even starts back
+#     0.73 ns  input buffer
+#     0.94 ns  pad to rd_reg, the ONLY part of it that is routing
+#
+# Nearly all of that is silicon and datasheet, which is why the number no longer
+# moves: the same netlist closes at +0.260, +0.260, +0.260 and +0.258 across four
+# fitter seeds. Before the interfaces were constrained the worst path was inside
+# the fabric and the same four seeds gave -0.040 .. +0.327 -- a design whose
+# correctness was decided by placement. A critical path made of physics is one
+# that behaves the same on every build, and that is worth more than a larger
+# number that wanders.
+#
+# To buy margin here, in order of cost: CAS latency 3 (tAC 6.0 -> 5.4, one extra
+# clock per read, and the capture cycle count in sdram_ctrl must move with it);
+# or capture on a phase-shifted PLL tap (c4 exists and is unused). Do not reach
+# for either until something needs it -- +0.26 ns is met at slow/85C, which is
+# the corner that matters.
 # -----------------------------------------------------------------------------
+create_generated_clock -name DRAM_CLK_PIN \
+    -source [get_pins {pll1|altpll_component|auto_generated|pll1|clk[3]}] \
+    -invert \
+    [get_ports DRAM_CLK]
+
+set sdram_out [get_ports {DRAM_ADDR[*] DRAM_BA[*] DRAM_DQM[*] \
+                          DRAM_CS_N DRAM_RAS_N DRAM_CAS_N DRAM_WE_N DRAM_DQ[*]}]
+
+set_output_delay -clock DRAM_CLK_PIN -max  1.7 $sdram_out
+set_output_delay -clock DRAM_CLK_PIN -min -0.8 $sdram_out
+
+set_input_delay  -clock DRAM_CLK_PIN -max  6.2 [get_ports {DRAM_DQ[*]}]
+set_input_delay  -clock DRAM_CLK_PIN -min  2.5 [get_ports {DRAM_DQ[*]}]
+
+# The clock pin itself has no setup requirement to satisfy against itself.
+set_false_path -from * -to [get_ports DRAM_CLK]
 
 # ---------------------------------------------------------------------------
 # timer8253's counting tick.
@@ -150,3 +210,43 @@ set_false_path -from [get_ports RESET] -to *
 # Absorbing that is the synchroniser's entire job. What matters is the rate,
 # which is exact, not the phase, which no 8253 user can observe.
 set_false_path -from [get_clocks {pll1|altpll_component|auto_generated|pll1|clk[2]}]                -to   [get_registers {timer8253:timer1|ct_sync[0]}]
+
+# -----------------------------------------------------------------------------
+# PSRAM (ESP-PSRAM64H, QPI) and serial FLASH (ISSI IS25LP016D)
+#
+# NOT the same kind of interface as the SDRAM above, and constraining them as if
+# they were would be wrong. Neither part has a free-running clock: the FPGA
+# generates SCK from a state machine AND samples the returning data on its own
+# c3, so there is no external clock domain and no launch/latch edge pair for the
+# analyser to reason about. A create_generated_clock on RAM_SCK would also be a
+# lie -- SCK_DIV is runtime-tunable through I/O 0xE4, so that "clock" changes
+# rate while the machine is running.
+#
+# What the hardware actually requires is a ROUND TRIP inside one SCK half-period:
+#
+#     SCK edge out  ->  device access  ->  data back  ->  captured on c3
+#
+# At the default SCK_DIV = 2 that budget is 40 ns; at the fastest setting the
+# design allows, 20 ns. The device's share is small and fixed -- ESP-PSRAM64H
+# tCHQV = 6 ns, IS25LP016D tV = 6 ns, plus a few hundred ps of board -- so the
+# whole of the rest belongs to the FPGA's own pad paths.
+#
+# And the FPGA's share is precisely what was varying between builds. It is not
+# tight; it was simply UNBOUNDED, so the fitter placed it differently every time
+# and nothing anywhere would say what it had chosen. Bounding both directions at
+# 8 ns leaves better than 2:1 against the worst case even at SCK_DIV = 1, costs
+# the fitter nothing at these speeds, and turns "however it came out this time"
+# into a number the report has to defend.
+#
+# If the PSRAM is ever pushed past SCK_DIV = 1 these bounds are the first thing
+# to tighten, and the phase-shifted read capture (c4 exists and is unused) is
+# the next step after that.
+# -----------------------------------------------------------------------------
+set psram_out [get_ports {RAM_SCK RAM_CS RAM_SIO[*]}]
+set flash_out [get_ports {FL_SCK FL_CS FL_MOSI}]
+
+set_max_delay -to $psram_out 8.000
+set_max_delay -to $flash_out 8.000
+
+set_max_delay -from [get_ports {RAM_SIO[*]}] 8.000
+set_max_delay -from [get_ports {FL_MISO}]    8.000

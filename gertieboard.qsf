@@ -357,3 +357,10 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DRAM_WE_N
 
 
 
+
+# The SDRAM read capture is the tightest path in this design: a 10 ns half-cycle
+# budget, 6.2 ns of it spent before the data even reaches the pin. Packing the
+# capture flop into the I/O cell takes the pad-to-register hop out of the fabric,
+# where it was being routed differently on every build. See gertieboard.sdc.
+set_instance_assignment -name FAST_INPUT_REGISTER ON -to DRAM_DQ
+

@@ -729,6 +729,34 @@ needs re-reading whenever the thing it describes is touched. When a design start
 behaving differently per fitter seed, suspect the constraints before the logic: **"it
 closes timing" means nothing until you know what is being timed.**
 
+### And the same was true of every pin off the chip
+
+The clock groups were only half of it. `RAM_*`, `DRAM_*` and `FL_*` had **no
+`set_input_delay` or `set_output_delay` at all** — the SDRAM holding the EGA planes, the
+PSRAM every instruction is fetched from, and the flash the BIOS boots out of, none of them
+examined. 29 constraint lines for the whole design.
+
+Constraining them turned up the thing worth knowing: **the SDRAM read capture was the
+tightest path on the board, at +0.26 ns**, and nothing had ever looked at it. Its 10 ns
+half-cycle goes 2.45 ns on `DRAM_CLK` reaching the pin, 6.2 ns on the part's own access
+time, 0.73 ns in the input buffer — and only 0.94 ns on routing.
+
+That last figure is the point. Because the worst path is now made almost entirely of
+silicon and datasheet, **it stopped moving**: the same netlist closes at +0.260, +0.260,
++0.260 and +0.258 across four fitter seeds, where before the interfaces were constrained
+the same four seeds gave −0.040 … +0.327. A critical path built from physics behaves the
+same on every build; one built from routing is a coin toss dressed up as a number.
+
+Note also what happened to the *headline* figure: setup at slow/85 °C read +0.487 ns before
+this and +0.260 after. The design did not get worse. The earlier number was an incomplete
+measurement that had never included the interface, and **a margin you have not measured is
+not margin you have.**
+
+**Lesson:** an unconstrained pin is not a relaxed one, it is an unexamined one, and the
+tightest path in a design is exactly where nobody is looking. Constrain every external
+interface even when it demonstrably works — the value is not that the fitter tries harder,
+it is that the number becomes *repeatable*.
+
 ## A test that certified the memory that used to exist
 
 [`EGAVFY`](tools.md) writes a pattern through the whole EGA write path and reads it back
