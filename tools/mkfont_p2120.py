@@ -11,8 +11,8 @@ ROM LAYOUT (determined empirically -- there is no datasheet here)
 ----------------------------------------------------------------
 The 8 KB splits into four 2 KB pages:
 
-    0x0000  256 x 8   thin 8x8 font          -> used for font8x8.bin
-    0x0800  256 x 8   bold 8x8 variant         (not used)
+    0x0000  256 x 8   thin 8x8 font            (--thin)
+    0x0800  256 x 8   bold 8x8 variant       -> used for font8x8.bin
     0x1000  256 x 8   16-row font, rows 0-7   -> used for font.vhd
     0x1800  256 x 8   16-row font, rows 8-15
 
@@ -181,7 +181,7 @@ def write_vhd(font16):
 
 
 def main():
-    bold = '--bold' in sys.argv
+    thin = '--thin' in sys.argv
     d = load()
     font16 = bytearray()
     for c in range(256):
@@ -189,10 +189,16 @@ def main():
 
     # Which 8x8 page feeds the BIOS graphics-mode glyphs is a judgment call: the
     # ROM holds a thin and a bold version and nothing in it says which the
-    # original used. Thin is the default because it is the first page; --bold
-    # matches the weight of the 16-row text font more closely. Purely cosmetic,
-    # and only visible in CGA modes 4/5/6.
-    page = PAGE_BOLD if bold else PAGE_THIN
+    # original used. Thin was the default merely because it is the first page.
+    # BOLD now, chosen 2026-08-07 by looking at the real thing: it matches the
+    # weight of the 16-row text font, and until King's Quest ran in EGA there
+    # had been nothing on screen to judge it by. --thin restores the other.
+    #
+    # Not as cosmetic as it once was. These glyphs are now what mode 0Dh draws
+    # as well as modes 4/5/6, AND they are the bytes published at F000:FA6E,
+    # so software that builds its own glyphs from the ROM font inherits this
+    # weight too -- see the .font_rom section in xtbios_src.s.
+    page = PAGE_THIN if thin else PAGE_BOLD
     font8 = bytearray(d[page:page + 2048])
 
     print('== verifying the decode ==')
@@ -209,7 +215,8 @@ def main():
 
     with open(F8, 'wb') as f:
         f.write(font8)
-    print(f'== tools/font8x8.bin ==\n   {len(font8)} bytes from the thin 8x8 page')
+    print(f'== tools/font8x8.bin ==\n   {len(font8)} bytes from the '
+          f'{"thin" if thin else "bold"} 8x8 page (0x{page:04X})')
     print('\nFONT OK -- rebuild the FPGA (font.vhd) and the BIOS (font8x8.bin)')
 
 

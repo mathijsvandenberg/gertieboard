@@ -82,9 +82,16 @@ which is exactly what a **20-bit accumulator ticked at 49716 Hz and incremented 
 multiplier — the increment is the register value shifted, which is why the arithmetic in
 the source looks too simple to be doing anything.
 
-`CLK_HZ` is a generic and every divider comes from it, in the style of `fdc8272`'s
-`BAUD_DIV`, so the module does not care which clock it is wired to — but **it must
-match**, because the detection timers depend on real time.
+`SAMPLE_DIV`, `T1_DIV` and `T2_DIV` are **ports** now, driven from
+[`cpuclk`](clkgen-pll.md#cpuclk--the-programmable-bus-clock)'s table so that they follow
+the selected speed step. They used to be constants folded out of the `CLK_HZ` generic,
+which now only supplies their defaults. They have to follow, because the detection
+timers depend on real time: a fixed `T1_DIV` at a different step makes the 80 µs tick
+the wrong length, the handshake fails, and the game decides there is no card.
+
+The comparisons are `>=` rather than `=`, because a step change can leave a counter
+above its new limit and an equality test would sail past it — hanging that timer for a
+whole wrap.
 
 At 8.333 MHz the sample divider truncates to 167, giving 49900 Hz against the ideal
 49716: **+6.4 cents**, uniform across the whole range, so nothing is out of tune with
@@ -139,8 +146,12 @@ the spread is the measuring window, not the hardware. An earlier run at 5 MHz sh
 *varying* error of 8–22 cents, which was a 200 ms window quantising to 5 Hz rather than a
 real defect — worth knowing, because the honest-looking number was the wrong one.
 
-**Those measurements have not been repeated at 8.333 MHz.** The divisor arithmetic above
-predicts a uniform +6.4 cents, and being uniform is what matters musically, but that is a
-calculation and not a measurement. Re-run the model against `CLK_HZ = 8_333_333` before
+**Those measurements have not been repeated at 8.333 MHz**, nor at any other step. The
+divisor arithmetic above predicts a uniform +6.4 cents, and being uniform is what matters
+musically, but that is a calculation and not a measurement. Re-run the model before
 relying on it — the reason this section exists is that the figures were once assumed to
 scale and did not.
+
+The error is uniform *within* a step and different *between* steps, so changing speed
+re-tunes the card by a cent or two. It does not transpose it, which is why the step is
+free to move under a playing note.

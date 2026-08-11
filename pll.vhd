@@ -166,9 +166,9 @@ BEGIN
 	altpll_component : altpll
 	GENERIC MAP (
 		bandwidth_type => "AUTO",
-		clk0_divide_by => 6,
+		clk0_divide_by => 1,
 		clk0_duty_cycle => 50,
-		clk0_multiply_by => 1,
+		clk0_multiply_by => 2,
 		clk0_phase_shift => "0",
 		clk1_divide_by => 2,
 		clk1_duty_cycle => 50,
@@ -264,7 +264,7 @@ END SYN;
 -- Retrieval info: PRIVATE: CUR_DEDICATED_CLK STRING "c0"
 -- Retrieval info: PRIVATE: CUR_FBIN_CLK STRING "c0"
 -- Retrieval info: PRIVATE: DEVICE_SPEED_GRADE STRING "Any"
--- Retrieval info: PRIVATE: DIV_FACTOR0 NUMERIC "6"
+-- Retrieval info: PRIVATE: DIV_FACTOR0 NUMERIC "1"
 -- Retrieval info: PRIVATE: DIV_FACTOR1 NUMERIC "8"
 -- Retrieval info: PRIVATE: DIV_FACTOR2 NUMERIC "168"
 -- Retrieval info: PRIVATE: DIV_FACTOR3 NUMERIC "1"
@@ -274,7 +274,7 @@ END SYN;
 -- Retrieval info: PRIVATE: DUTY_CYCLE2 STRING "50.00000000"
 -- Retrieval info: PRIVATE: DUTY_CYCLE3 STRING "50.00000000"
 -- Retrieval info: PRIVATE: DUTY_CYCLE4 STRING "50.00000000"
--- Retrieval info: PRIVATE: EFF_OUTPUT_FREQ_VALUE0 STRING "2.500000"
+-- Retrieval info: PRIVATE: EFF_OUTPUT_FREQ_VALUE0 STRING "100.000000"
 -- Retrieval info: PRIVATE: EFF_OUTPUT_FREQ_VALUE1 STRING "25.000000"
 -- Retrieval info: PRIVATE: EFF_OUTPUT_FREQ_VALUE2 STRING "1.190476"
 -- Retrieval info: PRIVATE: EFF_OUTPUT_FREQ_VALUE3 STRING "50.000000"
@@ -309,13 +309,13 @@ END SYN;
 -- Retrieval info: PRIVATE: MIRROR_CLK2 STRING "0"
 -- Retrieval info: PRIVATE: MIRROR_CLK3 STRING "0"
 -- Retrieval info: PRIVATE: MIRROR_CLK4 STRING "0"
--- Retrieval info: PRIVATE: MULT_FACTOR0 NUMERIC "1"
+-- Retrieval info: PRIVATE: MULT_FACTOR0 NUMERIC "2"
 -- Retrieval info: PRIVATE: MULT_FACTOR1 NUMERIC "4"
 -- Retrieval info: PRIVATE: MULT_FACTOR2 NUMERIC "4"
 -- Retrieval info: PRIVATE: MULT_FACTOR3 NUMERIC "1"
 -- Retrieval info: PRIVATE: MULT_FACTOR4 NUMERIC "1"
 -- Retrieval info: PRIVATE: NORMAL_MODE_RADIO STRING "1"
--- Retrieval info: PRIVATE: OUTPUT_FREQ0 STRING "5.00000000"
+-- Retrieval info: PRIVATE: OUTPUT_FREQ0 STRING "100.00000000"
 -- Retrieval info: PRIVATE: OUTPUT_FREQ1 STRING "25.17500000"
 -- Retrieval info: PRIVATE: OUTPUT_FREQ2 STRING "1.19318200"
 -- Retrieval info: PRIVATE: OUTPUT_FREQ3 STRING "100.00000000"

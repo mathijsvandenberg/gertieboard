@@ -137,6 +137,22 @@ ARCHITECTURE behavior OF psram_ctrl IS
   -- below, which exists because of it). Check the timing report after
   -- changing this, not just the fitter summary.
   --
+  -- AND IT WENT BACK TO FOUR, 2026-08-11, because the argument above is right
+  -- about the mechanism and wrong about this workload. Eight lines cost 0.35 ns
+  -- on that worst-case path and bought NOTHING measurable: ramspeed reads 18
+  -- ticks for PSRAM either way -- identical to on-chip M9K, i.e. the cache was
+  -- already absorbing everything this machine asks of it, and the extra four
+  -- lines were holding regions nobody came back for.
+  --
+  -- What the 0.35 ns was worth is the whole point. At eight lines the design
+  -- closed 50 MHz by between -0.04 and +0.33 ns depending on the FITTER SEED,
+  -- so whether a build ran was decided by placement luck, and edits nowhere
+  -- near this file flipped it. At four it closes at every seed tried, worst
+  -- +0.487 ns at slow/85C. Same speed, three times the margin, and a build that
+  -- means something. If a future workload really does thrash four lines, raise
+  -- it -- but measure ramspeed BEFORE assuming it helps, because last time it
+  -- did not.
+  --
   -- Lines are 16-byte ALIGNED, so a burst can never cross the PSRAM's 1024-byte
   -- page boundary. Note tCEM (max CS-low time, ~8 us) bounds the burst: 46 SCK
   -- cycles is 3.7 us at SCK_DIV=2 and 1.8 us at SCK_DIV=1, both fine, but do
@@ -151,7 +167,7 @@ ARCHITECTURE behavior OF psram_ctrl IS
   -- genuinely parametric -- tag_cmp is a GENERATE, the hit encoder loops, and
   -- the victim pointer wraps on it -- so it is the one safe thing to turn.
   CONSTANT LINE_BYTES : integer := 16;
-  CONSTANT NLINES     : integer := 8;
+  CONSTANT NLINES     : integer := 4;
 
   TYPE line_t  IS ARRAY(0 TO LINE_BYTES-1) OF std_logic_vector(7 DOWNTO 0);
   TYPE lines_t IS ARRAY(0 TO NLINES-1)     OF line_t;

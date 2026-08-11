@@ -161,6 +161,7 @@ cd tools
 ```bash
 cd tools
 ./nasm.exe -f bin hdtest.asm -o hdtest.com
+./nasm.exe -f bin speed.asm -o speed.com
 ```
 
 Getting a `.COM` onto the boot floppy: there is no `mtools` here, so use

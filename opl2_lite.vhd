@@ -67,16 +67,23 @@
 -- multiplier, and the increment is the register value shifted -- which is why
 -- the arithmetic below looks too simple to be doing anything.
 --
--- CLK_HZ is a generic and the dividers come from it, in the style of
--- fdc8272's BAUD_DIV, so this module does not care which clock it is wired to.
+-- The dividers used to be constants folded out of the CLK_HZ generic, in the
+-- style of fdc8272's BAUD_DIV. The bus clock is selectable at run time now, so
+-- they are INPUTS driven from cpuclk's table and they change with the step;
+-- CLK_HZ only supplies their defaults, for a standalone instance.
 -- At 10 MHz the sample divider truncates to 201, giving 49751 Hz against the
 -- ideal 49716 -- +1.2 cents, and constant across all notes so nothing is out
 -- of tune with itself. (At the old 5 MHz it truncated to 100 and came out
 -- +9.8 cents, so doubling the clock made the pitch eight times more accurate
--- for free: a bigger divisor quantises more finely.)
+-- for free: a bigger divisor quantises more finely.) The quantisation is worst
+-- at the bottom of the ladder and best at the top, and it is CONSTANT within a
+-- step, so a step change transposes nothing -- it only re-tunes by a cent or
+-- two, which is why the ladder is free to move under a playing note.
 --
 -- The timers land exactly at 10 MHz: 10e6/12500 = 800 and 10e6/3125 = 3200,
--- both whole numbers, so 80 us and 320 us are exact rather than rounded.
+-- both whole numbers, so 80 us and 320 us are exact rather than rounded. At
+-- 8.333 and 16.667 MHz they truncate by 0.05 %, far inside what the detection
+-- protocol's "wait at least 80 us" can notice.
 --
 -- ---------------------------------------------------------------------------
 -- OUTPUT
@@ -112,15 +119,22 @@ ENTITY opl2_lite IS
         RD      : IN    std_logic;                      -- active LOW I/O read
         WR      : IN    std_logic;                      -- active LOW I/O write
         DATAOUT : INOUT std_logic_vector(7 DOWNTO 0);   -- 'Z' when not addressed
-        SND     : OUT   std_logic);                     -- PWM, mix into BUZ
+        SND     : OUT   std_logic;                      -- PWM, mix into BUZ
+
+        -- Sample rate and the two timer periods, in CLK cycles. These used to
+        -- be constants folded out of CLK_HZ; the bus clock is now selectable at
+        -- run time (cpuclk.vhd), so they arrive from cpuclk's table instead and
+        -- follow the step. Leave them open and CLK_HZ still sets them, which is
+        -- what makes the module usable on its own.
+        --   SAMPLE_DIV = CLK_HZ / 49716   the OPL2 sample clock
+        --   T1_DIV     = CLK_HZ / 12500   timer 1, 80 us per tick
+        --   T2_DIV     = CLK_HZ / 3125    timer 2, 320 us per tick
+        SAMPLE_DIV : IN integer RANGE 1 TO 1023 := CLK_HZ / 49716;
+        T1_DIV     : IN integer RANGE 1 TO 8191 := CLK_HZ / 12500;
+        T2_DIV     : IN integer RANGE 1 TO 8191 := CLK_HZ / 3125);
 END opl2_lite;
 
 ARCHITECTURE behavior OF opl2_lite IS
-
-  -- Sample rate and the two timer periods, all derived from the wired clock.
-  CONSTANT SAMPLE_DIV : integer := CLK_HZ / 49716;   -- OPL2 sample clock
-  CONSTANT T1_DIV     : integer := CLK_HZ / 12500;   -- timer 1: 80 us per tick
-  CONSTANT T2_DIV     : integer := CLK_HZ / 3125;    -- timer 2: 320 us per tick
 
   TYPE fnum_t  IS ARRAY(0 TO 8) OF unsigned(9 DOWNTO 0);
   TYPE blk_t   IS ARRAY(0 TO 8) OF unsigned(2 DOWNTO 0);
@@ -141,10 +155,15 @@ ARCHITECTURE behavior OF opl2_lite IS
   SIGNAL t1_run,    t2_run    : std_logic := '0';
   SIGNAL t1_mask,   t2_mask   : std_logic := '0';
   SIGNAL t1_flag,   t2_flag   : std_logic := '0';
-  SIGNAL t1_pre : integer RANGE 0 TO T1_DIV-1 := 0;
-  SIGNAL t2_pre : integer RANGE 0 TO T2_DIV-1 := 0;
+  -- Sized for the whole speed ladder, not for one clock: the dividers are
+  -- inputs now, so these have to hold the SLOWEST step's value (T2_DIV = 8000
+  -- at 25 MHz). The comparisons below are >= and not =, for the same reason --
+  -- a step change can leave a counter above its new limit, and an equality test
+  -- would sail straight past it and hang the timer for a whole wrap.
+  SIGNAL t1_pre : integer RANGE 0 TO 8191 := 0;
+  SIGNAL t2_pre : integer RANGE 0 TO 8191 := 0;
 
-  SIGNAL smp_pre : integer RANGE 0 TO SAMPLE_DIV-1 := 0;
+  SIGNAL smp_pre : integer RANGE 0 TO 1023 := 0;
 
   SIGNAL wr_act, wr_prev : std_logic := '0';
 
@@ -196,7 +215,7 @@ BEGIN
       -- timer 1 -- 80 us per tick
       ----------------------------------------------------------------------
       IF t1_run = '1' THEN
-        IF t1_pre = T1_DIV-1 THEN
+        IF t1_pre >= T1_DIV-1 THEN
           t1_pre <= 0;
           IF t1_cnt = x"FF" THEN
             t1_cnt <= t1_preset;
@@ -217,7 +236,7 @@ BEGIN
       -- timer 2 -- 320 us per tick
       ----------------------------------------------------------------------
       IF t2_run = '1' THEN
-        IF t2_pre = T2_DIV-1 THEN
+        IF t2_pre >= T2_DIV-1 THEN
           t2_pre <= 0;
           IF t2_cnt = x"FF" THEN
             t2_cnt <= t2_preset;
@@ -242,7 +261,7 @@ BEGIN
       -- is not keyed on is held at phase zero rather than left running, so it
       -- contributes nothing to the sum and restarts cleanly on the next note.
       ----------------------------------------------------------------------
-      IF smp_pre = SAMPLE_DIV-1 THEN
+      IF smp_pre >= SAMPLE_DIV-1 THEN
         smp_pre <= 0;
         s := 0;
         FOR i IN 0 TO 8 LOOP

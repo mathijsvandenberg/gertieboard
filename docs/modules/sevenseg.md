@@ -35,7 +35,11 @@ repeat
 ```
 
 So `0x73` shows `7` … `3` … dark … `7` … Timing constants are raw cycle counts and
-assume `CLK = 8.333 MHz`:
+assume `CLK = 8.333 MHz`, the bus clock's default step. Since the bus clock is
+[selectable at run time](clkgen-pll.md#cpuclk--the-programmable-bus-clock) the cadence
+moves with it — 1.67 s per nibble at 5 MHz, 0.5 s at 16.667 — which is left alone on
+purpose: the whole range is legible, and this is the one clock-dependent module where
+being wrong costs nothing.
 
 ```vhdl
 CONSTANT T_NIBBLE : integer := 8_333_333;    -- 1 s per nibble

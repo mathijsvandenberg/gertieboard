@@ -131,10 +131,18 @@ BEGIN
 	-- During reset (ROM_EN=1) a memory read of 0xFFF00..0xFFFFF returns the boot
 	-- ROM instead of PSRAM. WRITES are unaffected -> they pass through to PSRAM,
 	-- so the bootloader can fill the BIOS image underneath the overlay.
-	-- 1 KB window 0xFFC00..0xFFFFF (was 256 bytes at 0xFFF00). Keep this in
-	-- step with the rom_t size in bootrom.vhd.
+	-- 2 KB window 0xFF800..0xFFFFF (was 1 KB at 0xFFC00, and 256 bytes at
+	-- 0xFFF00 before that). Keep this in step with the rom_t size in
+	-- bootrom.vhd AND the ORG in tools/bootldr_64k.asm -- three places, and
+	-- nothing checks that they agree.
+	--
+	-- Widened to make room for the loader's beep codes: it had 11 bytes free.
+	-- NOTE this shadows READS of 0xFF800..0xFFFFF while ROM_EN is set, so the
+	-- loader cannot inspect what it just wrote there -- see the reset-vector
+	-- check in bootldr_64k.asm, which was reading the boot ROM's own vector
+	-- and passing unconditionally.
 	in_overlay <= '1' WHEN (ROM_EN = '1' AND IOM = '0'
-	                        AND maddr_l(19 DOWNTO 10) = "1111111111")
+	                        AND maddr_l(19 DOWNTO 11) = "111111111")
 	         ELSE '0';
 
 	-- Drive read data back to the CPU only when the CPU owns the bus.
@@ -156,7 +164,14 @@ BEGIN
 	-- clear, but with a quarter of the margin it was designed with. 128 keeps
 	-- the original 12.8 us. The PSRAM side is on c3 and did not get faster, so
 	-- the absolute deadline it has to beat has not moved.
-	READY <=  '1' WHEN (T >= 128 AND MEMADDR AND IOM = '0')
+	--
+	-- 256 since the bus clock became selectable (cpuclk.vhd): the count has to
+	-- be safe at the FASTEST step, and 128 clocks at 16.667 MHz is 7.7 us --
+	-- 1.6x the worst legitimate access, where it was designed with 2.6x. 256 is
+	-- 15.4 us there. At 5 MHz it is 51 us, which costs nothing: this is a
+	-- deadlock breaker for a wedged controller, not a timeout anything waits on
+	-- in normal operation.
+	READY <=  '1' WHEN (T >= 256 AND MEMADDR AND IOM = '0')
       ELSE '1' WHEN (MEMADDR AND IOM = '0' AND RAM_READY = '1')
       ELSE '1' WHEN (T >= 3 AND (NOT MEMADDR OR IOM = '1'))
       ELSE '0';

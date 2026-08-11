@@ -12,12 +12,23 @@
 ; (0x1F0000..0x1FFFFF); the fixed disk is limited to 31 cylinders so DOS can
 ; never reach it.
 ;
+;
+; BEEP CODES -- the machine says out loud what it found, before anything can be
+; displayed. The 7-seg needs 2 s per byte to be legible and the screen does not
+; exist yet; a speaker needs neither.
+;   1 short   BIOS loaded over SERIAL, image looks real, handing off
+;   2 short   BIOS loaded from FLASH -- no serial host answered
+;   2 long    RESERVED for "BIOS checksum fail" (needs the image to carry an
+;             expected value; see docs)
+;   3 long    NO BIOS: the image region is blank. Repeats forever, with the
+;             computed checksum on the 7-seg between rounds.
+;
 ; POST markers on port 0x80 (7-seg), read as a ladder:
 ;   1 entered / stack set   2 about to talk to FDC   3 Specify accepted
 ;   4 Read(128 sec) issued  5 first data byte         6 all 64 KB received
 ;   7 about to disable overlay + jump to loaded BIOS
 ;   A no serial host, falling back to flash   B 64 KB read from flash
-;   EF flash holds no BIOS (no 0xEA at offset 0xFFF0) -- halted
+;   EF no BIOS -- halted, beeping
 ;
 ; Assemble:  nasm -f bin bootldr_64k.asm -o bootldr.bin
 ;            python mkmif.py bootldr.bin bootldr.mif 1024
@@ -29,7 +40,7 @@
                                   ; range -- and on an 8088 opcode 0F is POP CS,
                                   ; which vaporises execution unconditionally.
                                   ; That exact trap cost days in the BIOS already.
-        ORG 0xFC00               ; 1 KB overlay window 0xFFC00..0xFFFFF
+        ORG 0xF800               ; 2 KB overlay window 0xFF800..0xFFFFF
 
 FDC_DOR    equ 0x3F2
 FDC_MSR    equ 0x3F4
@@ -108,24 +119,38 @@ start:
         mov     dx, FDC_MSR
         in      al, dx
         test    al, 0x10
-        jz      .switch
+        jz      .ser_done
         test    al, 0x80
         jz      .drain
         mov     dx, FDC_DATA
         in      al, dx
         jmp     .drain
 
+.ser_done:
+        ; DL carries the beep count into .switch, and it is set HERE rather than
+        ; back at MARK 6 because .drain does `mov dx, FDC_MSR` -- which lands in
+        ; DL. Set it earlier and the machine beeps 0xF4 = 244 times, about a
+        ; minute of it, before booting perfectly normally.
+        mov     dl, 1               ; serial boot -> one short beep
+
 .switch:
-        ; Both load paths join here, so both can be measured identically:
-        ; checksum the CODE REGION of the image now sitting in PSRAM -- the
-        ; exact bytes about to run -- and show it on the 7-seg, high byte
-        ; then low byte, about 1.5 s each. A serial boot and a flash boot
-        ; showing the SAME pair means the same image reached memory, and any
-        ; difference in behaviour is machine state; a different pair means
-        ; the transfer corrupts, measured with no BIOS involved at all.
-        ; The range is 0xC000..0xEFFF: code only, none of the BIOS's own
-        ; runtime scratch, so the value is stable across boots.
-        call    show_sum
+        ; Both load paths join here, DL already set to the number of short
+        ; beeps that says WHICH path got here. Checksum the CODE REGION of the
+        ; image now sitting in PSRAM -- the exact bytes about to run.
+        ;
+        ; The range is 0xC000..0xEFFF: code only, none of the BIOS's own runtime
+        ; scratch, so the value is stable across boots -- and it is BELOW the
+        ; 2 KB overlay window, which matters, because reads inside that window
+        ; return the boot ROM and not what was just written there.
+        ;
+        ; On success the checksum is NOT displayed. It used to be, for 5 s of
+        ; every boot, and the beep answers the question the display was there to
+        ; answer. It is still shown when there is nothing to hand off to.
+        call    sum_image           ; -> BP
+        cmp     bp, 0xD000          ; 0x3000 bytes of 0xFF: a blank chip
+        je      no_image
+        mov     bx, 1               ; short
+        call    beep_n
         MARK    7
         mov     ax, 0x0060
         mov     es, ax
@@ -234,34 +259,100 @@ flash_load:
         test    di, di              ; DI wraps to 0 after exactly 64 KB
         jnz     .fl_cmd
         MARK    0xB
-        ; A blank chip reads 0xFF everywhere, which would "boot" into nothing.
-        ; The reset vector must start with a far jump, so check for it and stop
-        ; with a visible code rather than running off into erased flash.
-        cmp     byte [es:0xFFF0], 0xEA
-        jne     .nobios             ; short branch + near jmp: both 8086-legal
+        ; This used to read [es:0xFFF0] and test it for a far jump. That address
+        ; is INSIDE the overlay window, so with ROM_EN still set it returned the
+        ; BOOT ROM's own reset vector -- which is 0xEA -- and the check passed
+        ; unconditionally, whatever was in the flash. The blank test now uses
+        ; the checksum in .switch, computed over a range the overlay does not
+        ; shadow.
+        mov     dl, 2               ; flash boot -> two short beeps
         jmp     start.switch        ; shared hand-off path
-.nobios:
-        MARK    0xEF
-.hang:  jmp     .hang
 
-; --- sum ES:C000..EFFF, display on the 7-seg: high byte, low byte ---------
-show_sum:
-        mov     si, 0xC000
+; --- nothing to hand off to ------------------------------------------------
+; Three long beeps and the computed sum, over and over. A machine that cannot
+; boot should say so until someone is listening.
+no_image:
+        MARK    0xEF
+        mov     dl, 3
+        mov     bx, 4               ; long
+        call    beep_n
+        mov     ax, bp
+        xchg    al, ah              ; high byte first
+        call    show_byte
+        mov     ax, bp
+        call    show_byte
+        jmp     no_image
+
+; --- BP = 16-bit sum of F000:C000..EFFF ------------------------------------
+sum_image:
+        mov     ax, 0xF000
+        mov     es, ax              ; the flash path leaves ES here, the serial
+        mov     si, 0xC000          ; path does not -- do not assume either
         mov     cx, 0x3000
         xor     bp, bp
         xor     ah, ah              ; AH stays 0: lodsb writes only AL
 .ss:    es      lodsb
         add     bp, ax
         loop    .ss
-        mov     ax, bp
-        xchg    al, ah              ; high byte first
-        call    show_byte
-        mov     ax, bp              ; then the low byte
-        call    show_byte
+        ret
+
+; --- beep_n -- DL beeps at ~1 kHz. BX = on-time units, gap is always one -----
+; One unit is 65536 iterations of a two-byte LOOP, about 0.13 s at the 8.333 MHz
+; the loader runs at. Short = 1 unit, long = 4.
+;
+; The speaker is 8255 port B bit 1 ANDed with 8253 counter-2 OUT, so BOTH the
+; gate (0x61 bit 0) and the data bit have to be set and the counter has to be
+; making a square wave. No 8255 control word is needed: ppi8255.vhd is hard
+; wired to the XT layout and takes a write to 0x61 unconditionally.
+; Preserves BP, which is carrying the checksum.
+beep_n:
+        mov     al, 0xB6            ; ch2, lo/hi, mode 3 square wave, binary
+        out     0x43, al
+        mov     al, 0xA6            ; 1190 -> ~1002 Hz from the 1.1905 MHz tick
+        out     0x42, al
+        mov     al, 0x04
+        out     0x42, al
+.bn:
+        push    bx
+        in      al, 0x61
+        or      al, 0x03            ; gate 2 on + speaker data on
+        out     0x61, al
+        call    bdelay
+        in      al, 0x61
+        and     al, 0xFC            ; both off again
+        out     0x61, al
+        mov     bx, 1
+        call    bdelay
+        pop     bx
+        dec     dl
+        jnz     .bn
+        ret
+
+; BX x 65536 iterations. Clobbers bx, cx.
+bdelay:
+        xor     cx, cx
+.bd:    loop    .bd
+        dec     bx
+        jnz     bdelay
         ret
 show_byte:
         out     POST, al
-        mov     bx, 2               ; ~0.45 s at 5 MHz: long enough to read
+        ; The 7-seg shows a byte as TWO nibbles, 1 s each (sevenseg.vhd), so a
+        ; value must be held at least 2 s to be readable at all -- and a new
+        ; write RESTARTS that cycle from the high nibble.
+        ;
+        ; This was 2, which at ~17 clocks per LOOP is 0.45 s at 5 MHz and 0.27 s
+        ; at the 8.333 MHz the loader actually runs at. So the checksum below
+        ; has been computed correctly on every boot since it was written, and
+        ; displayed as an unreadable flicker of two high nibbles before MARK 7
+        ; overwrote it. The measurement was never wrong; it was never visible.
+        ; That cost two full debugging rounds on a stalling boot.
+        ;
+        ; 20 gives ~2.7 s at 8.333 MHz, which clears the 2 s the display needs.
+        ; It costs ~5 s of boot time to see, every time, whether the image that
+        ; is about to run is the image that was sent. That is a good trade.
+        ; (No spare bytes to do this properly off the PIT: 11 free of 1024.)
+        mov     bx, 20
 .sb:    xor     cx, cx
 .sd:    loop    .sd
         dec     bx
@@ -296,7 +387,7 @@ fdc_rd:
         pop     dx
         ret
 
-        times (0xFFF0 - 0xFC00) - ($ - $$) db 0x90
+        times (0xFFF0 - 0xF800) - ($ - $$) db 0x90
 reset_vector:
-        jmp     0xF000:0xFC00
+        jmp     0xF000:0xF800
         times (0x10000 - 0xFFF0) - ($ - reset_vector) db 0xFF

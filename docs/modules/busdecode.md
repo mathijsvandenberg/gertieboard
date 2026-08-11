@@ -116,7 +116,7 @@ in_overlay <= '1' WHEN (ROM_EN = '1' AND IOM = '0'
                         AND maddr_l(19 DOWNTO 10) = "1111111111") ELSE '0';
 ```
 
-That is `0xFFC00`–`0xFFFFF`, **1 KB, reads only**. Writes are unaffected and pass
+That is `0xFF800`–`0xFFFFF`, **2 KB, reads only**. Writes are unaffected and pass
 through to PSRAM, which is exactly what lets the bootloader fill the BIOS image
 underneath itself.
 

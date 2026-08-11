@@ -147,7 +147,12 @@ and far-calling it, back when low RAM was the only on-chip memory. Now that
 > look authoritative while being wrong, which is worse than showing nothing.
 
 It reads **8.29 MHz** against an actual 8.333 — half a percent out, which is the
-calibration constant's granularity rather than drift. Two earlier readings, **1.54 MHz**
+calibration constant's granularity rather than drift. POST always runs at the default
+step, so that stays true however the
+[bus clock](modules/clkgen-pll.md#cpuclk--the-programmable-bus-clock) is driven
+afterwards; the reading follows `DEF_IDX`, not whatever `SPEED` was last told. It is a
+measurement, so it needs no maintenance when the default moves — but `CAL_CPI` was
+calibrated on this machine and a different CPU would want it re-checked. Two earlier readings, **1.54 MHz**
 and **94.82 MHz**, came from the same code and are what
 [`CPUCLK`](tools.md#cpuclk--why-is-the-measured-cpu-clock-impossible) was written to
 explain; both were the measurement rather than the machine.
