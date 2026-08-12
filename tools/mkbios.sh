@@ -62,6 +62,7 @@ wsl bash -c "cd /mnt/c/altera/gertieboard/tools && \
   as --32 '$SRC' -o /tmp/$BASE.o && \
   ld -m elf_i386 -Ttext=$ROMOFF --section-start=.reset=0xFFF0 \
      --section-start=.font_rom=0xFA6E \
+     --section-start=.rtdata=0xF200 \
      --oformat=binary -e _post /tmp/$BASE.o -o '$BIN'"
 
 sz=$(wc -c < "$BIN")
@@ -90,6 +91,28 @@ if any(x != 0xFF for x in d[:off]):       fails.append(f"fill below 0x{off:04X} 
 # error. Checking the ADDRESS is the only thing that catches a bad link.
 font = open("font8x8.bin","rb").read()[:1024]
 if d[0xFA6E:0xFA6E+1024] != font:         fails.append("8x8 font (chars 0..127) is NOT at F000:FA6E")
+# The USB runtime data must stay OUT of 0xC000..0xEFFF. That range is what the
+# boot loader checksums to prove a serial boot and a flash boot loaded the same
+# image, and what SPIDUMP compares -- so a single mutable byte inside it makes
+# both instruments report corruption that is not there. It did: 112 bytes of
+# CBW/CSW/descriptor buffer sat at 0xEB6A, and SPIDUMP dutifully reported 41
+# mismatches whose first byte was the 'U' of a live "USBC" wrapper.
+#
+# The linker places .rtdata; nothing else enforces WHERE, so check the address
+# rather than trust the flag. A wrong --section-start is silent otherwise.
+# Check the ADDRESS, not the intent. Identify the block by its own constants:
+# u_cdb_sense, u_cdb_cap and u_rq_dev8 are distinctive and their offsets within
+# .rtdata are fixed by the declarations above them. If the section moves or the
+# --section-start is dropped, these stop matching and the build stops.
+RTDATA = 0xF200
+if not (0xEF00 <= RTDATA and RTDATA + 0x100 < 0xFA6E):
+    fails.append(f"rtdata at 0x{RTDATA:04X} is not clear of the checksum range and the font")
+if d[RTDATA+0x88:RTDATA+0x8D] != b'\x03\x00\x00\x00\x12':
+    fails.append("u_cdb_sense not at .rtdata+0x80 -- USB data is not where the linker was told")
+if d[RTDATA+0x98] != 0x25:
+    fails.append("u_cdb_cap not at .rtdata+0x90")
+if d[RTDATA+0xB8:RTDATA+0xC0] != b'\x80\x06\x00\x01\x00\x00\x08\x00':
+    fails.append("u_rq_dev8 not at .rtdata+0xB0")
 # the .64k must be built from THIS .bin -- the bug this script prevents
 if fails:
     print("BUILD FAILED:")

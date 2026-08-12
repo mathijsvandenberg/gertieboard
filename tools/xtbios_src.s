@@ -120,7 +120,7 @@ _post:
     mov si, offset b_sum
     call dbg_str
     mov si, 0xC000
-    mov cx, offset u_cbw
+    mov cx, offset _rt_start
     sub cx, 0xC000
     xor ax, ax
     xor bx, bx
@@ -133,7 +133,7 @@ _post:
     mov bx, BDA
     mov ds, bx
     mov [0xB8], ax               # published for BIOSFLASH's pre-write check
-    mov bx, offset u_cbw
+    mov bx, offset _rt_start
     sub bx, 0xC000
     mov [0xBA], bx
     mov bx, offset u_fast        # where 186BOOST.COM finds the boost flag
@@ -2121,7 +2121,9 @@ fmt_mhz:
     pop ax
     ret
 
-mhz_buf:  .space 8
+##  mhz_buf lives in .rtdata now -- POST writes the measured clock string into
+##  it, so a byte of it inside the checksummed range made a serial boot and a
+##  flash boot disagree by a constant. See the section for the whole story.
 
 ## =====================================================================
 ##  INT 11h / 12h
@@ -6216,6 +6218,40 @@ u_delay:
 ##  80186 string instructions. Zero at reset, and POST rewrites it every boot,
 ##  so a fast path can never be inherited across a CPU swap. Its offset is
 ##  published at BDA 40:BC, because a DOS tool has no other way to find it.
+## =====================================================================
+##  RUNTIME DATA -- OUT OF THE CHECKSUMMED REGION, DELIBERATELY.
+##
+##  Every byte below is written while the machine runs, and it used to sit in
+##  the middle of the code at 0xEB6A. That made two instruments lie:
+##
+##    * the boot loader checksums 0xC000..0xEFFF and its comment claims the
+##      range is "code only, none of the BIOS's own runtime scratch". It was
+##      not: 112 bytes of this block were inside it, so a serial boot and a
+##      flash boot could never produce the same value. That pair exists
+##      precisely to prove the same image reached memory, and it could not.
+##    * SPIDUMP compares the stored image against the RUNNING BIOS and read
+##      41 mismatches, first at 0xEB6B -- which is u_cbw, and the byte it
+##      reported was 0x55, the 'U' of the "USBC" Command Block Wrapper
+##      signature. Nothing was corrupt. It was looking at a live CBW.
+##
+##  Chasing that cost an evening, so it does not get to happen again: this
+##  block is linked ABOVE 0xEF00, past everything either instrument sums.
+##  Note the templates move too -- they are not all constant. u_rq_clrhalt
+##  has its byte 4 patched with the endpoint address, and a "mostly constant"
+##  table in a checksummed region is the same bug with a smaller blast radius.
+##
+##  --section-start=.rtdata in mkbios.sh places it; mkbios FAILS THE BUILD if
+##  it lands below 0xEF00 or collides with the font at 0xFA6E.
+## =====================================================================
+.section .rtdata, "aw"
+##  THE CHECKSUM BOUNDARY, BY NAME. POST sums 0xC000 up to here, so everything
+##  below this label is runtime data and everything above it is fixed content.
+##  It used to be "offset u_cbw", which was only accidentally right: the moment
+##  mhz_buf was moved into this section it landed BEFORE u_cbw and stayed inside
+##  the sum, and a serial boot and a flash boot went on disagreeing by exactly
+##  0xD2 -- the populated MHz string -- through three rebuilds.
+_rt_start:
+mhz_buf:    .space 8            # POST writes the measured MHz string here
 u_fast:     .byte 0              # 1 = the REP INSB path in u_bulk_in
 u_cbw:      .space 31            # Command Block Wrapper
 u_csw:      .space 13            # Command Status Wrapper
@@ -6236,6 +6272,8 @@ u_rq_setcfg:  .byte 0x00,0x09,0x01,0x00,0x00,0x00,0x00,0x00
 u_rq_botrst:  .byte 0x21,0xFF,0x00,0x00,0x00,0x00,0x00,0x00
 ##  CLEAR_FEATURE(ENDPOINT_HALT); byte 4 is patched with the endpoint address.
 u_rq_clrhalt: .byte 0x02,0x01,0x00,0x00,0x00,0x00,0x00,0x00
+
+.text
 
 ## ---------------------------------------------------------------------
 ##  usb_report -- one POST line for C:, in the original BIOS's register.
