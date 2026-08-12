@@ -233,20 +233,37 @@ set_false_path -from [get_clocks {pll1|altpll_component|auto_generated|pll1|clk[
 #
 # And the FPGA's share is precisely what was varying between builds. It is not
 # tight; it was simply UNBOUNDED, so the fitter placed it differently every time
-# and nothing anywhere would say what it had chosen. Bounding both directions at
-# 8 ns leaves better than 2:1 against the worst case even at SCK_DIV = 1, costs
-# the fitter nothing at these speeds, and turns "however it came out this time"
-# into a number the report has to defend.
+# and nothing anywhere would say what it had chosen.
 #
-# If the PSRAM is ever pushed past SCK_DIV = 1 these bounds are the first thing
-# to tighten, and the phase-shifted read capture (c4 exists and is unused) is
-# the next step after that.
+# THESE BOUNDS ARE DERIVED, NOT CHOSEN. At the default SCK_DIV = 2:
+#
+#     out    14.0 ns   FPGA clock edge -> RAM_SCK/RAM_SIO at the pin
+#     dev     6.0 ns   ESP-PSRAM64H tCHQV (IS25LP016D tV is the same 6 ns)
+#     in      8.0 ns   RAM_SIO at the pin -> captured on c3
+#     ----   -----
+#            28.0 ns   of the 40 available -- 12 ns spare
+#
+# The out bound was 8 ns first, for no better reason than that it was a round
+# number above the measurement of the day. Adding the PLL lock signal moved the
+# placement, the same path came out at 8.16, and the build failed on a ceiling
+# that was never the requirement. Picking a bound because today's number fits
+# under it rebuilds the lottery in a new place: the next edit moves the number
+# and the build fails for a reason that is not a real one.
+#
+# SCK_DIV = 1 IS NOT COVERED BY THIS and must not become the default. Its budget
+# is 20 ns and 14 + 6 + 8 does not fit; it squeaks through today only because
+# the measured numbers are better than the bounds. tCEM caps the other end at
+# SCK_DIV <= 2 for a 16-byte burst in any case, so 40 ns is the figure that
+# matters and 0x02 is the setting to keep.
+#
+# If the PSRAM is ever pushed faster, tighten these first, and the phase-shifted
+# read capture (c4 exists and is unused) is the step after that.
 # -----------------------------------------------------------------------------
 set psram_out [get_ports {RAM_SCK RAM_CS RAM_SIO[*]}]
 set flash_out [get_ports {FL_SCK FL_CS FL_MOSI}]
 
-set_max_delay -to $psram_out 8.000
-set_max_delay -to $flash_out 8.000
+set_max_delay -to $psram_out 14.000
+set_max_delay -to $flash_out 14.000
 
 set_max_delay -from [get_ports {RAM_SIO[*]}] 8.000
 set_max_delay -from [get_ports {FL_MISO}]    8.000

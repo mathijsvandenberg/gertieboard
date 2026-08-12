@@ -92,6 +92,7 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_c3                   : std_logic;
   SIGNAL n_clk48       : std_logic;
   SIGNAL n_usb_locked  : std_logic;
+  SIGNAL n_pll_locked  : std_logic;   -- pll1 has locked; nothing runs before it
   SIGNAL n_clock50              : std_logic;
   SIGNAL n_cpu_a                : std_logic_vector(19 downto 8);
   SIGNAL n_cpu_ale              : std_logic;
@@ -437,7 +438,8 @@ BEGIN
       c1                   => n_c1,
       c2                   => n_c2,
       c3                   => n_c3,
-      c4                   => OPEN
+      c4                   => OPEN,
+      locked               => n_pll_locked
     );
 
   -- The machine's speed. Writes to I/O 0xE5 pick a step; RESET_N is the RAW
@@ -794,7 +796,28 @@ BEGIN
   -- Either the reset button or a hardware Ctrl+Alt+Del does it. Because this is
   -- a real reset, bootrom re-arms its overlay and the BIOS is re-fetched from
   -- the host, video returns to text mode and ctrl_reg reloads its safe default.
-  n_reset <= RESET AND NOT n_cad_rst;
+  -- NOTHING RUNS BEFORE THE CLOCKS ARE REAL.
+  --
+  -- n_reset is the whole machine's "released" signal: clkgen gates the CPU with
+  -- it and n_mem_rst is its inverse, so this one AND term also holds psram_ctrl.
+  -- Until pll1 locks, c0..c3 are not clocks -- they ramp -- and psram_ctrl left
+  -- reset immediately and began a TIMED QPI init against c3 anyway. The 0x66 /
+  -- 0x99 / 0x35 sequence went out at a rate the PSRAM never saw, so it stayed in
+  -- SPI mode and every subsequent read returned rubbish.
+  --
+  -- Which is why the machine booted over JTAG and not from flash: reconfiguring
+  -- a board that has been powered for minutes re-locks almost at once AND finds
+  -- a PSRAM already left in QPI by the previous run, so a botched init costs
+  -- nothing. Cold from the config flash it costs everything -- the loader's own
+  -- first `call`, pushing a return address into PSRAM at 0x7C00, hung with
+  -- nothing driving READY and the 7-seg stopped on POST 02.
+  --
+  -- It only became reachable when the bus clock moved into cpuclk, because that
+  -- took c0 from 50/6 to 50*2 and changed the PLL's operating point, and so its
+  -- lock time. The hazard was always here; the reconfiguration made the window
+  -- wide enough to land in. Proved by an A/B of two builds three minutes apart:
+  -- cpuclk removed boots from flash, cpuclk present stops on 02.
+  n_reset <= RESET AND NOT n_cad_rst AND n_pll_locked;
   -- n_reset is active low; the memory controller wants active high, and must
   -- NOT be gated by clkgen's RST_OUT (see the mem_hybrid instantiation).
   n_mem_rst <= NOT n_reset;

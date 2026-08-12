@@ -64,8 +64,47 @@ start:
         cld
         xor     ax, ax
         mov     ss, ax
-        mov     sp, 0x7C00          ; stack in M9K low RAM
+        mov     sp, 0x7C00          ; stack is in PSRAM -- see the probe below
         MARK    1
+
+; ---------------------------------------------------------------------------
+;  PROVE MAIN MEMORY BEFORE ANY `call` DEPENDS ON IT.
+;
+;  0x7C00 is PSRAM, not M9K -- memmap.vhd made conventional memory uniform, and
+;  the comment above said "M9K low RAM" for a long time after that stopped being
+;  true. So the FIRST instruction that touches main memory is the `call fdc_wr`
+;  below, pushing a return address, and if the PSRAM is not up that call hangs
+;  with nothing driving READY. The machine stops with the 7-seg showing 02 and
+;  no way to tell whether the FDC or the memory was at fault -- and a timeout in
+;  the FDC routines cannot help, because the CPU never gets far enough to run
+;  one.
+;
+;  This costs a dozen bytes and answers it directly, using NO stack:
+;
+;      stuck on 01  the write itself never completed -- nothing claimed the
+;                   address, so main memory is not answering at all
+;      E1           memory answers but returns the wrong data: the PSRAM is
+;                   responding without being correctly in QPI mode
+;      E2           main memory works, and whatever fails next is not this
+; ---------------------------------------------------------------------------
+        xor     ax, ax
+        mov     ds, ax
+        mov     word [0x7BFE], 0x55AA   ; hangs here if nothing drives READY
+        mov     word [0x7BFC], 0xC33C   ; a second cell, so a stuck bus that
+                                        ; reads back what it last saw is caught
+        mov     bx, [0x7BFE]
+        cmp     bx, 0x55AA
+        jne     .mem_bad
+        mov     bx, [0x7BFC]
+        cmp     bx, 0xC33C
+        je      .mem_ok
+.mem_bad:
+        mov     al, 0xE1
+        out     0x80, al
+        jmp     $
+.mem_ok:
+        mov     al, 0xE2
+        out     0x80, al
 
         mov     dx, FDC_DOR
         mov     al, 0x04
@@ -359,31 +398,79 @@ show_byte:
         jnz     .sb
         ret
 
+; --- write one FDC byte, giving up after roughly two seconds ---------------
+; Same bound and the same shape as fdc_rd_to, and for a stronger reason: this
+; runs BEFORE it. fdc_rd_to exists so a board with nobody answering can give up
+; and use the flash copy -- but every command byte goes out through HERE first,
+; so while this spun forever that giving-up path could never be reached at all.
+;
+; It is not hypothetical. A board configured from EPCS stopped dead on MARK 2,
+; every reset, with no beep and no fallback: the FDC was holding a result byte,
+; so MSR read 0xC0 while this loop accepts only 0x80, and it waited for a state
+; that was never going to arrive. The same bitstream loaded over JTAG was fine,
+; which sent the search after the bitstream rather than after the poll.
+;
+; There is nothing useful to hand back to the caller. Twelve call sites would
+; each have to test, in an overlay with 2 KB to spend, and every one of them
+; would do the same thing -- so it does that thing itself and does not return.
+; See docs/gotchas.md, "Unbounded polls, and bounded ones that nest".
 fdc_wr:
         push    dx
-        mov     ah, al
-.ww:
-        mov     dx, FDC_MSR
+        push    cx
+        push    bx
+        mov     ah, al              ; the byte; AL is about to hold MSR
+        mov     bx, 4
+.o:     xor     cx, cx
+.i:     mov     dx, FDC_MSR
         in      al, dx
         and     al, 0xC0
         cmp     al, 0x80
-        jne     .ww
-        mov     dx, FDC_DATA
+        je      .go
+        loop    .i
+        dec     bx
+        jnz     .o
+        pop     bx                  ; no FDC. Unwind our own frame, drop the
+        pop     cx                  ; return address, and take the flash path;
+        pop     dx                  ; flash_load never comes back here.
+        add     sp, 2
+        jmp     flash_load
+.go:    mov     dx, FDC_DATA
         mov     al, ah
         out     dx, al
+        pop     bx
+        pop     cx
         pop     dx
         ret
 
+; --- read one FDC byte, bounded the same way --------------------------------
+; This one carries the other 65535 bytes of the image, inside a `loop .rd` that
+; counts in CX -- so it saves CX, and the timeout counts in a copy. A host that
+; stops answering half way through used to hang here on MARK 5 with 60 KB
+; already in place and no way to say so; now it falls back and reloads the whole
+; image from flash, which is why flash_load resets ES:DI rather than resuming.
 fdc_rd:
         push    dx
-.rr:
-        mov     dx, FDC_MSR
+        push    cx
+        push    bx
+        mov     bx, 4
+.o:     xor     cx, cx
+.i:     mov     dx, FDC_MSR
         in      al, dx
         and     al, 0xC0
         cmp     al, 0xC0
-        jne     .rr
-        mov     dx, FDC_DATA
+        je      .got
+        loop    .i
+        dec     bx
+        jnz     .o
+        pop     bx
+        pop     cx
+        pop     dx
+        add     sp, 2
+        jmp     flash_load
+.got:   mov     dx, FDC_DATA
         in      al, dx
+        pop     bx
+        pop     cx
         pop     dx
         ret
 

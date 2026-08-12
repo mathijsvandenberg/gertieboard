@@ -48,7 +48,15 @@ ENTITY pll IS
 		c1		: OUT STD_LOGIC ;
 		c2		: OUT STD_LOGIC ;
 		c3		: OUT STD_LOGIC ;
-		c4		: OUT STD_LOGIC 
+		c4		: OUT STD_LOGIC ;
+		-- LOCKED IS NOT OPTIONAL HERE, whatever the wizard defaulted to. Every
+		-- clock in this machine comes from this PLL, and until it locks they are
+		-- not clocks. psram_ctrl starts a TIMED QPI init the moment it leaves
+		-- reset, on c3 -- run that against an unlocked PLL and the commands go
+		-- out at a rate the PSRAM never sees, so it stays in SPI mode and every
+		-- later read is rubbish. Invisible over JTAG, where the part is already
+		-- in QPI from the previous run; fatal from a cold power-on.
+		locked		: OUT STD_LOGIC
 	);
 END pll;
 
@@ -65,6 +73,7 @@ ARCHITECTURE SYN OF pll IS
 	SIGNAL sub_wire6	: STD_LOGIC ;
 	SIGNAL sub_wire7	: STD_LOGIC ;
 	SIGNAL sub_wire8	: STD_LOGIC ;
+	SIGNAL sub_wire9	: STD_LOGIC ;
 
 
 
@@ -143,7 +152,8 @@ ARCHITECTURE SYN OF pll IS
 	);
 	PORT (
 			inclk	: IN STD_LOGIC_VECTOR (1 DOWNTO 0);
-			clk	: OUT STD_LOGIC_VECTOR (4 DOWNTO 0)
+			clk	: OUT STD_LOGIC_VECTOR (4 DOWNTO 0);
+			locked	: OUT STD_LOGIC
 	);
 	END COMPONENT;
 
@@ -162,6 +172,7 @@ BEGIN
 	c2    <= sub_wire6;
 	c3    <= sub_wire7;
 	c4    <= sub_wire8;
+	locked    <= sub_wire9;
 
 	altpll_component : altpll
 	GENERIC MAP (
@@ -203,7 +214,7 @@ BEGIN
 		port_fbin => "PORT_UNUSED",
 		port_inclk0 => "PORT_USED",
 		port_inclk1 => "PORT_UNUSED",
-		port_locked => "PORT_UNUSED",
+		port_locked => "PORT_USED",
 		port_pfdena => "PORT_UNUSED",
 		port_phasecounterselect => "PORT_UNUSED",
 		port_phasedone => "PORT_UNUSED",
@@ -238,7 +249,8 @@ BEGIN
 	)
 	PORT MAP (
 		inclk => sub_wire1,
-		clk => sub_wire3
+		clk => sub_wire3,
+		locked => sub_wire9
 	);
 
 
