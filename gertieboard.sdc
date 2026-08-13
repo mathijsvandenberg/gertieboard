@@ -120,9 +120,101 @@ set_false_path -from [get_ports {CPU_RD CPU_WR CPU_IOM CPU_ALE CPU_DEN \
                                  CPU_DTR CPU_INTA CPU_HLDA}] -to *
 set_false_path -from [get_ports {CPU_A[*]}]  -to *
 set_false_path -from [get_ports {CPU_AD[*]}] -to *
-set_false_path -from * -to [get_ports {CPU_AD[*]}]
-set_false_path -from * -to [get_ports {CPU_RDY CPU_CLK CPU_RST CPU_NMI \
-                                       CPU_INTR CPU_HLD}]
+set_false_path -from * -to [get_ports {CPU_RST CPU_NMI CPU_INTR CPU_HLD}]
+
+# -----------------------------------------------------------------------------
+# ...EXCEPT THE TWO SIGNALS THE HANDSHAKE CANNOT COVER.
+#
+# The argument above is right for address and command: the bus cycle is long,
+# READY governs it, and a single-edge requirement on those is meaningless. It is
+# WRONG for READY and for read data, and the uPD70108 datasheet says why -- both
+# are referenced to the CPU's OWN CLOCK EDGES, with requirements no handshake
+# can satisfy on their behalf:
+#
+#     tSRYLK   READY setup to CLK-fall      -8 ns   (may arrive 8 ns AFTER it)
+#     tSRYHK   READY setup to CLK-rise      tKKL-8  -- the same instant
+#     tHKRYL   READY hold from CLK-rise     20 ns
+#     tSDK     read data setup to CLK-fall  20 ns   (-8 part)
+#     tHKD     read data hold from CLK-fall 10 ns
+#
+# READY *IS* the handshake, so it cannot be governed by the handshake. And
+# leaving these two false-pathed is not "not constraining them", it is telling
+# the fitter they are free -- so it places them differently every build. That is
+# the same failure the PSRAM pads had, and it presents the same way: some
+# bitstreams boot and run for hours, some do not, the difference survives a
+# power cycle, and nothing in any report says which one you have.
+#
+# MEASURED on the previous fit, launch edge to pin, slow corner:
+#
+#     CPU_CLK    4.442 ns
+#     CPU_RDY   18.441 ns    -- 14.0 ns behind the clock; the part allows 8
+#     CPU_AD    22.891 ns
+#
+# So READY has been arriving late, into the sampling aperture rather than well
+# clear of it, and whether a given build lands inside or outside that aperture
+# is decided by placement. Hence: works or crashes per build, stable once it
+# boots.
+#
+# THESE BOUNDS ARE DERIVED. READY must be valid 8 ns after CLK-fall AT THE CPU.
+#
+# The clock does not arrive instantly: it leaves through a pad of its own, and
+# the CPU therefore sees CLK-fall that much after the internal edge. That flight
+# time is genuinely part of READY's budget -- but it can only be CLAIMED if it
+# is guaranteed, so CPU_CLK gets a bounded window of its own below and the
+# derivation uses the MINIMUM of that window (earliest possible clock, worst
+# case for READY):
+#
+#     READY  10.35 ns  = 2.5 (CPU_CLK min) + 8.0 (tSRYLK) - 0.15 (board SKEW)
+#
+# That last term was 0.5 ns at first, which confused flight time with skew. What
+# matters is the DIFFERENCE between the clock's trace and READY's, and they go
+# to adjacent pins of the same DIP socket a few centimetres away. 0.15 ns is
+# about 2.5 cm of length mismatch between them, which is already generous.
+#
+# The 2.5 ns is DELIBERATE SKEW, not an observation. Holding the CPU's clock
+# back hands that time straight to READY, and it costs nothing in the other
+# direction: the CPU's own outputs then arrive 3 ns later relative to the
+# sampling edge, against a bus period of 60 ns at the fastest step. It also
+# widens the read-data budget, which is referenced to the same edge.
+#
+# Being straight about it: 3.0 ns was asked for first, because it cleared READY.
+# The fitter could only guarantee 2.722 on a direct pad path, so the ask came
+# down to 2.5 -- what can actually be promised, not what would have been
+# convenient. What makes that legitimate rather than moving the goalposts is that
+# tSRYLK is untouched -- the part still gets its 8 ns -- and the clock is now
+# GUARANTEED not to arrive before 3.0 ns rather than merely observed not to.
+# Claiming the measured 4.442 ns without constraining it would have been the
+# real mistake: the fitter is free to make the clock faster, and the first build
+# that did would have broken READY silently.
+#
+# Read data is launched at least one bus period before the edge that samples it
+# -- READY is what releases the cycle -- so its budget is a period plus the
+# clock's arrival less tSDK. At the fastest step (60 ns) that is 60 - 20 = 40,
+# again claiming nothing for the clock's pad delay, less the same board skew:
+#
+#     DATA   39.5 ns   = 60.0 (period) - 20.0 (tSDK) - 0.5 (board, kept
+#                        conservative here: this one has 29 ns of slack anyway)
+#
+# If a later edit makes either of these fail, the answer is to shorten the path
+# -- READY is combinational out of RAM_READY today -- not to raise the number.
+# Raising it rebuilds the lottery somewhere else.
+# -----------------------------------------------------------------------------
+# The clock's own flight time, pinned at both ends. The window is what makes the
+# 2.0 ns above claimable; the upper end keeps the clock from drifting so late
+# that it eats into the data budget from the other side.
+set_min_delay -to [get_ports {CPU_CLK}]    2.500
+set_max_delay -to [get_ports {CPU_CLK}]    6.000
+
+set_max_delay -to [get_ports {CPU_RDY}]   10.350
+set_max_delay -to [get_ports {CPU_AD[*]}] 39.500
+
+# The 8237's address and the DMA page register reach CPU_RDY only through the
+# MEM_ADDR mux, and that mux selects them only while HLDA is asserted -- which
+# is exactly when the CPU is OFF THE BUS and sampling nothing. They are real
+# wires but they cannot carry a real requirement, and leaving them in was
+# costing the analysis its worst path for a cycle the CPU is not part of.
+set_false_path -from [get_registers {*dma8237*|DMA_ADDR[*]}] -to [get_ports {CPU_RDY}]
+set_false_path -from [get_registers {*busdecode*|dma_page[*]}] -to [get_ports {CPU_RDY}]
 
 # -----------------------------------------------------------------------------
 # VGA outputs, debug header and reset

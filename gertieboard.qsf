@@ -127,6 +127,20 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to CPU_IOM
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to CPU_NMI
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to CPU_RD
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to CPU_RDY
+
+# Drive strength on the two pins with real external requirements. Everything
+# else on this board is at the default because nothing off-chip was timed;
+# these two are now, and pad delay is a function of drive.
+#
+#   CPU_RDY  the V20 wants READY settled 8 ns after CLK falls (tSRYLK) and the
+#            path is the tightest external one in the design.
+#   CPU_CLK  bounded at both ends in the SDC so READY's budget can claim the
+#            clock's flight time. Faster edges also matter electrically here:
+#            the datasheet measures the clock's high-level width at 3.0 V
+#            (tKKH), and a 3.3 V LVTTL swing clears that by very little, so
+#            time spent in transition is time lost from tKKH.
+set_instance_assignment -name CURRENT_STRENGTH_NEW "MAXIMUM CURRENT" -to CPU_RDY
+set_instance_assignment -name CURRENT_STRENGTH_NEW "MAXIMUM CURRENT" -to CPU_CLK
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to CPU_RST
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to CPU_WR
 set_location_assignment PIN_R8 -to CLOCK50
@@ -252,6 +266,7 @@ set_global_assignment -name VHDL_FILE ega_regs.vhd
 set_global_assignment -name VHDL_FILE sdram_ctrl.vhd
 set_global_assignment -name VHDL_FILE sdram_io.vhd
 set_global_assignment -name VHDL_FILE sdram_arb.vhd
+set_global_assignment -name VHDL_FILE sdram_mem.vhd
 set_global_assignment -name VHDL_FILE ega_mem.vhd
 
 # The bus clock is a fabric counter output now, not a PLL output, and it feeds

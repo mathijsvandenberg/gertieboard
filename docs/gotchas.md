@@ -784,6 +784,71 @@ offsets, plus a third pass that reads back **through the CPU**, since reading th
 diagnostic window deliberately bypasses the display path and therefore also bypasses the
 CPU's own read path — the one every latch load in a blitter depends on.
 
+## The handshake cannot govern the handshake
+
+`gertieboard.sdc` false-pathed the whole off-chip V20 bus, both directions, and said why:
+
+> Correctness is governed by the READY handshake and the long (>=200 ns) bus cycle, not by
+> meeting setup on a single 20 ns system-clock edge.
+
+That is right for address and command, and it is the same shape of mistake as
+[the pixel clock's async group](#an-exception-that-outlived-the-reason-for-it): the
+sentence is true, and it does not cover everything it was applied to. Two signals on that
+bus are referenced to the CPU's **own clock edges**, with requirements nothing else can
+satisfy on their behalf — and one of them is READY itself, which cannot be governed by the
+handshake because it *is* the handshake:
+
+| µPD70108 | | |
+|---|---|---|
+| `tSRYLK` | READY setup to CLK↓ | **−8 ns** — may arrive 8 ns *after* it |
+| `tSRYHK` | READY setup to CLK↑ | `tKKL − 8` — the same instant |
+| `tSDK` | read data setup to CLK↓ | 20 ns (−8 part) |
+
+Measured on the fit that was current when this was found, launch edge to pin:
+
+```
+CPU_CLK    4.442 ns
+CPU_RDY   18.441 ns     <- 14.0 ns behind the clock; the part allows 8
+CPU_AD    22.891 ns
+```
+
+So READY had been arriving **inside the CPU's sampling aperture** rather than clear of it,
+and which side of the aperture a given bitstream landed on was decided by placement.
+That produces a very specific and very misleading symptom: builds that boot are *stable* —
+they run games for hours — and builds that do not, never do, and the difference survives a
+power cycle and does not correlate with anything in the source. It looks like a bad
+soldering joint or a marginal supply, and it was neither.
+
+It also masqueraded as a memory fault for a week. Conventional memory was moved off the
+PSRAM entirely and onto SDRAM — a different chip, a different bus, a different controller
+— and cold boot still failed four times in five, because the memory was never the thing
+that was marginal.
+
+The fix was three parts, and only the first is a constraint:
+
+- **Bound the paths**, deriving the numbers from the datasheet rather than from what
+  today's fit happens to achieve.
+- **Take the address decode out of the READY path.** [`mem_hybrid`](../mem_hybrid.vhd)
+  selected between its two sub-blocks by decoding the address; it does not need to, because
+  each block already idles at `'1'` outside its own range, so `ready_ps AND ready_m9k` is
+  the same answer for every address with no decode at all.
+  [`busdecode`](../busdecode.vhd) now decodes `needs_ram_handshake` at the ALE edge from
+  the address arriving on the pins, which costs nothing because that edge already latches
+  the address.
+- **Bound `CPU_CLK` at both ends**, so the time the clock spends reaching the CPU can be
+  *claimed* as part of READY's budget instead of merely observed.
+
+READY went from 18.441 ns to 10.346 ns, and cold boot went from one attempt in five to
+five in five.
+
+Two cautions for anyone editing this. The bound closes with **4 ps** of margin, so the
+next change to that path will fail the build — that is the mechanism working, and the
+answer is to shorten the path, not to raise the number. And if it ever needs real margin
+rather than a hair's breadth, register `CPU_RDY` in the output pad: pin timing becomes
+about 3 ns permanently, at the cost of one wait state per bus cycle — but the memory
+clause must then be gated at `T >= 2`, because a naively registered READY lets the CPU's
+end-of-T2 sample see a value computed before the strobe asserted, which is a false ready.
+
 ## Currently open
 
 Nothing broken. The last entry — the BIOS not booting from SPI flash — closed when the
@@ -803,9 +868,18 @@ rediscovered as bugs:
   [`SCROLLTST`](tools.md#scrolltst--does-the-display-start-address-land-where-it-should)
   exists to settle it; run that before wiring in the CGA half, rather than reading the
   screen.
-- **10 MHz does not boot.** The serial loader is never asked for a block. `c0` is 8.33 MHz
-  and the CPU is a `-8` part, so the CPU is the obvious suspect and a faster one is the
-  obvious test — but the 3.3 V logic levels driving a 5 V part have not been ruled out.
+- **10 MHz does not boot.** The serial loader is never asked for a block. Partly explained
+  since: READY was arriving late enough to land in the CPU's sampling aperture (see
+  [above](#the-handshake-cannot-govern-the-handshake)), which gets worse as the step
+  rises, and that path is now bounded. Whether 10 MHz boots has not been re-tested since.
+  What has *not* been ruled out is the supply: pin 40 measures **3.33 V** on a part rated
+  4.5–5.5 V, with no droop during reset (scope-verified), and the default step is 8.333 MHz
+  on a `-8` part. Note also that the clock input is the one pin with a raised threshold —
+  `VKH` is 3.9 V at 5 V VDD, 78 % of the rail where ordinary `VIH` is 44 % — and `tKKH` is
+  measured at an **absolute** 3.0 V, which a 3.3 V LVTTL swing clears by very little. A
+  single buffer on the clock line powered from the CPU's own rail would settle that
+  question far more cheaply than raising VDD, which would need series resistors on ~20
+  CPU→FPGA lines because Cyclone IV E inputs are not 5 V tolerant.
 - **Divisor `0x8000` on PIT counter 0 runs at half rate.** Found by
   [`PITTEST`](tools.md#pittest--does-irq0-survive-being-reprogrammed) and genuinely
   anomalous — neighbouring divisors are correct and the arithmetic in

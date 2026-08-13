@@ -68,6 +68,7 @@ ARCHITECTURE behavior OF busdecode IS
 SIGNAL T : INTEGER RANGE 0 TO 1023;
 SIGNAL ADDR : STD_LOGIC_VECTOR(19 DOWNTO 0);
 SIGNAL MEMADDR : boolean;
+SIGNAL memaddr_q : boolean := FALSE;   -- registered address half of MEMADDR
 SIGNAL MEMADDR2 : boolean;
 
 -- latched CPU views (driven to the outputs through the DMA mux)
@@ -89,16 +90,33 @@ BEGIN
 	IF (rising_edge(CLK)) THEN
 		wr_prev <= WR;
 
+		-- memaddr_q is the address half of MEMADDR, decoded HERE rather than in
+		-- the expression that drives READY. It is computed from the address
+		-- arriving on the pins, not from the latched copy, so it lands on the
+		-- SAME edge that latches ADDR -- one clock earlier than registering the
+		-- old expression would have managed, and therefore free.
+		--
+		-- Why bother: needs_ram_handshake is a 20-bit range decode, and it sat
+		-- in the combinational path to CPU_RDY, which has the tightest external
+		-- requirement on the board (V20 tSRYLK: settled 8 ns after CLK falls).
+		-- Moving it here puts it on the ALE path instead, which has a whole bus
+		-- cycle of slack and nothing waiting on it.
 		IF (ALE = '1' AND IOM = '0') THEN
 			T <= 1;
 			ioaddr_l <= x"FFFF"; -- Bogus, make sure it does not match any logic address
 			maddr_l  <= A(19 DOWNTO 8) & AD(7 DOWNTO 0);
 			ADDR     <= A(19 DOWNTO 8) & AD(7 DOWNTO 0);
+			memaddr_q <= needs_ram_handshake(A(19 DOWNTO 8) & AD(7 DOWNTO 0)) = '1';
 		ELSIF (ALE = '1' AND IOM = '1') THEN
 			T <= 1;
 			ioaddr_l <= A(15 DOWNTO 8) & AD(7 DOWNTO 0);
 			maddr_l  <= x"FFFFF";
 			ADDR     <= "0000" & A(15 DOWNTO 8) & AD(7 DOWNTO 0);
+			-- I/O cycles land in the low 64 KB of the 20-bit space, where
+			-- needs_ram_handshake answers '1'. That was true of the old
+			-- expression too and is harmless: every clause that reads MEMADDR
+			-- also tests IOM, which is what actually separates the two.
+			memaddr_q <= needs_ram_handshake("0000" & A(15 DOWNTO 8) & AD(7 DOWNTO 0)) = '1';
 		ELSE
 			T <= T + 1;
 		END IF;
@@ -184,7 +202,11 @@ BEGIN
 	-- memmap.vhd because it depends on the MODE and not only on the address:
 	-- the same 0xA0000 is unclaimed in CGA modes, and claiming it there would
 	-- send every access to the T >= 128 backstop -- 15 us apiece.
-	MEMADDR <= (needs_ram_handshake(ADDR) = '1') OR (EGA_CLAIM = '1');
+	-- The address decode is now registered (memaddr_q, above). EGA_CLAIM stays
+	-- combinational: it depends on the video MODE as well as the address, so it
+	-- is not known at the ALE edge, and it is a far shorter path than the range
+	-- decode that used to be here.
+	MEMADDR <= memaddr_q OR (EGA_CLAIM = '1');
 
 
 
