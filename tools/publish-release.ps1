@@ -4,9 +4,21 @@
     can offer them to end users under "Firmware from GitHub".
 
 .DESCRIPTION
-    The build outputs (.sof / .jic / .64k) are deliberately gitignored - they are
-    large and change every build, and git would keep every version forever. Releases
-    keep the repository lean while still giving users versioned downloads.
+    The build outputs are deliberately gitignored - they are large and change every
+    build, and git would keep every version forever. Releases keep the repository
+    lean while still giving users versioned downloads.
+
+    Three artifacts make up a working machine, and all three are published:
+
+        output_files\gertieboard.sof   FPGA bitstream over JTAG, lost on power-off
+        output_files\gertieboard.jic   configuration flash image, survives a power cycle
+        tools\gertieboard_bios.64k     the 64 KB F-segment BIOS image
+
+    The .jic and the .64k are separate things and both are needed: the .jic is the
+    chipset, the .64k is the firmware that runs on it, and updating one does not
+    update the other. Which files go out is set by tools\release-files.txt.
+
+    Everything lands in release-staging\<Tag>, which is gitignored.
 
     This script stages the artifacts, generates SHA256SUMS and manifest.json, and
     then either uploads everything (when a token is available) or leaves the folder
@@ -75,11 +87,27 @@ if ($Files) {
 }
 
 $selected = @()
+$missing = @()
 foreach ($pat in $patterns) {
     $p = if ([System.IO.Path]::IsPathRooted($pat)) { $pat } else { Join-Path $root $pat }
     $hits = Get-ChildItem $p -File -ErrorAction SilentlyContinue
-    if (-not $hits) { Write-Host "  skipped (not found): $pat" -ForegroundColor DarkYellow; continue }
+    if (-not $hits) {
+        # A GLOB matching nothing is a curation choice and stays a warning. A
+        # NAMED FILE that is missing is a release quietly going out without it,
+        # and that is not a warning-level event.
+        if ($pat -match '[\*\?]') {
+            Write-Host "  no match (glob): $pat" -ForegroundColor DarkYellow
+        } else {
+            $missing += $pat
+        }
+        continue
+    }
     $selected += $hits
+}
+if ($missing) {
+    throw ("listed for release but not on disk:`n  " + ($missing -join "`n  ") +
+           "`n`nBuild them first - tools\mkfpga.sh for the .sof/.jic, tools\mkbios.sh" +
+           " for the .64k - or correct tools\release-files.txt.")
 }
 $selected = $selected | Sort-Object FullName -Unique
 if (-not $selected) { throw "no artifacts found - build first, or pass -Files" }
@@ -99,6 +127,48 @@ function Get-Kind($name) {
 function Get-Desc($name) {
     $kind = Get-Kind $name
     if ($descriptions.ContainsKey($kind)) { $descriptions[$kind] } else { '' }
+}
+
+# ---- refuse stale artifacts -------------------------------------------------
+# This list named tools\xtbios_claude.64k for a long time after the BIOS build
+# started producing gertieboard_bios.64k. The old file still EXISTED, so nothing
+# warned and nothing failed - releases simply went out carrying a BIOS from a
+# different build than the bitstreams packaged beside it. A missing file is
+# loud. A stale one is silent, and the silent one is what reaches users.
+#
+# So each artifact is checked against the sources that actually produce it,
+# which is what mkfpga.sh and mkbios.sh already do for the bench. Deliberately
+# narrow: the FPGA does not care about tools\*.asm and the BIOS does not care
+# about the VHDL, and checking everything against everything would just train
+# people to pass -Force.
+function Get-NewestSource($path, $include, $excludes) {
+    $items = Get-ChildItem -Path $path -Include $include -File -Recurse -ErrorAction SilentlyContinue
+    foreach ($x in $excludes) { $items = $items | Where-Object { $_.FullName -notlike $x } }
+    if (-not $items) { return $null }
+    return ($items | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+}
+
+$buildDirs = @("*\db\*", "*\incremental_db\*", "*\release-staging\*", "*\simulation\*", "*\output_files\*")
+$newestFor = @{
+    'fpga-sram'  = Get-NewestSource $root @('*.vhd','*.vhdl','*.sdc','*.qsf') $buildDirs
+    'fpga-flash' = Get-NewestSource $root @('*.vhd','*.vhdl','*.sdc','*.qsf') $buildDirs
+    'bios'       = Get-NewestSource (Join-Path $root 'tools') @('xtbios_src.s','*.inc') @()
+}
+
+$stale = @()
+foreach ($f in $selected) {
+    $src = $newestFor[(Get-Kind $f.Name)]
+    if ($src -and $f.LastWriteTime -lt $src.LastWriteTime) {
+        $stale += "{0}  ({1:yyyy-MM-dd HH:mm}) is older than {2} ({3:yyyy-MM-dd HH:mm})" -f `
+                  $f.Name, $f.LastWriteTime, $src.Name, $src.LastWriteTime
+    }
+}
+if ($stale) {
+    throw ("these artifacts are older than the sources that produce them:`n  " +
+           ($stale -join "`n  ") +
+           "`n`nRebuild - tools\mkfpga.sh for the .sof/.jic, tools\mkbios.sh for the" +
+           " .64k - then publish. Shipping a mismatched set is how a release ends up" +
+           " with a BIOS and a bitstream from different builds.")
 }
 
 # ---- stage ------------------------------------------------------------------

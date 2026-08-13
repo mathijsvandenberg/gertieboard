@@ -8,6 +8,9 @@
 #   .sof -> fpga-sram    .jic/.pof -> fpga-flash
 #   .64k/.rom -> bios    .ima/.img -> floppy
 
+# These three are what an end user needs, and all three are gitignored, so a
+# release is the only way they reach anybody. A name here that does not exist is
+# now a hard error rather than a warning -- see the note in publish-release.ps1.
 output_files/gertieboard.sof
 output_files/gertieboard.jic
-tools/xtbios_claude.64k
+tools/gertieboard_bios.64k
