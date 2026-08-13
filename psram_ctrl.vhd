@@ -54,8 +54,20 @@ ENTITY psram_ctrl IS
         -- CPU in reset until it is set -- see the note there.
         INIT_DONE : OUT std_logic;
         CTRL    : IN    std_logic_vector(7  DOWNTO 0);       -- runtime tuning
-        RAM_SCK : OUT   std_logic;
-        RAM_CS  : OUT   std_logic;
+        -- POWER-UP VALUES, and they matter only on a COLD start -- which is the
+        -- only case that fails. A port with no declared initial value powers up
+        -- LOW, and RAM_CS low means SELECTED. Between the end of configuration
+        -- and the first clock edge there IS no clock edge: c3 does not exist
+        -- until the PLL locks, so nothing can drive these to a sane state. The
+        -- part therefore sits SELECTED, with SCK low and drifting, for the whole
+        -- of PLL lock -- and only then does the init sequence start talking to
+        -- whatever state that left it in.
+        --
+        -- Over JTAG this is invisible: the part is already in QPI from the
+        -- previous run, so 0xF5 recovers it whatever happened. Cold, it is in
+        -- SPI and there is nothing to recover it with.
+        RAM_SCK : OUT   std_logic := '0';
+        RAM_CS  : OUT   std_logic := '1';
         RAM_SIO : INOUT std_logic_vector(3 DOWNTO 0));
 END psram_ctrl;
 
@@ -64,6 +76,23 @@ ARCHITECTURE behavior OF psram_ctrl IS
   CONSTANT POWERUP_TICKS  : integer := 40000;
   CONSTANT GAP_TICKS      : integer := 32;
   CONSTANT RST_WAIT_TICKS : integer := 10000;
+
+  -- THE INIT SEQUENCE GETS ITS OWN, SLOWER CLOCK.
+  --
+  -- Its states used to be one CLK_RAM cycle each, which is SCK = 25 MHz -- twice
+  -- the 12.5 MHz the data path runs at with the default SCK_DIV = 2, and the
+  -- only thing on this board driving the PSRAM that fast. It was also the only
+  -- thing failing: mis-clock 0x66/0x99/0x35 and the part never enters QPI, so
+  -- every later read returns nothing and the loader's probe reports E4 with 252
+  -- of 256 bytes wrong.
+  --
+  -- SCK_DIV exists precisely so the working rate can be found on the bench, and
+  -- the init ignored it. Init speed is worth nothing -- the whole sequence is
+  -- four commands -- so it does not track SCK_DIV either: it runs at a fixed
+  -- 8 cycles per half-period, 3.125 MHz, comfortably below anything that has
+  -- ever worked here. Four times slower than the data path costs microseconds
+  -- once per reset.
+  CONSTANT INIT_DIV : integer := 8;
 
   SIGNAL is_ram    : std_logic;
   SIGNAL cpu_rd_op : std_logic;
@@ -319,7 +348,12 @@ BEGIN
     CASE state IS
       WHEN S_POWERUP =>
         sio_oe  <= "1111"; sio_out <= "0000";
-      WHEN S_EXIT_LO | S_EXIT_HI =>
+      -- S_EXIT_INIT IS IN THIS LIST, and leaving it out is what made the first
+      -- attempt at the falling-edge fix worse than the bug. The _INIT state now
+      -- goes straight to _HI, so if SIO is not already driven here the FIRST
+      -- nibble of 0xF5 starts driving AS SCK RISES -- corrupting the one command
+      -- that gets a warm part out of QPI, and stranding it there.
+      WHEN S_EXIT_INIT | S_EXIT_LO | S_EXIT_HI =>
         -- QPI-exit (0xF5) clocked as 4-bit nibbles
         sio_oe  <= "1111"; sio_out <= out_sr(39 DOWNTO 36);
       WHEN S_SPI_INIT | S_SPI_LO | S_SPI_HI =>
@@ -371,25 +405,73 @@ BEGIN
         -- Mode-agnostic wakeup: send 0xF5 (exit QPI) as a 4-bit QPI command.
         -- If the chip is in QPI it returns to SPI; if already in SPI the 2 bits
         -- form an incomplete command that CS-high aborts -> harmless either way.
+        ------------------------------------------------------------------
+        -- THE DATA MOVES WHEN SCK FALLS, NOT WHEN IT RISES.
+        --
+        -- These two shifters used to raise RAM_SCK and shift out_sr on the SAME
+        -- clock edge -- and the part samples on the rising edge. That only ever
+        -- worked because RAM_SIO's routing is slower than RAM_SCK's, so the old
+        -- bit was still at the pin when the device saw the edge. Correctness
+        -- rested on routing skew, which nothing declared and nothing checked.
+        --
+        -- MEASURED, and it does not hold at the corner that matters:
+        --
+        --                     slow/85C      fast/0C     part needs
+        --     SCK               3.57 ns      2.298 ns
+        --     SIO[0]            7.07 ns      4.275 ns
+        --     hold = SIO-SCK    3.50 ns      1.977 ns     ~2 ns  <-- fails cold
+        --
+        -- Cold silicon is FAST silicon: the delays shrink, the gap closes, and
+        -- the hold the part needs is gone. Found with a heat gun, not a report:
+        -- warming the FPGA moved the failure count from 254 bytes wrong to
+        -- fewer, warming the PSRAM made it worse. Nothing else in this design
+        -- behaves that way round.
+        --
+        -- The consequence was total. Mis-clock the init and the part never
+        -- enters QPI, so every later read returns nothing -- the loader's probe
+        -- reported E4 with 252 of 256 bytes wrong and every read 0x00.
+        --
+        -- Shifting on the falling edge is plain SPI mode 0 and gives a full
+        -- half-period of setup AND hold, from the state machine rather than
+        -- from the fitter. The _INIT states enter _HI directly, because the
+        -- first bit is already presented and shifting before it is clocked
+        -- would drop it -- which is why S_EXIT_INIT had to join the sio_drive
+        -- list above.
+        --
+        -- The QPI path never had this: it shifts at the END of the high phase,
+        -- a whole clock after the rising edge.
+        ------------------------------------------------------------------
         WHEN S_EXIT_INIT =>
           out_sr  <= x"F5" & x"00000000";
-          nib_cnt <= 2; RAM_CS <= '0'; RAM_SCK <= '0';
-          state   <= S_EXIT_LO;
+          nib_cnt <= 2; RAM_CS <= '0'; RAM_SCK <= '0'; half_cnt <= 0;
+          state   <= S_EXIT_HI;            -- first nibble is already driven
 
         WHEN S_EXIT_LO =>
           RAM_SCK <= '0';
-          IF nib_cnt = 0 THEN
-            RAM_CS <= '1'; init_step <= 1; delay_cnt <= GAP_TICKS;
-            state  <= S_INIT_GAP;            -- gap, then SPI reset/enter-QPI
+          IF half_cnt = 0 THEN
+            out_sr <= out_sr(35 DOWNTO 0) & x"0";  -- moves WITH the falling edge
+          END IF;
+          IF half_cnt >= INIT_DIV - 1 THEN
+            half_cnt <= 0;
+            IF nib_cnt = 0 THEN
+              RAM_CS <= '1'; init_step <= 1; delay_cnt <= GAP_TICKS;
+              state  <= S_INIT_GAP;          -- gap, then SPI reset/enter-QPI
+            ELSE
+              state <= S_EXIT_HI;
+            END IF;
           ELSE
-            state <= S_EXIT_HI;
+            half_cnt <= half_cnt + 1;
           END IF;
 
         WHEN S_EXIT_HI =>
-          RAM_SCK <= '1';
-          out_sr  <= out_sr(35 DOWNTO 0) & x"0";
-          nib_cnt <= nib_cnt - 1;
-          state   <= S_EXIT_LO;
+          RAM_SCK <= '1';                  -- data already stable, and stays so
+          IF half_cnt >= INIT_DIV - 1 THEN
+            half_cnt <= 0;
+            nib_cnt  <= nib_cnt - 1;
+            state    <= S_EXIT_LO;
+          ELSE
+            half_cnt <= half_cnt + 1;
+          END IF;
 
         WHEN S_SPI_INIT =>
           CASE init_step IS
@@ -398,24 +480,37 @@ BEGIN
             WHEN 3      => out_sr <= x"35" & x"00000000";
             WHEN OTHERS => out_sr <= (OTHERS => '0');
           END CASE;
-          bit_cnt <= 8; RAM_CS <= '0'; RAM_SCK <= '0'; state <= S_SPI_LO;
+          bit_cnt <= 8; RAM_CS <= '0'; RAM_SCK <= '0'; half_cnt <= 0;
+          state <= S_SPI_HI;
 
         WHEN S_SPI_LO =>
           RAM_SCK <= '0';
-          IF bit_cnt = 0 THEN
-            CASE init_step IS
-              WHEN 1 => init_step <= 2; delay_cnt <= GAP_TICKS;      state <= S_INIT_GAP;
-              WHEN 2 => init_step <= 3; delay_cnt <= RST_WAIT_TICKS; state <= S_INIT_WAIT;
-              WHEN 3 => init_step <= 0; delay_cnt <= GAP_TICKS;      state <= S_INIT_GAP;
-              WHEN OTHERS => state <= S_IDLE;
-            END CASE;
-          ELSE state <= S_SPI_HI; END IF;
+          IF half_cnt = 0 THEN
+            out_sr <= out_sr(38 DOWNTO 0) & '0';   -- moves WITH the falling edge
+          END IF;
+          IF half_cnt >= INIT_DIV - 1 THEN
+            half_cnt <= 0;
+            IF bit_cnt = 0 THEN
+              CASE init_step IS
+                WHEN 1 => init_step <= 2; delay_cnt <= GAP_TICKS;      state <= S_INIT_GAP;
+                WHEN 2 => init_step <= 3; delay_cnt <= RST_WAIT_TICKS; state <= S_INIT_WAIT;
+                WHEN 3 => init_step <= 0; delay_cnt <= GAP_TICKS;      state <= S_INIT_GAP;
+                WHEN OTHERS => state <= S_IDLE;
+              END CASE;
+            ELSE state <= S_SPI_HI; END IF;
+          ELSE
+            half_cnt <= half_cnt + 1;
+          END IF;
 
         WHEN S_SPI_HI =>
-          RAM_SCK <= '1';
-          out_sr  <= out_sr(38 DOWNTO 0) & '0';
-          bit_cnt <= bit_cnt - 1;
-          state   <= S_SPI_LO;
+          RAM_SCK <= '1';                  -- data already stable, and stays so
+          IF half_cnt >= INIT_DIV - 1 THEN
+            half_cnt <= 0;
+            bit_cnt  <= bit_cnt - 1;
+            state    <= S_SPI_LO;
+          ELSE
+            half_cnt <= half_cnt + 1;
+          END IF;
 
         WHEN S_INIT_GAP =>
           RAM_CS <= '1'; RAM_SCK <= '0';

@@ -52,7 +52,37 @@ PACKAGE memmap IS
   CONSTANT FSEG_BASE: std_logic_vector(19 DOWNTO 0) := x"F0000";  -- F-segment
   CONSTANT BIOS_BASE: std_logic_vector(19 DOWNTO 0) := x"FC000";  -- BIOS image
 
+  -- WHICH CHIP BACKS CONVENTIONAL MEMORY.
+  --
+  -- Not strictly part of the map -- the map says which addresses are RAM, not
+  -- what kind of RAM -- but this is the file every module already asks, so it is
+  -- where a switch can be read by all of them without new dependencies.
+  --
+  -- FALSE is the QPI PSRAM on the top board. It works from a warm reset and
+  -- fails from a cold one: the probe finds all 256 test bytes wrong and reads
+  -- return nothing, which is the part not having entered QPI mode. Init clock
+  -- rate, the clock edge data is placed on, chip select at power-up and PLL lock
+  -- gating were each fixed in turn, and a reflow was done; the count went 208,
+  -- 252, 254, 255 -- worsening with time on the bench, not with the changes.
+  -- Warming the PSRAM makes it worse and warming the FPGA makes it better, so
+  -- whatever it is, it is analogue and it is over there.
+  --
+  -- TRUE is the DE0-Nano's SDRAM, which is already carrying the EGA bit planes
+  -- through Keen 4, is verified across all 65536 plane offsets by EGAVFY, is
+  -- factory-mounted, is 32 MB against 8, and is the only external interface on
+  -- this board whose timing is actually constrained. It is also about twice as
+  -- fast on a cache miss.
+  --
+  -- Flipping this back to FALSE and rebuilding is the whole revert.
+  CONSTANT USE_SDRAM_RAM : boolean := TRUE;
+
   -- Who owns this address?
+  --
+  -- owned_by_cpuram is the region: 640 KB plus the backed part of the
+  -- F-segment. owned_by_psram is the OLD NAME for the same question, kept so
+  -- psram_ctrl.vhd -- the fallback -- needs no edit to stay working. It is an
+  -- alias, not a copy, so the two cannot drift.
+  FUNCTION owned_by_cpuram  (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic;
   FUNCTION owned_by_psram   (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic;
   FUNCTION owned_by_bios    (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic;
   FUNCTION owned_by_diskbuf (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic;
@@ -72,13 +102,18 @@ END PACKAGE memmap;
 
 PACKAGE BODY memmap IS
 
-  FUNCTION owned_by_psram (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
+  FUNCTION owned_by_cpuram (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
   BEGIN
     IF (a < CONV_END) OR ((a >= FSEG_BASE) AND (a < BIOS_BASE)) THEN
       RETURN '1';
     ELSE
       RETURN '0';
     END IF;
+  END FUNCTION;
+
+  FUNCTION owned_by_psram (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
+  BEGIN
+    RETURN owned_by_cpuram(a);
   END FUNCTION;
 
   FUNCTION owned_by_bios (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS

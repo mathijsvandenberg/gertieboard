@@ -192,6 +192,14 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_sd_ack               : std_logic;
   SIGNAL n_sd_init              : std_logic;
   SIGNAL n_sd_state             : std_logic_vector(3 downto 0);
+  -- mem_hybrid's conventional memory <-> sdram_arb client 2
+  SIGNAL n_cr_req               : std_logic;
+  SIGNAL n_cr_lock              : std_logic;
+  SIGNAL n_cr_we                : std_logic;
+  SIGNAL n_cr_a                 : std_logic_vector(23 downto 0);
+  SIGNAL n_cr_d                 : std_logic_vector(15 downto 0);
+  SIGNAL n_cr_be                : std_logic_vector(1 downto 0);
+  SIGNAL n_cr_ack               : std_logic;
   -- ega_mem <-> vga
   SIGNAL n_em_req               : std_logic;
   SIGNAL n_em_we                : std_logic;
@@ -494,7 +502,16 @@ BEGIN
       RAM_SCK              => n_ram_sck,
       RAM_CS               => n_ram_cs,
       DATAOUT              => n_periph_rdata,
-      RAM_SIO              => RAM_SIO
+      RAM_SIO              => RAM_SIO,
+      SD_REQ               => n_cr_req,
+      SD_LOCK              => n_cr_lock,
+      SD_WE                => n_cr_we,
+      SD_ADDR              => n_cr_a,
+      SD_DIN               => n_cr_d,
+      SD_BE                => n_cr_be,
+      SD_DOUT              => n_sd_dout,
+      SD_ACK               => n_cr_ack,
+      SD_INIT              => n_sd_init
     );
 
   -- The EGA register file. It observes reads of 0x3DA to reset the attribute
@@ -624,6 +641,17 @@ BEGIN
       R1_D                 => n_sd_din,
       R1_BE                => n_sd_be,
       R1_ACK               => n_sd_ack,
+      -- Client 2 is the CPU's conventional memory. mem_hybrid ties these off
+      -- itself when memmap.USE_SDRAM_RAM is FALSE, so with REQ low the port is
+      -- invisible to the arbiter and the build is the two-client one again --
+      -- the revert needs no edit here.
+      R2_REQ               => n_cr_req,
+      R2_LOCK              => n_cr_lock,
+      R2_WE                => n_cr_we,
+      R2_A                 => n_cr_a,
+      R2_D                 => n_cr_d,
+      R2_BE                => n_cr_be,
+      R2_ACK               => n_cr_ack,
       S_REQ                => n_e_req,
       S_WE                 => n_e_we,
       S_A                  => n_e_a,

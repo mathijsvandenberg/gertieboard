@@ -1,12 +1,28 @@
-# mem_hybrid (+ m9k_mem, psram_ctrl)
+# mem_hybrid (+ m9k_mem, sdram_mem, psram_ctrl)
 
 Sources: [`mem_hybrid.vhd`](../../mem_hybrid.vhd),
-[`m9k_mem.vhd`](../../m9k_mem.vhd), [`psram_ctrl.vhd`](../../psram_ctrl.vhd)
+[`m9k_mem.vhd`](../../m9k_mem.vhd), [`sdram_mem.vhd`](../../sdram_mem.vhd),
+[`psram_ctrl.vhd`](../../psram_ctrl.vhd)
 · Instance `inst` · Clock `c3` (50 MHz)
 
 The memory controller. `mem_hybrid` is a thin wrapper that splits the address
-space between fast on-chip M9K block RAM and the external QPI PSRAM, and muxes
-their `READY` signals.
+space between fast on-chip M9K block RAM and a larger external memory.
+
+**That external memory is the SDRAM, not the PSRAM.** `USE_SDRAM_RAM` in
+[`memmap.vhd`](../../memmap.vhd) picks between `sdram_mem` and `psram_ctrl`, and
+because it is a constant only the chosen one is elaborated — the other costs
+nothing and does not appear in timing. The PSRAM would not come up reliably from
+a cold power-on; see
+[why SDRAM](../memory-map.md#why-sdram-and-not-the-psram). The `RAM_*` ports
+below are still driven (`CS` high, `SIO` tri-stated) so the part is left
+deselected rather than floating.
+
+`READY` is **not** muxed by address any more. Each sub-block idles at `'1'`
+outside its own range, so `ready_ps AND ready_m9k` gives the same answer for
+every address with no decode at all — and that decode used to sit in the
+combinational path to the CPU's `READY` pin, which carries the tightest external
+requirement on the board. See
+[the handshake gotcha](../gotchas.md#the-handshake-cannot-govern-the-handshake).
 
 ## Ports
 

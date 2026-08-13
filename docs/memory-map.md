@@ -4,14 +4,14 @@
 
 | Range | Size | Backing | Notes |
 |---|---|---|---|
-| `0x00000`–`0x9FFFF` | 640 KB | **PSRAM** (`psram_ctrl`) | *all* of conventional memory, at **one** speed |
+| `0x00000`–`0x9FFFF` | 640 KB | **SDRAM** (`sdram_mem`) | *all* of conventional memory, at **one** speed |
 | `0xA0000`–`0xAFFFF` | 64 KB | **SDRAM** (via `ega_mem`) | EGA planes, **only while `EGA_ON`**; otherwise unmapped |
 | `0xB0000`–`0xB7FFF` | — | unmapped | reads float; not a `MEMADDR` region |
 | `0xB8000`–`0xBBFFF` | 16 KB | **inside `vga`** | CGA video RAM (text + graphics) |
 | `0xBC000`–`0xDFFFF` | — | unmapped | |
 | `0xE0000`–`0xE0FFF` | 4 KB | on-chip **M9K** (`m9k_mem`) | fixed-disk block buffer; **invisible to DOS** |
 | `0xE1000`–`0xEFFFF` | — | unmapped | |
-| `0xF0000`–`0xFBFFF` | 48 KB | **PSRAM** | `0xFF` fill. Kept backed because `BIOSFLSH` reads the whole F-segment |
+| `0xF0000`–`0xFBFFF` | 48 KB | **SDRAM** | `0xFF` fill. Kept backed because `BIOSFLSH` reads the whole F-segment |
 | `0xFC000`–`0xFFFFF` | 16 KB | on-chip **M9K** (`m9k_mem`) | the BIOS image — **zero wait states** |
 | `0xFF800`–`0xFFFFF` | 2 KB | **boot ROM overlay** | *reads only*, while `ROM_EN = '1'` |
 
@@ -25,15 +25,49 @@ and moving a `.COM` a few kilobytes could change how fast its music played. Soft
 this era calibrates delay loops against itself, so that is not a detail — it is the
 difference between a game running right and running wrong for no reason anybody can see.
 
-So conventional memory is now PSRAM end to end, and the on-chip memory is spent where the
+So conventional memory is one thing end to end, and the on-chip memory is spent where the
 *speed* is what matters rather than the uniformity:
 
 - **the BIOS image**, because interrupt handlers are entered constantly and were paying
-  PSRAM latency on every `INT`
+  memory latency on every `INT`
 - **the disk block buffer**, which is not visible to DOS at all
 
 That trade is the right way round. A BIOS call being fast helps everything; conventional
 memory being fast *in places* helps nothing and breaks timing.
+
+### Why SDRAM and not the PSRAM
+
+Conventional memory used to be the QPI PSRAM on the top board, and moving it was not a
+performance decision — the PSRAM would not come up reliably from a cold power-on. The
+probe found every one of its 256 test bytes wrong and reads returned nothing, which is the
+part not having entered QPI mode. Four separate fixes (init clock rate, the clock edge
+data is placed on, chip select at power-up, PLL lock gating) and a reflow moved the count
+the wrong way: 208, 252, 254, 255 — tracking time on the bench rather than any change.
+
+The SDRAM was the obvious alternative because it was already trusted: it carries the EGA
+bit planes through Keen 4 at full frame rate, `EGAVFY` verifies all 65536 plane offsets of
+it, it is factory-mounted rather than hand-soldered, and since the I/O constraints went in
+it is the only external interface on the board whose timing is actually checked. It is
+also simply better memory — 16 bits wide at 50 MHz against 4 bits at 12.5, 32 MB against
+8, and about twice as fast on a cache miss.
+
+[`sdram_mem`](../sdram_mem.vhd) keeps `psram_ctrl`'s cache geometry deliberately unchanged
+— 4 lines of 16 bytes, fully associative, write-through with invalidate — because that was
+*measured* on this machine and this software, including the discovery that eight lines cost
+timing margin the design could not spare. Conventional memory sits at SDRAM word
+`0x20000 + (address / 2)`, above the EGA planes which end at word `0x1FFFF`; an assert in
+the module enforces the gap, because nothing else would.
+
+`psram_ctrl` is still in the tree and still builds. `USE_SDRAM_RAM` in
+[`memmap.vhd`](../memmap.vhd) selects between them, and because it is a constant only the
+chosen one is elaborated — the other costs nothing and does not appear in timing. Reverting
+is that one line and a rebuild.
+
+> Worth recording: moving the memory did **not** fix cold boot, which failed four times in
+> five afterwards just as before. That result is what localised the real fault — see
+> [the handshake gotcha](gotchas.md#the-handshake-cannot-govern-the-handshake). Swapping a
+> component wholesale and getting the identical failure rate is a measurement, not a
+> wasted week.
 
 The fixed disk's 4 KB read-modify-write buffer used to sit at `0x9E000`, costing 8 KB
 and forcing the BIOS to report 632 KB. It now lives in on-chip M9K at `0xE0000`, above
