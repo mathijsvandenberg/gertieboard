@@ -15,6 +15,7 @@ marketing: if something is listed as working it has been run on hardware.
 | **USB hard disk, `C:`** | Bulk-Only Transport and SCSI in the BIOS over the fabric host controller. `FDISK`, `FORMAT`, `CHKDSK` pass; 504 MB addressable — [storage](storage.md) |
 | **CGA text** | Modes 0–3, 80×25 and 40×25, 16 colours — [vga](modules/vga.md) |
 | **CGA graphics** | Modes 4, 5, 6 — 320×200×4 and 640×200×2 |
+| **EGA graphics** | Mode 0Dh, 320×200×16 — four 64 KB bit planes in SDRAM behind a scanline buffer, the latch/ALU read-modify-write path, the 16-of-64 palette, and CRTC start-address page flipping. Commander Keen 4 runs on it — [vga](modules/vga.md) |
 | **VGA output** | 640×480 @ 60 Hz on a real monitor, CGA doubled into it |
 | **PS/2 keyboard** | Translated to XT scancodes, with a hardware Ctrl+Alt+Del — [ps2_kbd_ppi](modules/ps2_kbd_ppi.md) |
 | **Floppy `A:`** | Served from a host over a 1 Mbaud serial link. Absent or muted, it reports NOT READY and the boot moves on — [fdc8272](modules/fdc8272.md) |
@@ -24,7 +25,8 @@ marketing: if something is listed as working it has been run on hardware.
 | **8237A DMA** | Channel 2 for floppy transfers, channel 0 refresh — [dma8237](modules/dma8237.md) |
 | **8255 PPI** | Keyboard port, speaker gate, DIP switches — [ppi8255](modules/ppi8255.md) |
 | **PC speaker** | Timer channel 2 gated through the PPI |
-| **640 KB RAM, one speed** | All 640 KB reported to DOS and all of it PSRAM, so a program's timing no longer depends on where DOS loaded it. On-chip M9K is spent on the BIOS image and the disk buffer instead — [memory map](memory-map.md) |
+| **640 KB RAM, one speed** | All 640 KB reported to DOS and all of it SDRAM, so a program's timing no longer depends on where DOS loaded it. On-chip M9K is spent on the BIOS image and the disk buffer instead — [memory map](memory-map.md) |
+| **Reliable cold boot** | Five power-ons in five. READY was arriving 14 ns behind the CPU clock against an 8 ns allowance, unmeasured because the pin was false-pathed; the whole off-chip CPU interface is now bounded from the µPD70108 datasheet — [gotchas](gotchas.md#the-handshake-cannot-govern-the-handshake) |
 | **Standalone FPGA config** | `.jic` in the DE0-Nano's EPCS16, no JTAG needed at power-on — [building](building.md) |
 | **USB host, full speed** | NRZI, bit stuffing, CRC5/CRC16, SOF, enumeration and bulk transfers, with event counters for diagnosis — [usb_host](modules/usb_host.md) |
 | **Keyboard, extended keys** | Arrows, Home/End/PgUp/PgDn, Insert/Delete, right Ctrl, AltGr, keypad Enter — [ps2_kbd_ppi](modules/ps2_kbd_ppi.md) |
@@ -136,38 +138,33 @@ Output stays PWM into the existing buzzer rather than a real DAC.
 
 ### EGA
 
-The awkward one, and the reason it is last — but **not** for the reason this section used
-to give.
+**Mode 0Dh works.** 320x200x16, four bit planes, with the latch/ALU read-modify-write
+path, the 16-of-64 palette and CRTC start-address page flipping. Commander Keen 4 runs on
+it, and `EGAVFY` verifies every one of the 65536 plane offsets.
 
-EGA's full 640×350×16 needs four bit planes of 64 KB each — **256 KB, or 2 Mbit** —
-against 608 Kbit of M9K on the whole device. That does not fit and never will, so the
-top mode has to be PSRAM-backed, which puts the scan-out fetch in direct competition with
-CPU accesses on one controller. The [read cache](modules/mem_hybrid.md) is tuned for CPU
-access patterns, not for a raster that streams linearly and must never miss a deadline.
+This section used to argue that the planes had to be on-chip, and that mode 0Dh fitted in
+M9K as four 8 KB planes. Both halves were overtaken. The planes live in **SDRAM**, behind
+a scanline buffer that decouples the raster from the memory, and they are **64 KB each,
+not 8** -- which is what mode 0Dh actually needs once page flipping is in play. Keen 4
+uses three pages, and with 8 KB planes and a 14-bit plane offset all three landed on the
+first one; widening the offset to 16 bits is what fixed it.
 
-**Mode 0Dh is a different question, and it fits.** 320×200×16 is four planes of 8 KB:
+So the memory argument that made this "the awkward one, and the reason it is last" no
+longer applies to anything. The SDRAM has 32 MB, the planes occupy words `0`-`0x1FFFF` of
+it, and conventional memory sits above them at word `0x20000`. Bandwidth is not tight
+either: a row fetch is about 17.6 us of every 63.5, and the arbiter gives the display
+strict priority over the CPU while still letting the CPU in between columns.
 
-| | blocks |
-|---|---|
-| free today | 26 |
-| mode 0Dh, four planes × 8 KB | 32 |
-| CGA's current 16 KB, if the two share the same memory | −16 |
-| **net** | **16 needed against 26 free** |
+What is left is mode plumbing rather than memory:
 
-That is the version worth building, because it is the one Keen 4 and King's Quest
-actually use, and it needs no PSRAM bandwidth argument at all. Modes 0Eh and 10h
-(64 KB and 112 KB) do not fit and can wait for the hard version.
+- **Modes 0Eh and 10h** -- 640x200x16 and 640x350x16. These need a 350-line CRTC mode and
+  the higher plane counts, but no new argument about where the pixels go.
+- **Write modes 2 and 3**, and the colour-compare read mode, which mode 0Dh software
+  mostly does not use.
 
-The sharing is the load-bearing assumption: CGA's 16 KB and EGA's 32 KB must be the same
-inferred RAM viewed two ways, not two allocations. If they end up separate, 48 blocks are
-needed against 26 and it does not fit.
-
-Beyond memory, and this is the actual work: the sequencer, graphics controller and
-attribute controller at `0x3C0`–`0x3CF`, and the **latch/ALU read-modify-write path**
-that makes planar writes fast. That write path — four latches loaded on every CPU read,
-then combined with write mode, bit mask, map mask and function select on every CPU write —
-is what EGA software depends on for speed, and it is more intricate than the memory.
-A 350-line CRTC mode is needed only for the modes that do not fit anyway.
+The load-bearing assumption in the old plan -- that CGA's 16 KB and EGA's planes had to be
+the same inferred RAM viewed two ways -- is gone with it. They are separate now, because
+the EGA planes are not on-chip at all.
 
 ### Publish the schematics
 

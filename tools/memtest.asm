@@ -65,8 +65,9 @@ start:
 .pc_l:
         mov  ax, bp
         xor  ax, di
-        cmp  ax, [es:di]
-        jne  .p_bad
+        mov  bx, [es:di]                ; capture what memory ACTUALLY held --
+        cmp  ax, bx                     ; re-reading it later can give a
+        jne  .p_bad                     ; different answer and hide the fault
         add  di, 2
         jnz  .pc_l
         add  bp, 0x1000
@@ -75,6 +76,13 @@ start:
         call pass
         jmp  short .t2
 .p_bad:
+        ; WHAT was wrong matters as much as where. One bit set says a single
+        ; RAM_SIO lane mis-captured; a whole byte holding a NEIGHBOUR's value
+        ; says the address or the cache offset went astray; 00 or FF says the
+        ; access never reached the part at all. Through memory, not the stack:
+        ; this file already carries a note about a mis-ordered push.
+        mov  [bad_exp], ax
+        mov  [bad_got], bx
         call fail
         mov  dx, msg_at
         call puts
@@ -83,6 +91,19 @@ start:
         mov  dx, msg_colon
         call puts
         mov  ax, di
+        call puthex16
+        mov  dx, msg_exp
+        call puts
+        mov  ax, [bad_exp]
+        call puthex16
+        mov  dx, msg_got
+        call puts
+        mov  ax, [bad_got]
+        call puthex16
+        mov  dx, msg_xor
+        call puts
+        mov  ax, [bad_exp]
+        xor  ax, [bad_got]
         call puthex16
         call crlf
 
@@ -314,6 +335,11 @@ msg_t3:      db '3 words across line boundaries : $'
 msg_t4:      db '4 BIOS checksum stable x8      : $'
 msg_at:      db '   first bad at $'
 msg_colon:   db ':$'
+msg_exp:     db '  exp $'
+msg_got:     db '  got $'
+msg_xor:     db '  diff $'
+bad_exp:     dw 0
+bad_got:     dw 0
 msg_sum:     db '   F-seg checksum = $'
 msg_sumdiff: db '   checksum CHANGED between passes, ref = $'
 msg_vs:      db '  <-- code fetch is unreliable$'

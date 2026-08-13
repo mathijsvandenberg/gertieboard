@@ -26,7 +26,7 @@
 ## Practical
 
 - **[Status and roadmap](status.md)** — what works today, and what is planned (USB
-  throughput, USB keyboard, AdLib/Sound Blaster, EGA) with the real obstacle for
+  throughput, USB keyboard, Sound Blaster, EGA modes 0Eh/10h) with the real obstacle for
   each.
 - **[Building](building.md)** — Quartus and assembler toolchains, the build
   scripts, and programming the FPGA and its configuration flash.
@@ -42,7 +42,7 @@
 |---|---|---|
 | [busdecode](modules/busdecode.md) | Bus decode, strobes, READY, DMA mux, boot ROM overlay | I/O `0x81` |
 | [mem_hybrid](modules/mem_hybrid.md) | Memory controller: on-chip M9K + QPI PSRAM | memory |
-| [vga](modules/vga.md) | CGA text and graphics | I/O `0x3D8`, `0x3D9`; mem `0xB8000` |
+| [vga](modules/vga.md) | CGA text and graphics, EGA mode 0Dh | I/O `0x3D8`, `0x3D9`, `0x3C0`-`0x3CF`; mem `0xB8000`, `0xA0000` |
 | [cga_status](modules/cga_status.md) | CGA status register (retrace/blanking) | I/O `0x3DA` |
 | [ppi8255](modules/ppi8255.md) | 8255 PPI: keyboard port, speaker, DIP switches | I/O `0x60`–`0x63` |
 | [timer8253](modules/timer8253.md) | 8253 PIT: system tick, speaker tone | I/O `0x40`–`0x43` |

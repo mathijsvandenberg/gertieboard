@@ -22,7 +22,7 @@ byte-identical to the P3105 one (MD5 `59bf05a0c207efcb2981f1c9c6eb21e1`).
 
 | Row | Content |
 |---|---|
-| 0 | `Philips ROM BIOS Version 1.00` |
+| 0 | `Philips ROM BIOS Version 1.10` |
 | 1 | `Gertieboard BIOS Retirement Edition` |
 | 2 | `2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)` |
 | 4 | `                     Total  Base Extra` |

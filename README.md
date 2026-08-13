@@ -46,6 +46,9 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
   Bulk-Only Transport and SCSI stack in the BIOS. `FDISK`, `FORMAT` and `CHKDSK`
   all pass; 504 MB addressable
 - **CGA** 80×25 colour text plus graphics modes 4, 5 and 6, output as 640×480 VGA
+- **EGA** mode 0Dh, 320×200×16 — four 64 KB bit planes in SDRAM, with the latch/ALU
+  read-modify-write path, the 16-of-64 palette, and CRTC start-address page flipping.
+  Commander Keen 4 runs on it
 - **PS/2 keyboard** with extended keys, AltGr, and a hardware Ctrl+Alt+Del that no
   software can bypass
 - **Two floppy drives**: `A:` served over serial from a host loader, `B:` a
@@ -60,7 +63,7 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
 | **USB throughput** | ~85 KB/s today, and the bottleneck is the CPU's byte-at-a-time copy, not the wire. Memory-mapping the packet buffer into M9K makes it a `rep movsb` |
 | **USB keyboard** | The SIE exists now, so mostly a matter of low-speed support — most keyboards are 1.5 Mbps |
 | **AdLib / Sound Blaster** | The DMA controller and PIC are already there and proven; an OPL2 at `0x388` is the self-contained first step |
-| **EGA** | Wants 256 KB of planar video memory, four times the on-chip RAM this device has — so it has to be PSRAM-backed |
+| **EGA modes 0Eh and 10h** | Mode 0Dh works. The higher modes need 64 KB and 112 KB of planar memory and a 350-line CRTC; the planes are in SDRAM now, so the memory argument is settled and what remains is the mode plumbing |
 
 Full detail, including why each item is hard and what it needs, is in
 **[Status and roadmap](docs/status.md)**.

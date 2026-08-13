@@ -28,6 +28,11 @@
 ;   4 Read(128 sec) issued  5 first data byte         6 all 64 KB received
 ;   7 about to disable overlay + jump to loaded BIOS
 ;   A no serial host, falling back to flash   B 64 KB read from flash
+;   C first 512-byte block read from flash    C0 flash never dropped BUSY --
+;                             halted, 4 long beeps. Resting on A means the
+;                             flash never answered; C means it stalled part way
+;   E2 main memory verified   E1/E3/E4 bad: then count, first value,
+;                             differing bits, then E0 to mark the round
 ;   EF no BIOS -- halted, beeping
 ;
 ; Assemble:  nasm -f bin bootldr_64k.asm -o bootldr.bin
@@ -58,6 +63,16 @@ POST       equ 0x80
         out     POST, al
 %endmacro
 
+; About 1.5 s, using only BP and CX -- no stack, so the memory probe can
+; report its findings even when the stack is the thing that does not work.
+%macro PWAIT 0
+        mov     bp, 12
+%%o:    xor     cx, cx
+%%i:    loop    %%i
+        dec     bp
+        jnz     %%o
+%endmacro
+
 ; ---------------------------------------------------------------------------
 start:
         cli
@@ -68,40 +83,104 @@ start:
         MARK    1
 
 ; ---------------------------------------------------------------------------
-;  PROVE MAIN MEMORY BEFORE ANY `call` DEPENDS ON IT.
+;  PROVE MAIN MEMORY BEFORE ANY `call` DEPENDS ON IT -- AND SAY HOW BADLY.
 ;
-;  0x7C00 is PSRAM, not M9K -- memmap.vhd made conventional memory uniform, and
-;  the comment above said "M9K low RAM" for a long time after that stopped being
-;  true. So the FIRST instruction that touches main memory is the `call fdc_wr`
-;  below, pushing a return address, and if the PSRAM is not up that call hangs
-;  with nothing driving READY. The machine stops with the 7-seg showing 02 and
-;  no way to tell whether the FDC or the memory was at fault -- and a timeout in
-;  the FDC routines cannot help, because the CPU never gets far enough to run
-;  one.
+;  0x7C00 is PSRAM, not the "M9K low RAM" the comment above claimed for a long
+;  time after memmap made conventional memory uniform. So the first instruction
+;  to touch main memory is the `call fdc_wr` below, pushing a return address,
+;  and if the PSRAM is not up that call hangs with nothing driving READY. The
+;  machine stopped on 02 with no way to tell the FDC from the memory, and an
+;  FDC timeout cannot help because the CPU never reaches one.
 ;
-;  This costs a dozen bytes and answers it directly, using NO stack:
+;  The first version of this answered only "wrong data", which turned out to
+;  cover three completely different faults and sent the search the wrong way
+;  more than once. It now writes 256 bytes and reports HOW MANY came back
+;  wrong, because that is the number that separates them:
 ;
-;      stuck on 01  the write itself never completed -- nothing claimed the
-;                   address, so main memory is not answering at all
-;      E1           memory answers but returns the wrong data: the PSRAM is
-;                   responding without being correctly in QPI mode
-;      E2           main memory works, and whatever fails next is not this
+;      E2            clean -- all 256 bytes match
+;      E1  n  v      1..15 wrong: the part IS in QPI and this is MARGINAL,
+;                    the same shape as one bad byte in 384 KB of MEMTEST
+;      E3  n  v      16..127 wrong
+;      E4  n  v      128+ wrong: the part never entered QPI at all
+;      stuck on 01   the write itself never completed -- nothing claims the
+;                    address, so main memory is not answering
+;
+;  n is the count (saturating at 255) and v is the FIRST wrong value read.
+;  A v of 00 or FF says the bus returned nothing; a v equal to a NEIGHBOURING
+;  byte's pattern says the address went astray; anything else is real data
+;  corruption. The pattern is offset XOR 0x5A, so a wrong address shows up as
+;  a wrong value rather than as a coincidence.
+;
+;  The sequence repeats forever with a blank between rounds, so it can be read
+;  at leisure. NO STACK is used anywhere here -- not for the test and not for
+;  the reporting -- because the stack is the thing under test and a CALL would
+;  hang instead of telling you why.
 ; ---------------------------------------------------------------------------
         xor     ax, ax
         mov     ds, ax
-        mov     word [0x7BFE], 0x55AA   ; hangs here if nothing drives READY
-        mov     word [0x7BFC], 0xC33C   ; a second cell, so a stuck bus that
-                                        ; reads back what it last saw is caught
-        mov     bx, [0x7BFE]
-        cmp     bx, 0x55AA
-        jne     .mem_bad
-        mov     bx, [0x7BFC]
-        cmp     bx, 0xC33C
-        je      .mem_ok
-.mem_bad:
-        mov     al, 0xE1
+
+        mov     di, 0x7000              ; clear of the stack at 0x7C00
+        xor     bx, bx
+        mov     cx, 256
+.pw:    mov     al, bl
+        xor     al, 0x5A
+        mov     [di], al                ; hangs here if nothing drives READY
+        inc     di
+        inc     bl
+        loop    .pw
+
+        mov     di, 0x7000
+        xor     bx, bx                  ; BL = index, BH = failure count
+        xor     dx, dx                  ; DL = first value read back wrong
+        xor     si, si                  ; SI = OR of every difference
+        mov     cx, 256
+.pv:    mov     al, bl
+        xor     al, 0x5A
+        mov     ah, [di]
+        cmp     al, ah
+        je      .pvn
+        or      bh, bh
+        jnz     .pv1
+        mov     dl, ah                  ; keep only the FIRST one
+.pv1:   xor     al, ah                  ; which BITS differ, ORed over
+        mov     ah, 0                   ; every failure: 0F or F0 means
+        or      si, ax                  ; ONE nibble, i.e. one SIO lane
+        inc     bh
+        jnz     .pvn
+        dec     bh                      ; saturate rather than wrap to zero
+.pvn:   inc     di
+        inc     bl
+        loop    .pv
+
+        or      bh, bh
+        jz      .mem_ok
+
+        mov     al, 0xE1                ; pick the severity code
+        cmp     bh, 16
+        jb      .prep
+        mov     al, 0xE3
+        cmp     bh, 128
+        jb      .prep
+        mov     al, 0xE4
+.prep:
+        mov     dh, al                  ; DH = code, BH = count, DL = value
+.pshow:
+        mov     al, dh
         out     0x80, al
-        jmp     $
+        PWAIT
+        mov     al, bh
+        out     0x80, al
+        PWAIT
+        mov     al, dl
+        out     0x80, al
+        PWAIT
+        mov     ax, si                  ; which bits ever differed
+        out     0x80, al
+        PWAIT
+        mov     al, 0xE0                ; round separator -- NOT 00,
+        out     0x80, al                ; or a value of 00 is invisible
+        PWAIT
+        jmp     .pshow
 .mem_ok:
         mov     al, 0xE2
         out     0x80, al
@@ -248,9 +327,25 @@ spi_x:
         ; instructions in between. Make the gap explicit rather than accidental.
         jmp     short $+2
         jmp     short $+2
+        ; BOUNDED. This wait had no way out, and it is the only unbounded loop
+        ; on the flash path -- so a flash that never dropped BUSY left the
+        ; machine resting on the 0A marker for ever, saying nothing about why.
+        ; That is exactly how four cold boots in five presented, and it is the
+        ; same shape as the FDC waits that were bounded on this file already.
+        ;
+        ; A byte takes 8 SCK periods = 16 bus clocks, about 3 us at 5 MHz; this
+        ; loop is roughly 30 clocks, so 4096 turns is some 25 ms -- four orders
+        ; of magnitude past the answer, and still finite.
+        push    bx
+        mov     bx, 4096
 .w:     in      al, SPI_STAT
         test    al, 0x80
+        jz      .got
+        dec     bx
         jnz     .w
+        pop     bx
+        jmp     spi_dead
+.got:   pop     bx
         in      al, SPI_DATA
         ret
 
@@ -273,6 +368,37 @@ spi_x:
 ; four command bytes per sector, about 1.6 ms over the whole image.
 flash_load:
         MARK    0xA
+
+; ---------------------------------------------------------------------------
+;  PUT THE FDC BACK THE WAY WE FOUND IT BEFORE HANDING OVER.
+;
+;  Reaching here means the serial attempt was abandoned part way: a Read Data
+;  for 128 sectors was issued and then walked away from, so the controller is
+;  still waiting to stream 64 KB at whoever asks next.
+;
+;  The BIOS does not know that. Its fdc_arm resets the controller only when the
+;  STICKY TIMEOUT FLAG at BDA 0xB6 is set -- and that flag is the BIOS's, set by
+;  the BIOS's own bounded waits. Nothing sets it on this path, because the
+;  loader is not the BIOS and runs before the BDA means anything. So POST comes
+;  up believing the controller is idle, its A: probe walks into a command still
+;  in progress, and it reports NO DRIVE A. There is then nothing to boot from,
+;  and -- the part that makes this so misleading -- the floppy works perfectly
+;  the moment DOS asks for it later, because by then a bounded wait HAS timed
+;  out, the flag IS set, and fdc_arm does the reset that should have happened
+;  at POST.
+;
+;  It costs six bytes to not leave that behind. Toggling DOR bit 2 low and back
+;  is the controller's own reset; the gap is two instructions, which is longer
+;  than fdc8272 needs to see the level.
+; ---------------------------------------------------------------------------
+        mov     dx, FDC_DOR
+        xor     al, al
+        out     dx, al              ; /RESET asserted -- abandon the command
+        jmp     short $+2
+        jmp     short $+2
+        mov     al, 0x04
+        out     dx, al              ; released: idle, ready for the BIOS
+
         mov     ax, 0xF000
         mov     es, ax
         xor     di, di
@@ -295,6 +421,13 @@ flash_load:
         loop    .fl
         mov     al, 1
         out     SPI_CTRL, al        ; /CS high
+        ; Mark the FIRST block, so a stall inside the load can be told apart
+        ; from one before it ever got a byte. Resting on 0A means the flash
+        ; never answered at all; 0C means it answered and then stopped.
+        cmp     di, 512
+        jne     .fl_next
+        MARK    0xC
+.fl_next:
         test    di, di              ; DI wraps to 0 after exactly 64 KB
         jnz     .fl_cmd
         MARK    0xB
@@ -306,6 +439,17 @@ flash_load:
         ; shadow.
         mov     dl, 2               ; flash boot -> two short beeps
         jmp     start.switch        ; shared hand-off path
+
+; --- the flash never answered ----------------------------------------------
+; Four long beeps and C0, for ever. Reaching here means spi_x asked for a byte
+; and BUSY never cleared -- which, before the bound above, was an infinite loop
+; that presented as a machine sitting silently on the 0A marker.
+spi_dead:
+        MARK    0xC0
+        mov     dl, 4
+        mov     bx, 4               ; long
+        call    beep_n
+        jmp     spi_dead
 
 ; --- nothing to hand off to ------------------------------------------------
 ; Three long beeps and the computed sum, over and over. A machine that cannot
