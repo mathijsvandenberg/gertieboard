@@ -4685,6 +4685,35 @@ u_ctl:
     # now. CS is PSRAM here (the BIOS lives in RAM), so it is writable scratch.
     mov al, [si]
     mov byte ptr cs:[u_reqtype], al
+    # ---- how big is this device's control endpoint? ----
+    # The data stage ends on a packet SHORTER THAN THE ENDPOINT'S max packet
+    # size. That size is bMaxPacketSize0, published in BDA 0xC7 at stage 3, and
+    # it is 8 on plenty of devices -- every Logitech Unifying receiver, for one.
+    # Copied per call rather than kept here, so 0xC7 stays the single authority.
+    #
+    # DS is the CALLER'S segment at this point (the setup packet lives in the
+    # code segment, so callers set DS=CS), which is why the BDA needs an
+    # explicit segment load rather than a bare [0xC7].
+    push ax
+    push ds
+    mov ax, BDA
+    mov ds, ax
+    mov al, [0xC7]
+    pop ds
+    # Clamp. 8 is the size every device must support and the value to assume
+    # before the device has told us anything; above 64 cannot be right because
+    # the packet buffer is 64 bytes, and a garbage value there would end every
+    # data stage on the first packet.
+    cmp al, 8
+    jae .uc_szhi
+    mov al, 8
+.uc_szhi:
+    cmp al, U_BUFSZ
+    jbe .uc_szok
+    mov al, U_BUFSZ
+.uc_szok:
+    mov byte ptr cs:[u_ep0sz], al
+    pop ax
     # ---- SETUP stage, always DATA0 ----
     call u_setptr
     mov cx, 8
@@ -4728,7 +4757,17 @@ u_ctl:
     inc bx
     loop .uc_copy
     pop cx
-    cmp cx, 64                   # a short packet ends the stage
+    # A SHORT PACKET ENDS THE STAGE -- shorter than THIS ENDPOINT'S max packet
+    # size, not shorter than 64. This used to read "cmp cx, 64", which is right
+    # for every mass-storage stick (they all use a 64-byte EP0) and wrong for
+    # anything smaller: with an 8-byte EP0 the FIRST FULL packet already looks
+    # short, so the stage ends after 8 bytes and returns CF clear. An 18-byte
+    # device descriptor then arrives as 8 valid bytes and 10 bytes of stale
+    # buffer, reported as success -- and since byte 0 is bLength, the header of
+    # every descriptor reads correctly and only the tail is wrong.
+    mov al, byte ptr cs:[u_ep0sz]
+    xor ah, ah
+    cmp cx, ax
     jb .uc_status
     cmp bx, bp
     jb .uc_data
@@ -5902,6 +5941,13 @@ u_enum:
     mov byte ptr [0xC0], 1
     mov byte ptr [0xD0], 0
     mov byte ptr [0xD1], 0
+    # 8 is what every device must support on EP0 and the only safe assumption
+    # before the device has been asked. This is RAM, so without the explicit
+    # store a warm boot would inherit the PREVIOUS device's size -- 64 from a
+    # stick, which is exactly the wrong value to carry into enumerating a
+    # dongle, and it would fail as a truncated descriptor rather than as a
+    # missing one. u_ctl clamps too; both, because neither is the whole story.
+    mov byte ptr [0xC7], 8
 
     # The PLL lock is tested BEFORE the build signature, deliberately: the
     # diagnostic registers live in the 48 MHz domain, so with the PLL dead
@@ -6272,6 +6318,14 @@ u_rq_setcfg:  .byte 0x00,0x09,0x01,0x00,0x00,0x00,0x00,0x00
 u_rq_botrst:  .byte 0x21,0xFF,0x00,0x00,0x00,0x00,0x00,0x00
 ##  CLEAR_FEATURE(ENDPOINT_HALT); byte 4 is patched with the endpoint address.
 u_rq_clrhalt: .byte 0x02,0x01,0x00,0x00,0x00,0x00,0x00,0x00
+
+##  EP0 max packet for the control transfer in flight, copied from BDA 0xC7 by
+##  u_ctl. It belongs next to u_reqtype and is DELIBERATELY not there: mkbios.sh
+##  verifies u_cdb_sense, u_cdb_cap and u_rq_dev8 at fixed offsets into this
+##  section, and those offsets are set by whatever is declared above them. One
+##  byte inserted before the tables moves all three and fails the build. Adding
+##  scratch AFTER them costs nothing and keeps that check meaning what it says.
+u_ep0sz:    .byte 8
 
 .text
 
