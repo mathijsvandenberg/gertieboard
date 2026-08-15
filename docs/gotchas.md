@@ -289,7 +289,7 @@ must already be clear.
 ## A constant that is really a property of the device
 
 A USB control data stage ends when a packet arrives that is **shorter than the
-endpoint's max packet size**. The BIOS's `u_ctl` writes that test as `cmp cx, 64`.
+endpoint's max packet size**. The BIOS's `u_ctl` wrote that test as `cmp cx, 64`.
 
 That is right for every device this board has ever talked to, because mass-storage
 sticks use a 64-byte control endpoint — and wrong for anything with a smaller one. A
@@ -314,6 +314,12 @@ against a reconstructed `046D:C52B` descriptor set:
 **When a value is read from the device during enumeration, using it is not optional —
 and a literal that happens to match every device you own is a constant waiting to
 expire.**
+
+The sharpest detail: `bMaxPacketSize0` was *already being stored* in BDA `0xC7` at
+enumeration stage 3, and nothing ever read it. The right value was present the whole
+time and the constant was used anyway. `u_ctl` now copies `0xC7` per call and tests
+against that, and `u_enum` resets `0xC7` to 8 before stage 3 — that byte is RAM, so a
+warm boot would otherwise inherit the *previous* device's size.
 
 ---
 

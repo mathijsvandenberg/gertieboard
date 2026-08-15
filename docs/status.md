@@ -119,10 +119,11 @@ layout off the device.
 Low speed is still wanted eventually — it is what a *generic* wired mouse or keyboard
 needs — but it is no longer what stands between this board and a working pointer.
 
-Two things to know before writing that code. Its `bMaxPacketSize0` is **8**, and the
-BIOS's `u_ctl` ends a control data stage on a packet shorter than 64, so it would
-truncate every descriptor read from this device and report success; see
-[gotchas](gotchas.md). And there is no interrupt from `usb_host` yet, so a poll driven
+Two things to know before writing that code. Its `bMaxPacketSize0` is **8**, which used
+to truncate every descriptor read from it — `u_ctl` now takes the size from the device
+instead of assuming 64, but `u_rq_cfg` still asks for only `U_BUFSZ` = 64 bytes of
+configuration descriptor and this one is 84, so HID awareness needs a larger buffer or a
+two-stage read; see [gotchas](gotchas.md). And there is no interrupt from `usb_host` yet, so a poll driven
 from `INT 08h` runs at 18.2 Hz — 55 ms per sample, which is visibly steppy for a
 pointer. `IRQ2` is free ([`int8259`](modules/int8259.md) has the port and the top level
 ties it low) and is the eventual answer.
