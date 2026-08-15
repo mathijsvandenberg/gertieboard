@@ -225,6 +225,73 @@ is impossible, and that is the reading that means the pulldowns or the wiring ar
 > "the SETUP stage was ACKed but the IN data stage failed" point at completely different
 > halves of the problem.
 
+### USBENUM — what is plugged in, and how to drive it
+
+`USBTEST` proves the controller works and reads a device descriptor. `USBENUM` goes one
+step further and walks the **configuration** descriptor, which is what you need before
+writing a driver: how many interfaces the device has, what class each one is, and which
+endpoint to poll at what interval.
+
+```
+usbenum            enumerate port 1, the hybrid port
+usbenum 0          enumerate port 0 — this resets the fixed disk out from
+                   under DOS, so do not run it with a mounted C:
+```
+
+Expected with a Logitech Unifying receiver on port 1:
+
+```
+port 1 at 0xA8
+ engine responds   ok
+ 48 MHz locked     ok
+ device present    ok
+   full speed (12 Mbps)
+ bus reset         ok
+ SOF running       ok
+ descriptor @ 0    ok
+   EP0 max packet  8
+ SET_ADDRESS(1)    ok
+ device descriptor ok
+device:
+  VID 046D  PID C52B  class 00/00/00  configs 1
+  device class 0 = composite; the interfaces carry the classes
+ configuration     ok
+configuration: 3 interface(s), total length 0x0054
+  iface 0 alt 0 class 03/01/01  (HID boot keyboard)
+    ep 81 IN  interrupt max 0x0008 every 8 ms
+  iface 1 alt 0 class 03/01/02  (HID boot mouse)
+    ep 82 IN  interrupt max 0x0008 every 2 ms
+  iface 2 alt 0 class 03/00/00  (HID, not boot protocol)
+    ep 83 IN  interrupt max 0x0020 every 2 ms
+```
+
+Three things here are worth more than they look.
+
+**It asks the engine which window it decodes** (diagnostic index `0x0E`) and refuses to
+continue if that disagrees with the window it is driving. With two engines answering at
+two addresses, a tool pointed at the wrong one reads plausible registers and draws
+confident wrong conclusions — the same class of mistake the `0xA5` build signature
+exists to prevent, one level up.
+
+**The data stage ends on a packet shorter than the ENDPOINT's max packet size**, not
+shorter than 64. `bMaxPacketSize0` is 8 on plenty of devices, and on those a hardcoded
+64 makes the *first full packet* look short: an 18-byte device descriptor comes back
+with 8 valid bytes and 10 bytes of stale buffer, and the transfer reports **success**.
+
+**The descriptor chain is a linked list by length, not a fixed layout.** Each entry
+starts with `bLength`/`bDescriptorType`, and unknown types have to be skipped by their
+own length. A HID descriptor sits between every interface and its endpoints, so a
+fixed-stride walk finds the interfaces and then reads the HID descriptor where it
+expected an endpoint.
+
+**Delays come from the BIOS tick at `40:6C`**, not a spin loop. The bus clock here is
+programmable from 5 to 16.667 MHz, so a calibrated spin is wrong at seven of the eight
+steps, and the 10 ms USB bus reset is a minimum rather than a suggestion. One tick is
+55 ms at every speed step, which over-satisfies it — the safe direction to be wrong in.
+
+A low-speed device is detected, named, and then declined: the SIE is full-speed only,
+so the tool says so plainly instead of letting it fail as a timeout several stages later.
+
 ### USBSOAK — sustained write / read / verify
 
 The instrument that found the bit-stuffing bug. Every failure in the storage stack looks
