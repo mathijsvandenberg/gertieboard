@@ -236,7 +236,24 @@ endpoint to poll at what interval.
 usbenum            enumerate port 1, the hybrid port
 usbenum 0          enumerate port 0 — this resets the fixed disk out from
                    under DOS, so do not run it with a mounted C:
+usbenum 1 L        report the line state and stop, no device needed
 ```
+
+**Run `usbenum 1 L` with nothing plugged in first**, especially after any work on the
+port. It is the only measurement of whether the pulldowns are doing their job, and only
+four readings are possible:
+
+| `D+/D-` | Meaning |
+|---|---|
+| `00` | bare bus, pulldowns holding `SE0` — what you want with nothing attached |
+| `01` | `D+` high: a full-speed device is attached |
+| `02` | `D-` high: a low-speed device is attached |
+| `03` | impossible on a real bus — **the pins are floating** |
+
+`03` with nothing attached means a missing, open or badly soldered pulldown. That matters
+more than it looks: a floating port does not fail cleanly, it *half* enumerates, and
+every reading taken afterwards is noise that happens to resemble data. Anything from 15K
+to 22K reads identically here — see [hardware](hardware.md#usb).
 
 Expected with a Logitech Unifying receiver on port 1:
 

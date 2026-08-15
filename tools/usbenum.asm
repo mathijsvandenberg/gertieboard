@@ -12,6 +12,11 @@
 ;          usbenum 0      enumerate port 0 (normally the fixed disk -- this
 ;                         will reset it out from under DOS, so do not run it
 ;                         with a mounted C:)
+;          usbenum 1 L    report the line state and stop. Run this with
+;                         NOTHING plugged in: it is the only check on the
+;                         port's pulldowns, which have to hold both lines low
+;                         on a bare bus. A floating port half-enumerates,
+;                         which is much worse to debug than one that fails.
 ;
 ;  WHY THE PORT IS A RUNTIME ARGUMENT
 ;  Each USB port now has its own engine at its own I/O window (0xE8 for port 0,
@@ -114,10 +119,17 @@ start:
         jne  .s1
         mov  word [ubase], BASE_P0
         mov  byte [portno], '0'
-        jmp  short .parsed
+        jmp  short .snext
 .s1:
         cmp  al, '1'
-        je   .parsed
+        je   .snext
+        cmp  al, 'L'
+        je   .sline
+        cmp  al, 'l'
+        jne  .snext
+.sline:
+        mov  byte [lineonly], 1
+.snext:
         loop .scan
 .parsed:
         mov  dx, msg_port
@@ -186,7 +198,42 @@ start:
 .t2_ok:
         call pass
 
+; ---------------- L mode: report the line and stop --------------------------
+;  Everything below here needs a device. This does not, and that is the point:
+;  with NOTHING plugged in, the line state is the only measurement of whether
+;  the port's pulldowns are doing their job. Both lines must read low. A port
+;  with a missing, wrong or badly soldered pulldown floats, and every reading
+;  taken after that is noise that happens to look like data -- which is far
+;  worse than a clean failure, because enumeration will sometimes half work.
+        cmp  byte [lineonly], 0
+        je   .no_lineonly
+        SETDX O_CTRL
+        in   al, dx
+        mov  [linest], al
+        call show_line
+        mov  al, [linest]
+        and  al, L_DP | L_DM
+        jnz  .lo_dev
+        mov  dx, msg_pd_ok
+        call puts
+        jmp  quit
+.lo_dev:
+        cmp  al, L_DP | L_DM
+        jne  .lo_att
+        ; Both lines high at once is not a bus state any device can produce.
+        mov  dx, msg_pd_bad
+        call puts
+        jmp  quit
+.lo_att:
+        mov  dx, msg_pd_dev
+        call puts
+        jmp  quit
+.no_lineonly:
+
 ; ---------------- 3: is a device attached, and at what speed? ---------------
+;  The raw line byte is printed whatever the outcome. It is the only direct
+;  reading of the port's electrical state, and with nothing plugged in it is
+;  also the only check on the pulldowns -- see the L mode below.
         mov  dx, msg_t3
         call puts
         SETDX O_CTRL
@@ -197,18 +244,21 @@ start:
         test al, L_LS
         jnz  .t3_ls
         call fail
+        call show_line
         mov  dx, msg_nodev
         call puts
         jmp  quit
 .t3_fs:
         mov  byte [isls], 0
         call pass
+        call show_line
         mov  dx, msg_fs
         call puts
         jmp  short .t3_done
 .t3_ls:
         mov  byte [isls], 1
         call pass
+        call show_line
         mov  dx, msg_ls
         call puts
         ; The engine is a full-speed SIE. A low-speed device idles in the
@@ -814,6 +864,42 @@ name_iface:
         call puts
         ret
 
+; show_line: the raw D+/D- reading and what it means. Only four values are
+;            possible and each says something different, so decode it rather
+;            than print a number and leave the reader to remember the table.
+show_line:
+        push ax
+        push dx
+        mov  dx, msg_line
+        call puts
+        mov  al, [linest]
+        and  al, L_DP | L_DM
+        call puthex
+        mov  dx, msg_sp
+        call puts
+        mov  al, [linest]
+        and  al, L_DP | L_DM
+        jnz  .sl_1
+        mov  dx, msg_line00
+        jmp  short .sl_say
+.sl_1:
+        cmp  al, L_DP
+        jne  .sl_2
+        mov  dx, msg_line01
+        jmp  short .sl_say
+.sl_2:
+        cmp  al, L_DM
+        jne  .sl_3
+        mov  dx, msg_line02
+        jmp  short .sl_say
+.sl_3:
+        mov  dx, msg_line03
+.sl_say:
+        call puts
+        pop  dx
+        pop  ax
+        ret
+
 ; show_status: print the raw status byte, which says what actually came back
 ;              rather than how this program classified it
 show_status:
@@ -938,10 +1024,11 @@ fail:
 ; ============================================================================
 CFGMAX  equ 256
 
-ubase   dw BASE_P1
-portno  db '1'
-linest  db 0
-isls    db 0
+ubase    dw BASE_P1
+portno   db '1'
+linest   db 0
+isls     db 0
+lineonly db 0
 ep0max  db 8
 reqtype db 0
 cfglen  dw 0
@@ -970,7 +1057,21 @@ msg_pass     db 'ok', 13, 10, '$'
 msg_fail     db 'FAILED', 13, 10, '$'
 msg_nosig    db '  build signature is not A5, read ', '$'
 msg_wrongwin db '  engine reports window ', '$'
-msg_nodev    db '  nothing attached (both lines low)', 13, 10, '$'
+msg_nodev    db '  nothing attached -- plug the device in and run again', 13, 10, '$'
+msg_sp       db ' ', '$'
+msg_line     db '  D+/D- = ', '$'
+msg_line00   db 'both low: bare bus, pulldowns holding SE0', 13, 10, '$'
+msg_line01   db 'D+ high: full-speed device attached', 13, 10, '$'
+msg_line02   db 'D- high: LOW-speed device attached', 13, 10, '$'
+msg_line03   db 'BOTH HIGH -- impossible, see below', 13, 10, '$'
+msg_pd_ok    db '  pulldowns OK on this port: nothing attached and both lines', 13, 10
+             db '  are held low. Anything from 15K to 22K reads the same here.', 13, 10, '$'
+msg_pd_bad   db '  Both lines cannot be high at once on a real bus. That reading', 13, 10
+             db '  means the pins are FLOATING -- a missing, open or badly', 13, 10
+             db '  soldered pulldown on D+ and D-. Fix that before trusting any', 13, 10
+             db '  other USB result: a floating port half-enumerates.', 13, 10, '$'
+msg_pd_dev   db '  A device is attached, so this says nothing about the', 13, 10
+             db '  pulldowns. Unplug everything and run "usbenum 1 L" again.', 13, 10, '$'
 msg_gone     db '  device vanished across the reset', 13, 10, '$'
 msg_fs       db '  full speed (12 Mbps)', 13, 10, '$'
 msg_ls       db '  LOW speed (1.5 Mbps)', 13, 10, '$'
