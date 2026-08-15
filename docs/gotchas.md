@@ -286,6 +286,37 @@ must already be clear.
 
 ---
 
+## A constant that is really a property of the device
+
+A USB control data stage ends when a packet arrives that is **shorter than the
+endpoint's max packet size**. The BIOS's `u_ctl` writes that test as `cmp cx, 64`.
+
+That is right for every device this board has ever talked to, because mass-storage
+sticks use a 64-byte control endpoint — and wrong for anything with a smaller one. A
+Logitech Unifying receiver reports `bMaxPacketSize0 = 8`, so on that device the **first
+full packet already looks short**: the data stage ends after 8 bytes and returns success.
+An 18-byte device descriptor comes back as 8 valid bytes followed by 10 bytes of
+whatever was in the buffer, with `CF` clear.
+
+Nothing about that failure points at the short-packet test. The transfer succeeded, the
+first eight bytes are correct, and `bLength` in byte 0 is right — so the *header* of
+every descriptor reads fine and only the tail is garbage.
+
+The number 64 was never a constant of the protocol. It was a property of the one device
+in front of us, promoted to a constant because it never varied. Modelling the two rules
+against a reconstructed `046D:C52B` descriptor set:
+
+| short-packet test | device descriptor | configuration descriptor |
+|---|---|---|
+| `64` | 8 of 18 bytes | 8 of 84 bytes |
+| `bMaxPacketSize0` | 18 of 18 | 84 of 84 |
+
+**When a value is read from the device during enumeration, using it is not optional —
+and a literal that happens to match every device you own is a constant waiting to
+expire.**
+
+---
+
 ## Timing races in I/O sequences
 
 The [`flash`](modules/flash.md) SPI engine latches its transmit on the **falling edge**
