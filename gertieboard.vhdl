@@ -774,7 +774,20 @@ BEGIN
       locked               => n_usb_locked
     );
 
+  -- ONE ENGINE PER PORT. usb_host used to drive both pin pairs from a single
+  -- SIE selected by a CTRL bit, which made the fixed disk on port 0 and any
+  -- device on port 1 share one set of registers -- a poll of one could repoint
+  -- the pins in the middle of a transaction on the other. Two instances cost
+  -- ~900 LEs on a part with roughly three quarters of its logic free, and they
+  -- cannot interfere by construction.
+  --
+  -- The instance label `usb1` is kept for the PORT 0 engine even though `usb2`
+  -- below serves port 1. Labels here are the original schematic names and are
+  -- deliberately never renamed; the off-by-one is in the name only.
   usb1 : ENTITY work.usb_host
+    GENERIC MAP (
+      IO_BASE              => x"00E8"    -- port 0: drive C:, the fixed disk
+    )
     PORT MAP (
       CLK                  => n_cpuclk,
       CLK48                => n_clk48,
@@ -785,10 +798,29 @@ BEGIN
       RD                   => n_io_rd,
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
-      USB0_DP              => USB0_DP,
-      USB0_DM              => USB0_DM,
-      USB1_DP              => USB1_DP,
-      USB1_DM              => USB1_DM
+      USB_DP               => USB0_DP,
+      USB_DM               => USB0_DM
+    );
+
+  -- Port 1: the hybrid port -- HID, or a USB floppy, or whatever is plugged in.
+  -- 0xA8..0xAF is clear of everything this board decodes and, unlike the
+  -- adjacent 0xF0..0xFF, is not the 8087 window that real software probes.
+  usb2 : ENTITY work.usb_host
+    GENERIC MAP (
+      IO_BASE              => x"00A8"
+    )
+    PORT MAP (
+      CLK                  => n_cpuclk,
+      CLK48                => n_clk48,
+      LOCKED               => n_usb_locked,
+      RESET                => n_rst_out,
+      DATAIN               => n_cpu_wdata,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      USB_DP               => USB1_DP,
+      USB_DM               => USB1_DM
     );
 
   inst3 : ENTITY work.ps2_kbd_ppi
@@ -902,6 +934,6 @@ BEGIN
   DBG(7) <= '0';
   DBG(4) <= '0';
   DBG(5) <= '0';
-  -- USB0_DP/DM and USB1_DP/DM are driven by usb_host now.
+  -- USB0_DP/DM and USB1_DP/DM are driven by their own usb_host instance now.
 
 END structural;

@@ -79,8 +79,9 @@ display cannot distinguish "halted here" from "looping here". See
 
 Both ports are raw `D+`/`D-` on FPGA pins (`USB0_DP`/`USB0_DM`, `USB1_*`), with the
 host-side 15K pulldowns on the board and no host-controller chip in between — so the
-serial interface engine lives in fabric. [`usb_host`](modules/usb_host.md) drives them
-and enumerates a full-speed device.
+serial interface engine lives in fabric. Each port gets **its own**
+[`usb_host`](modules/usb_host.md) instance, so port 0 (the fixed disk) and port 1
+cannot interfere: `usb1` at `0xE8`–`0xEF`, `usb2` at `0xA8`–`0xAF`.
 
 > **No series resistors** on D+/D-. USB wants ~22-33 ohm of source termination and there
 > is none, so the lines are driven straight from 3.3 V LVTTL pins. It works on the bench;

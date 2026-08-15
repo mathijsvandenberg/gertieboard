@@ -1,12 +1,22 @@
 # usb_host
 
-Source: [`usb_host.vhd`](../../usb_host.vhd) · Instance `usb1` · Clocks `c0` (8.33 MHz CPU
-port) and `pll48` (48 MHz USB) · 1962 logic elements
+Source: [`usb_host.vhd`](../../usb_host.vhd) · Instances `usb1` (port 0, `0xE8`) and
+`usb2` (port 1, `0xA8`) · Clocks `c0` (8.33 MHz CPU port) and `pll48` (48 MHz USB) ·
+~900 logic elements each
 
 A **USB 1.1 full-speed host controller** with the serial interface engine in fabric.
 Both USB ports on the top board are raw D+/D− straight to FPGA pins with the 15K
 pulldowns a host is supposed to have and no host-controller chip in between, so there
 was nothing else for it.
+
+**One instance drives one port.** It used to drive both, muxed by a port-select bit in
+CTRL, which meant the fixed disk on port 0 and anything on port 1 shared a single
+engine — a poll of one could repoint the pins in the middle of a transaction on the
+other. The top level now instantiates the entity twice, at two I/O windows chosen by
+the `IO_BASE` generic, so the two ports cannot interfere by construction. Measured cost
+of the second engine: **+826 logic elements** and **+1024 memory bits** (the second
+pair of 64-byte packet buffers), with the binding `c3` setup slack unchanged at
+0.249 ns.
 
 Verified on hardware: enumerates a USB mass-storage device, reads its device
 descriptor, assigns it an address and reads the descriptor again at the new address.
@@ -40,11 +50,22 @@ this is the difference between an evening and a week. See [`tools/usbtest.asm`](
 | `RD` | IN | 1 | I/O read strobe, active low |
 | `WR` | IN | 1 | I/O write strobe, active low |
 | `DATAOUT` | INOUT | 8 | shared peripheral read bus |
-| `USB0_DP` / `USB0_DM` | INOUT | 1 each | port 0 differential pair |
-| `USB1_DP` / `USB1_DM` | INOUT | 1 each | port 1 differential pair |
+| `USB_DP` / `USB_DM` | INOUT | 1 each | this instance's differential pair |
 
-Only the selected port is ever driven; the other stays high-Z so its pulldowns hold it
-at SE0.
+The pair is driven only while transmitting and stays high-Z otherwise, so the pulldowns
+hold it at SE0.
+
+## Generic
+
+| Generic | Default | Purpose |
+|---|---|---|
+| `IO_BASE` | `0x00E8` | base of this instance's 8-register window |
+
+`IO_BASE` **must be 8-byte aligned**: the decode compares `ADDR(15 DOWNTO 3)` and
+indexes with `ADDR(2 DOWNTO 0)`, so a misaligned base would silently answer at the
+wrong eight addresses rather than fail the build. The register table below is written
+with port 0's addresses because that is what the BIOS and every tool use literally; for
+port 1 substitute `0xA8`–`0xAF`.
 
 ## Registers
 
@@ -61,15 +82,22 @@ at SE0.
 | | R | **DATA** ← RX buffer, pointer auto-increments |
 | `0xED` | W | **PTR** set both buffer pointers |
 | | R | current TX pointer |
-| `0xEE` | W | **CTRL** — `[0]` port select `[1]` BUSRESET `[2]` SOFEN |
+| `0xEE` | W | **CTRL** — `[0]` reserved (was port select) `[1]` BUSRESET `[2]` SOFEN |
 | | R | **LINE** — `[0]` D+ `[1]` D− `[2]` FS device `[3]` LS device `[4]` SOF running `[5]` PLL locked |
-| `0xEF` | R | **FRAME** low 8 bits of the frame counter |
+| `0xEF` | W | **DIAG** select which counter the next read returns |
+| | R | **FRAME** low 8 bits of the frame counter (index `0x00`), or the selected counter |
 
 Operations: `1` = SETUP (token + DATA0 + handshake), `2` = IN (token + receive + ACK),
 `3` = OUT (token + DATAx + handshake), `5` = one SOF.
 
 **RXPID is the register to reach for when something is wrong.** It says what actually
 came back rather than how the status bits classified it.
+
+Two diagnostic indices are identity rather than measurement. `0x0F` reads back `0xA5`,
+the build signature, so software can refuse to blame USB when the bitstream is stale.
+`0x0E` reads back the low byte of `IO_BASE` — with two engines answering at two
+windows, a tool pointed at the wrong one reads plausible registers and draws confident
+wrong conclusions, so it can assert which port it is holding.
 
 ## Speed
 
