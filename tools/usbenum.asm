@@ -672,11 +672,18 @@ show_device:
         call puts
         mov  dx, msg_vid
         call puts
-        mov  ax, [devbuf+9]             ; idVendor, little endian
+        ; Device descriptor layout, and the two offsets that are easy to get
+        ; wrong: bLength 0, bDescriptorType 1, bcdUSB 2, class/sub/proto 4/5/6,
+        ; bMaxPacketSize0 7, idVendor 8, idProduct 10, bcdDevice 12.
+        ; Reading these one byte late does not look like a bug -- it prints a
+        ; plausible VID and PID built from the high half of one field and the
+        ; low half of the next. 046D:C52B came out as 2B04:11C5, where the 11
+        ; is the low byte of bcdDevice.
+        mov  ax, [devbuf+8]             ; idVendor, little endian
         call puthex16
         mov  dx, msg_pid
         call puts
-        mov  ax, [devbuf+11]            ; idProduct
+        mov  ax, [devbuf+10]            ; idProduct
         call puthex16
         mov  dx, msg_class
         call puts
