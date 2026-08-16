@@ -344,6 +344,40 @@ A device fresh out of reset wants frames on the bus before it is addressed.
 If enumeration fails it names the stage, the request, and the raw status and PID —
 STALL is a refusal, TIMEOUT is nobody home, and they point at opposite problems.
 
+### USBMSDRV — the INT 33h mouse driver
+
+The resident driver, so ordinary DOS software sees a mouse. Verified in *The Secret of
+Monkey Island* and *Arkanoid*.
+
+```
+usbmsdrv           install on the hybrid port
+usbmsdrv /u        not implemented — says so and exits
+```
+
+About 2 KB resident. Hooks `INT 33h` and `INT 0Ah`, enables the frame interrupt
+(`usb_host` CTRL bit 3), unmasks IRQ2 and services the mouse at **125 Hz**. Answers
+`INT 33h` functions 0 (reset), 1 (show), 2 (hide), 3 (position and buttons), 4 (set
+position) and 11 (motion counters).
+
+**It is on IRQ2 rather than the timer, and that is the whole design.** PIT channel 0 is
+reprogrammed by any game that wants its own tick rate, so a driver polling from
+`INT 08h` changes rate underneath itself or stops — on exactly the software anyone
+would want a mouse for. Monkey Island and Arkanoid are the test *because* they do this.
+
+Constraints a resident driver has that a demo does not, all of them load-bearing:
+
+- the ISR does no DOS calls and never blocks; NAK from an idle mouse is "no news"
+- `wait_done`'s budget is **1024** here against 65536 in the diagnostic tools — this
+  spins with interrupts disabled inside an interrupt handler, so a wedged engine would
+  hold the whole machine off for the length of that loop
+- vectors are hooked **before** the interrupt is enabled, or the first IRQ2 lands on
+  whatever was in the slot
+- EOI on every path out, including the re-entry guard
+- `INT 33h` speaks **virtual pixels**, 8 per text cell — reporting cells directly puts
+  every application's cursor in column 10
+- reading the motion counters **clears** them; leaving them accumulating makes callers
+  drift
+
 ### USBSOAK — sustained write / read / verify
 
 The instrument that found the bit-stuffing bug. Every failure in the storage stack looks

@@ -97,12 +97,19 @@ Writes still use the byte loop. `REP OUTSB` is the same one-line change, but wan
 [`USBSOAK`](tools.md#usbsoak--sustained-write--read--verify) pass on a scratch stick
 first, not on the disk with DOS installed on it.
 
-### USB input — the mouse works
+### USB input — the mouse works, in real software
 
-**A USB mouse moves a cursor on this machine.** `USBMOUSE.COM` enumerates a Logitech
-Unifying receiver on the hybrid port, puts its mouse interface into boot protocol and
-polls the interrupt endpoint, and the whole path is proven end to end: enumeration,
-`SET_CONFIGURATION`, `SET_IDLE`, `SET_PROTOCOL`, and interrupt-IN polling.
+**A USB mouse drives `INT 33h` on this machine**, verified in *The Secret of Monkey
+Island* and *Arkanoid*. `USBMSDRV.COM` enumerates a Logitech Unifying receiver on the
+hybrid port, puts its mouse interface into boot protocol, and services it from **IRQ2 at
+125 Hz**. `USBMOUSE.COM` is the standalone demo that proved the path first.
+
+That those two games work is the specific thing worth testing, because they are what a
+timer-based driver would have broken. Polling from `INT 08h` is the obvious approach and
+the wrong one: PIT channel 0 gets reprogrammed by anything wanting its own tick rate, so
+a driver hanging off it changes rate underneath itself or stops — on exactly the
+software someone wants a mouse for. The poll clock is the USB frame counter instead
+(`usb_host` CTRL bit 3), which nothing in DOS can touch.
 
 What the device reports, read off it with
 [`USBENUM`](tools.md#usbenum--what-is-plugged-in-and-how-to-drive-it):
@@ -114,11 +121,14 @@ What the device reports, read off it with
 | Interface 1 | HID boot **mouse**, `ep 82` IN, every 2 ms |
 | Interface 2 | vendor HID++, `ep 83` IN, every 2 ms |
 
-Still to do is the part that makes it useful to software rather than to a demo: an
-`INT 33h` driver. The demo owns the machine while it runs, and a TSR cannot pace itself
-on the 1 ms SOF counter the way it does — it gets `INT 08h` at 18.2 Hz, which is a
-**fortieth** of that 2 ms endpoint's rate. That is the argument for giving `usb_host` an
-interrupt on the free `IRQ2` rather than polling from the timer tick.
+Still open: **uninstall is not implemented**. `USBMSDRV /u` says so rather than
+pretending. Doing it properly means finding the resident copy through the vector,
+restoring both vectors from its data, masking IRQ2, clearing IRQEN and freeing the
+block — and refusing when something else has hooked `INT 33h` afterwards. Reboot to
+remove it.
+
+The software cursor also writes straight to `B800`, so it can fight with an application
+that redraws the same cell. A real driver would hide the cursor around video BIOS calls.
 
 ### USB keyboard
 
