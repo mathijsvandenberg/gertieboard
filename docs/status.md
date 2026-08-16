@@ -97,9 +97,33 @@ Writes still use the byte loop. `REP OUTSB` is the same one-line change, but wan
 [`USBSOAK`](tools.md#usbsoak--sustained-write--read--verify) pass on a scratch stick
 first, not on the disk with DOS installed on it.
 
+### USB input — the mouse works
+
+**A USB mouse moves a cursor on this machine.** `USBMOUSE.COM` enumerates a Logitech
+Unifying receiver on the hybrid port, puts its mouse interface into boot protocol and
+polls the interrupt endpoint, and the whole path is proven end to end: enumeration,
+`SET_CONFIGURATION`, `SET_IDLE`, `SET_PROTOCOL`, and interrupt-IN polling.
+
+What the device reports, read off it with
+[`USBENUM`](tools.md#usbenum--what-is-plugged-in-and-how-to-drive-it):
+
+| | |
+|---|---|
+| Device | `046D:C52B`, full speed, EP0 max packet **8** |
+| Interface 0 | HID boot **keyboard**, `ep 81` IN, every 8 ms |
+| Interface 1 | HID boot **mouse**, `ep 82` IN, every 2 ms |
+| Interface 2 | vendor HID++, `ep 83` IN, every 2 ms |
+
+Still to do is the part that makes it useful to software rather than to a demo: an
+`INT 33h` driver. The demo owns the machine while it runs, and a TSR cannot pace itself
+on the 1 ms SOF counter the way it does — it gets `INT 08h` at 18.2 Hz, which is a
+**fortieth** of that 2 ms endpoint's rate. That is the argument for giving `usb_host` an
+interrupt on the free `IRQ2` rather than polling from the timer tick.
+
 ### USB keyboard
 
-The easy one now that the SIE exists. A HID boot-protocol keyboard is one interrupt
+The other half of the same dongle, and mostly the same work. A HID boot-protocol
+keyboard is one interrupt
 endpoint polled every 10 ms with fixed 8-byte reports, and
 [`ps2_kbd_ppi`](modules/ps2_kbd_ppi.md) already does the hard part downstream — HID usage
 codes to XT scancodes is the same class of translation it performs today, and the

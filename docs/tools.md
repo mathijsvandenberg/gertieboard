@@ -309,6 +309,41 @@ steps, and the 10 ms USB bus reset is a minimum rather than a suggestion. One ti
 A low-speed device is detected, named, and then declined: the SIE is full-speed only,
 so the tool says so plainly instead of letting it fail as a timeout several stages later.
 
+### USBMOUSE — a HID mouse moving a cursor
+
+The first USB input device on this board, and the proof that the HID path works.
+
+```
+usbmouse           port 1, the hybrid port
+usbmouse 0         port 0 — resets the fixed disk, not with a mounted C:
+```
+
+It enumerates, finds the boot-protocol mouse interface, configures it, and polls. An
+inverted cell moves around the text screen, the left button turns it red, and the
+position and button byte appear in the top-right corner. ESC restores the cell and exits.
+
+Four things in here are the difference between working and not:
+
+**Boot protocol removes the parser.** A HID device normally describes its reports in a
+report descriptor, which is a small stack language. `SET_PROTOCOL(0)` makes it promise a
+fixed three-byte report instead — buttons, signed X, signed Y — so there is none here.
+
+**NAK is the normal answer**, so polling uses a *non-retrying* transaction. An idle mouse
+NAKs constantly; the control-transfer helper retries NAK 400 times, which is right for
+control and catastrophic in a poll loop.
+
+**The endpoint must belong to the mouse interface.** On a composite device the endpoint
+following interface 0 is the *keyboard's*. The walk only accepts an endpoint while the
+last interface it saw was the mouse.
+
+**SOF must already be running before the first control transfer.** `USBENUM` gets this
+by accident — it measures the frame counter, which costs it a tick. `USBMOUSE` enabled
+SOF and went straight to `GET_DESCRIPTOR`, and failed until the delay was made explicit.
+A device fresh out of reset wants frames on the bus before it is addressed.
+
+If enumeration fails it names the stage, the request, and the raw status and PID —
+STALL is a refusal, TIMEOUT is nobody home, and they point at opposite problems.
+
 ### USBSOAK — sustained write / read / verify
 
 The instrument that found the bit-stuffing bug. Every failure in the storage stack looks
