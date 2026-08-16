@@ -83,6 +83,8 @@ ARCHITECTURE structural OF gertieboard IS
   -- cpuclk1 divides the PLL's 100 MHz c0 down to the selected step, so the
   -- speed is a register the CPU can write. See cpuclk.vhd.
   SIGNAL n_cpuclk               : std_logic;
+  -- The CPU pin's copy of the bus clock, 5 ns late on purpose. See cpuclk.vhd.
+  SIGNAL n_cpuclk_pad           : std_logic;
   SIGNAL n_c100                 : std_logic;   -- pll1 c0, 100 MHz
   SIGNAL n_opl_smp              : integer RANGE 1 TO 1023;
   SIGNAL n_opl_t1               : integer RANGE 1 TO 8191;
@@ -468,6 +470,7 @@ BEGIN
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
       CLK_CPU              => n_cpuclk,
+      CLK_CPU_PAD          => n_cpuclk_pad,
       OPL_SMP              => n_opl_smp,
       OPL_T1               => n_opl_t1,
       OPL_T2               => n_opl_t2
@@ -847,7 +850,9 @@ BEGIN
   n_g0 <= '1';
 
   -- top-level pin connections
-  CPU_CLK <= n_cpuclk;
+  -- The CPU gets the DELAYED copy, never n_cpuclk. That 5 ns is READY's
+  -- aperture -- see cpuclk.vhd. Peripherals keep the undelayed clock.
+  CPU_CLK <= n_cpuclk_pad;
   CPU_RST <= n_rst_out;
   VGA_HS <= n_hs;
   VGA_VS <= n_vs;

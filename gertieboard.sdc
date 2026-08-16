@@ -65,8 +65,13 @@ create_generated_clock -name CPU_CLK_INT \
     -divide_by 6 \
     [get_pins {cpuclk1|clk_q|q}]
 
+# CPU_CLK is NO LONGER clk_q. cpuclk re-registers it on the FALLING edge of the
+# 100 MHz master, so the pin runs exactly 5 ns behind the internal bus clock --
+# deliberate skew, handed straight to READY's aperture. The source here must be
+# that register, not clk_q, or the analyser prices the pin at the internal
+# clock's edges and the 5 ns simply does not appear in any report.
 create_generated_clock -name CPU_CLK_OUT \
-    -source [get_pins {cpuclk1|clk_q|q}] \
+    -source [get_pins {cpuclk1|clk_pad|q}] \
     [get_ports CPU_CLK]
 
 derive_clock_uncertainty
@@ -202,7 +207,33 @@ set_false_path -from * -to [get_ports {CPU_RST CPU_NMI CPU_INTR CPU_HLD}]
 # The clock's own flight time, pinned at both ends. The window is what makes the
 # 2.0 ns above claimable; the upper end keeps the clock from drifting so late
 # that it eats into the data budget from the other side.
-set_min_delay -to [get_ports {CPU_CLK}]    2.500
+# RE-DERIVED 2026-08-16. This was 2.500, and that number was load-bearing: it
+# was the ONLY thing holding the CPU's clock back, so READY's budget was built
+# on it and the fitter could only just supply it (2.722 ns on a direct pad path
+# was the most it would promise, which is why the ask came down to 2.500 in the
+# first place). Under a percent of margin on a hand-placed pad delay is not a
+# guarantee, and the hardware proved it: a finger on CPU_CLK was the difference
+# between booting and not.
+#
+# The skew now comes from cpuclk instead, which re-registers the bus clock on
+# the FALLING edge of the 100 MHz master. That is 5.000 ns exactly, at every
+# speed step and every corner, because it is a clock edge and not a wire.
+#
+# So this bound no longer has to buy anything -- it only keeps the pad honest,
+# and it is lowered to what the I/O-cell register actually delivers (2.071 ns
+# at the fast corner). FAST_OUTPUT_REGISTER puts that flop in the IOE, so the
+# path is the pad and nothing else and does not wander between builds.
+#
+#     READY budget = 5.000 (fabric skew) + 1.500 (pad min)
+#                  + 8.000 (tSRYLK)      - 0.150 (board)   = 14.35 ns
+#
+# CPU_RDY stays constrained at 10.350 rather than being relaxed to that. The
+# extra 4 ns is deliberate margin against the one number here that is NOT
+# trustworthy: tSRYLK is the datasheet's, specified at 4.5-5.5 V, and this part
+# runs at 3.33 V. Undervolted CMOS is slower by an amount no datasheet states,
+# so the allowance is smaller than 8 ns by an unknown margin. Spending the
+# fabric skew on that unknown instead of banking it is the whole point.
+set_min_delay -to [get_ports {CPU_CLK}]    1.500
 set_max_delay -to [get_ports {CPU_CLK}]    6.000
 
 set_max_delay -to [get_ports {CPU_RDY}]   10.350
