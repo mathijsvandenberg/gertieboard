@@ -64,6 +64,10 @@
 --                        every caller that only ever used USB0.
 --                    [1] BUSRESET -- drive SE0 while set (software times 10 ms)
 --                    [2] SOFEN    -- run the 1 ms SOF generator
+--                    [3] IRQEN    -- pulse IRQ every 8th frame (125 Hz). Needs
+--                        SOFEN, since it counts frames. Independent of the PIT
+--                        on purpose: a DOS mouse driver on INT 08h changes rate
+--                        under itself the moment a game reprograms channel 0.
 --         R  LINE    [0] D+ level        [1] D- level
 --                    [2] FS device seen  (idle J:  D+ high, D- low)
 --                    [3] LS device seen  (idle K:  D- high, D+ low)
@@ -107,6 +111,9 @@ ENTITY usb_host IS
     RD        : IN    std_logic;                     -- active low
     WR        : IN    std_logic;                     -- active low
     DATAOUT   : INOUT std_logic_vector(7 DOWNTO 0);
+    -- One-clock pulse every 8 SOF frames while CTRL bit 3 is set, for an 8259
+    -- input. Leave OPEN on an instance that does not need it.
+    IRQ       : OUT   std_logic;
     USB_DP    : INOUT std_logic;
     USB_DM    : INOUT std_logic
   );
@@ -290,6 +297,12 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL se_d1     : std_logic := '0';
   SIGNAL sof_cnt   : integer RANGE 0 TO SOF_DIV-1 := 0;
   SIGNAL sof_req   : std_logic := '0';
+  -- Frame interrupt. A TOGGLE in the 48 MHz domain, edge-detected in the CPU
+  -- domain -- not a pulse. A pulse a few 48 MHz cycles wide is invisible to a
+  -- 10 MHz sampler, which is the same lesson the GO handshake taught this
+  -- module three times over.
+  SIGNAL irq_tog   : std_logic := '0';
+  SIGNAL irq_m1, irq_m2, irq_m3 : std_logic := '0';
   -- GO must be LATCHED, not edge-detected in place. "go_m3 /= go_m2" is true
   -- for exactly one 48 MHz cycle as the toggle walks the synchroniser, so a
   -- command issued while the sequencer was busy -- sending a SOF, for instance,
@@ -358,6 +371,8 @@ BEGIN
 
   io_hit <= '1' WHEN ADDR(15 DOWNTO 3) = IO_BASE(15 DOWNTO 3) ELSE '0';
   io_reg <= ADDR(2 DOWNTO 0);
+
+  IRQ <= irq_m2 XOR irq_m3;
 
   se_code <= x"0" WHEN se = S_IDLE   ELSE
              x"1" WHEN se = S_TOKEN  ELSE
@@ -488,6 +503,15 @@ BEGIN
 
       wr_prev <= WR;
       rd_prev <= RD;
+
+      -- Frame interrupt into this domain. Three stages, then a difference:
+      -- the toggle is asynchronous to CLK, so it needs the metastability
+      -- filter, and the XOR of the last two turns it back into exactly one
+      -- CLK-wide pulse. int8259 samples IRQ on this same clock and triggers on
+      -- a rising edge, so one clock is enough and two would risk a second one.
+      irq_m1 <= irq_tog;
+      irq_m2 <= irq_m1;
+      irq_m3 <= irq_m2;
 
       rxb_q <= rxbuf(conv_integer(rx_ptr(5 DOWNTO 0)));
     END IF;
@@ -991,6 +1015,20 @@ BEGIN
           ELSIF sof_req = '1' THEN
             sof_req   <= '0';
             frame_cnt <= frame_cnt + 1;
+            -- Periodic interrupt, every 8th frame = 8 ms = 125 Hz. Derived
+            -- from SOF rather than from the PIT on purpose: channel 0 is
+            -- reprogrammed by any game that wants its own tick rate, so a
+            -- mouse driver hanging off INT 08h changes rate underneath itself
+            -- or stops. This clock cannot be touched from software.
+            --
+            -- 125 Hz is chosen, not maximal. The endpoint offers 2 ms and an
+            -- 8088 servicing 500 interrupts a second would spend a serious
+            -- fraction of itself doing it; period mice of this era reported at
+            -- 40-100 Hz, so 125 is already better than the hardware being
+            -- emulated and costs an eighth of the interrupts.
+            IF ctrl_m(3) = '1' AND frame_cnt(2 DOWNTO 0) = "111" THEN
+              irq_tog <= NOT irq_tog;
+            END IF;
             tok := frame_cnt(10 DOWNTO 0);
             c5  := crc5(tok);
             req_lit  <= (c5(0) & c5(1) & c5(2) & c5(3) & c5(4)

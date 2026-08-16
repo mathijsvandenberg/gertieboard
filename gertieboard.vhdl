@@ -801,6 +801,7 @@ BEGIN
       RD                   => n_io_rd,
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
+      IRQ                  => OPEN,       -- the disk is polled, not driven
       USB_DP               => USB0_DP,
       USB_DM               => USB0_DM
     );
@@ -822,6 +823,7 @@ BEGIN
       RD                   => n_io_rd,
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
+      IRQ                  => n_irq2,
       USB_DP               => USB1_DP,
       USB_DM               => USB1_DM
     );
@@ -844,7 +846,10 @@ BEGIN
     );
 
   -- constant tie-offs (GND/VCC symbols in the schematic)
-  n_irq2 <= '0';
+  -- IRQ2 is usb2's frame interrupt now. It was tied low; on a PC/XT with a
+  -- single 8259 this line is genuinely free (it is the AT that uses it as the
+  -- slave cascade), and this board implements neither the EGA nor the network
+  -- cards that were the other XT claimants.
   n_iochk_n <= '0';
   n_cpu_nmi <= '0';
   n_g0 <= '1';
