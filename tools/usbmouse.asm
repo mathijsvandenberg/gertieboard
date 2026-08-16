@@ -172,6 +172,13 @@ start:
         SETDX O_CTRL
         mov  al, C_SOFEN
         out  dx, al
+        ; LET SOF RUN BEFORE TALKING TO IT. usbenum happens to measure the
+        ; frame counter here, which costs it a tick, and that tick is why it
+        ; enumerates where this did not: a device just out of reset wants
+        ; frames on the bus before it is addressed. Relying on a diagnostic's
+        ; side effect for correctness is how this went wrong -- so it is a
+        ; delay on purpose now, in both tools.
+        call delay_tick
 
 ; ---------------- enumerate -------------------------------------------------
         xor  al, al
@@ -179,6 +186,7 @@ start:
         out  dx, al
         mov  byte [ep0max], 8
 
+        mov  byte [stage], 1
         mov  si, sp_getdev8
         mov  di, devbuf
         push ds
@@ -189,6 +197,7 @@ start:
         mov  al, [devbuf+7]
         mov  [ep0max], al
 
+        mov  byte [stage], 2
         mov  si, sp_setaddr
         mov  di, devbuf
         xor  cx, cx
@@ -199,6 +208,18 @@ start:
         out  dx, al
         call delay_tick
 
+        ; Re-read the descriptor at the NEW address. usbenum does this and it
+        ; is not merely a test: it is the first exchange that proves the device
+        ; adopted the address, and skipping it means a failure two steps later
+        ; gets blamed on the configuration descriptor instead.
+        mov  byte [stage], 3
+        mov  si, sp_getdev18
+        mov  di, devbuf
+        mov  cx, 18
+        call ctl_xfer
+        jc   .enum_bad
+
+        mov  byte [stage], 4
         mov  si, sp_getcfg9
         mov  di, cfgbuf
         mov  cx, 9
@@ -211,6 +232,7 @@ start:
 .fits:
         mov  [cfglen], ax
         mov  [sp_getcfgn+6], ax
+        mov  byte [stage], 5
         mov  si, sp_getcfgn
         mov  di, cfgbuf
         mov  cx, [cfglen]
@@ -220,8 +242,7 @@ start:
         mov  [cfgval], al
         jmp  short .enum_ok
 .enum_bad:
-        mov  dx, msg_enumfail
-        call puts
+        call fail_stage
         jmp  quit
 .enum_ok:
 
@@ -234,6 +255,7 @@ start:
 .got_mouse:
 
 ; ---------------- configure it ----------------------------------------------
+        mov  byte [stage], 6
         mov  al, [cfgval]
         mov  [sp_setcfg+2], al
         mov  si, sp_setcfg
@@ -246,6 +268,7 @@ start:
         ; SET_IDLE(0) and SET_PROTOCOL(boot) both address the INTERFACE, so
         ; wIndex carries its number -- sending them to interface 0 by accident
         ; configures the keyboard and leaves the mouse in report protocol.
+        mov  byte [stage], 7
         mov  al, [mouse_if]
         mov  [sp_setidle+4], al
         mov  si, sp_setidle
@@ -253,6 +276,7 @@ start:
         xor  cx, cx
         call ctl_xfer           ; a STALL here is survivable, so ignore CF
 
+        mov  byte [stage], 8
         mov  al, [mouse_if]
         mov  [sp_setproto+4], al
         mov  si, sp_setproto
@@ -261,8 +285,7 @@ start:
         call ctl_xfer
         jnc  .proto_ok
 .cfg_bad:
-        mov  dx, msg_cfgfail
-        call puts
+        call fail_stage
         jmp  quit
 .proto_ok:
 
@@ -369,6 +392,48 @@ quit:
         mov  ah, 0x4C
         xor  al, al
         int  0x21
+
+; ============================================================================
+;  fail_stage -- say WHICH request failed and what came back.
+;
+;  "Enumeration failed." was the whole message here for one round of testing,
+;  and it is worthless: eight requests can produce it and they fail for
+;  different reasons. The BIOS has recorded a stage byte in BDA 0xC0 since the
+;  disk went in, for exactly this. The raw status and PID matter as much as the
+;  stage -- STALL is a refusal, TIMEOUT is nobody home, and they point at
+;  opposite halves of the problem.
+; ============================================================================
+fail_stage:
+        push ax
+        push bx
+        mov  dx, msg_failat
+        call puts
+        mov  al, [stage]
+        call putdec
+        mov  dx, msg_dash
+        call puts
+        ; name it, so the number does not have to be looked up
+        mov  bl, [stage]
+        xor  bh, bh
+        dec  bx
+        shl  bx, 1
+        mov  dx, [stagetab+bx]
+        call puts
+        mov  dx, msg_status
+        call puts
+        SETDX O_CMD
+        in   al, dx
+        call puthex
+        mov  dx, msg_rxpid
+        call puts
+        SETDX O_ENDP
+        in   al, dx
+        call puthex
+        mov  dx, msg_crlf
+        call puts
+        pop  bx
+        pop  ax
+        ret
 
 ; ============================================================================
 ;  find_mouse -- walk the configuration for a boot-protocol mouse interface
@@ -875,6 +940,7 @@ mouse_if  db 0
 mouse_ep  db 0
 mouse_int db 0
 in_mouse  db 0
+stage     db 0
 lastframe db 0
 accx      dw 0
 accy      dw 0
@@ -885,6 +951,7 @@ dxb       db 0
 dyb       db 0
 
 sp_getdev8   db 0x80, 6, 0x00, DT_DEVICE, 0, 0, 8, 0
+sp_getdev18  db 0x80, 6, 0x00, DT_DEVICE, 0, 0, 18, 0
 sp_setaddr   db 0x00, 5, 1, 0, 0, 0, 0, 0
 sp_getcfg9   db 0x80, 6, 0x00, DT_CONFIG, 0, 0, 9, 0
 sp_getcfgn   db 0x80, 6, 0x00, DT_CONFIG, 0, 0, 0, 0
@@ -900,9 +967,21 @@ msg_wrongwin db 'The engine reports a different I/O window.', 13, 10, '$'
 msg_nopll    db 'The 48 MHz PLL is not locked.', 13, 10, '$'
 msg_nodev    db 'Nothing plugged in (both lines low).', 13, 10, '$'
 msg_ls       db 'A LOW-speed device: this engine is full-speed only.', 13, 10, '$'
-msg_enumfail db 'Enumeration failed.', 13, 10, '$'
+msg_failat   db 'FAILED at stage ', '$'
+msg_dash     db ' -- ', '$'
+msg_status   db '   status ', '$'
+msg_rxpid    db '  rxpid ', '$'
+msg_crlf     db 13, 10, '$'
+sn1 db 'GET_DESCRIPTOR(device,8) at address 0', '$'
+sn2 db 'SET_ADDRESS(1)', '$'
+sn3 db 'GET_DESCRIPTOR(device,18) at address 1', '$'
+sn4 db 'GET_DESCRIPTOR(config,9)', '$'
+sn5 db 'GET_DESCRIPTOR(config,full)', '$'
+sn6 db 'SET_CONFIGURATION', '$'
+sn7 db 'SET_IDLE', '$'
+sn8 db 'SET_PROTOCOL(boot)', '$'
+stagetab dw sn1, sn2, sn3, sn4, sn5, sn6, sn7, sn8
 msg_nomouse  db 'No boot-protocol mouse interface on this device.', 13, 10, '$'
-msg_cfgfail  db 'SET_CONFIGURATION or SET_PROTOCOL failed.', 13, 10, '$'
 msg_found    db 'Boot mouse on interface ', '$'
 msg_onep     db ', endpoint ', '$'
 msg_every    db ', every ', '$'
