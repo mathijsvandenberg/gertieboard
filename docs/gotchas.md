@@ -375,6 +375,62 @@ now a VHDL `CONSTANT` array, which always synthesises with its values.
 
 ---
 
+## A constraint that is met, against a premise that is wrong
+
+Adding a second USB engine stopped the machine booting. It was not the engine. Every
+report was clean — 0 errors, positive slack at every corner, no unmatched constraint —
+and the board would not fetch its BIOS over serial. **Putting a finger on `CPU_CLK` made
+it work.**
+
+A fingertip is tens of picofarads: a few hundred picoseconds of extra delay on the
+clock. Delaying the CPU's clock hands that time straight to READY, which is the lever
+the SDC already pulls deliberately with its pad minimum. So the hardware was saying the
+READY aperture was too narrow — while the analyser insisted the constraint was met.
+
+Both were right. The constraint *was* met. It was derived from `tSRYLK = 8 ns`, and that
+figure is the µPD70108 datasheet's **at 4.5–5.5 V**. [This part runs at
+3.33 V](hardware.md). Undervolted CMOS is slower by an amount no datasheet for this
+operating point states, so the real allowance is smaller than 8 ns and the budget built
+on it was too generous.
+
+**This fails differently from a violated path, and that is the whole lesson.** A
+violation is red in a report and someone eventually looks at it. A constraint met
+against a wrong premise is green forever. It presents as:
+
+- every timing report clean, across every corner
+- the machine dead, or intermittently dead
+- unrelated edits deciding whether it boots, because they shift placement inside a
+  margin that was never really there
+- **a finger fixing it**
+
+If touching a pin changes behaviour, stop reasoning about logic. That is an analogue
+measurement, and it outranks the reports — the reports are only as good as the numbers
+they were derived from, and a datasheet figure quoted outside its supply range is not a
+number, it is an assumption.
+
+The repair was to stop asking a pad to supply the skew. `cpuclk` re-registers the bus
+clock on the falling edge of the 100 MHz master, so `CPU_CLK` runs exactly 5 ns behind —
+a clock edge, identical at every step, corner and build, where the pad minimum was
+2.5 ns that the fitter would only ever promise 2.722 of. The internal bus clock is
+untouched, so peripheral edges stay on `c3`'s 20 ns grid.
+
+Three sub-traps came with it, each of which failed the build on its own:
+
+- **Slowing the pad is the wrong lever, twice over.** 4 mA bought 0.225 ns and pushed
+  the pad to 6.037 ns against a 6.000 ceiling — and the V20 measures its clock high time
+  at 3.0 V, so time spent in transition comes straight out of `tKKH`.
+- **A new register lands where the fitter likes.** The delayed flop cost 1.6 ns of
+  routing to the pin until `FAST_OUTPUT_REGISTER` put it in the I/O cell.
+- **The old bound was load-bearing only while it was the only one.** Leaving the pad
+  minimum at 2.500 failed hold by 0.676 ns once the register moved into the IOE.
+
+And the margin that was won was **not** banked: `CPU_RDY` stays constrained at 10.35 ns
+against a budget that is now 14.35, because the 4 ns is being held against `tSRYLK`
+being wrong at 3.33 V. Relaxing a constraint to whatever the new number allows rebuilds
+the same lottery one level up.
+
+---
+
 ## READY backstops are not timing parameters
 
 `busdecode`'s `T >= 64` clause exists to recover from a wedged memory controller. It was
