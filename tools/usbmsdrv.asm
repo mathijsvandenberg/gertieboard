@@ -58,8 +58,10 @@ ST_RXV   equ 0x80
 C_RESET  equ 0x02
 C_SOFEN  equ 0x04
 C_IRQEN  equ 0x08
+C_LOWSP  equ 0x10
 
 L_FS     equ 0x04
+L_LS     equ 0x08
 L_LOCK   equ 0x20
 
 D_BUILD  equ 0x0F
@@ -91,6 +93,9 @@ start:
 
 ; ---- resident data ---------------------------------------------------------
 ubase     dw BASE_P1
+; RESIDENT, not transient: it is ORed into the CTRL value the engine keeps
+; running with, so it describes the port for as long as the driver is loaded.
+spdbit    db 0                  ; 0 or C_LOWSP
 ep0max    db 8
 reqtype   db 0
 mouse_ep  db 0
@@ -586,6 +591,11 @@ install:
 .pll_ok:
         test al, L_FS
         jnz  .dev_ok
+        test al, L_LS
+        jz   .nodev
+        mov  byte [spdbit], C_LOWSP     ; 1.5 Mbps device
+        jmp  short .dev_ok
+.nodev:
         mov  dx, msg_nodev
         call puts
         jmp  bail
@@ -594,14 +604,16 @@ install:
         ; ---- bus reset, SOF, and let frames run before addressing it -------
         SETDX O_CTRL
         mov  al, C_RESET
+        or   al, [spdbit]
         out  dx, al
         call delay_tick
         SETDX O_CTRL
-        xor  al, al
+        mov  al, [spdbit]               ; release, keep the speed selection
         out  dx, al
         call delay_tick
         SETDX O_CTRL
         mov  al, C_SOFEN
+        or   al, [spdbit]
         out  dx, al
         call delay_tick
 
@@ -731,6 +743,7 @@ install:
         ; ---- enable the frame interrupt and unmask IRQ2 ---------------------
         SETDX O_CTRL
         mov  al, C_SOFEN | C_IRQEN
+        or   al, [cs:spdbit]            ; RESIDENT: the ISR runs at this speed
         out  dx, al
         in   al, PIC_MSK
         and  al, ~IRQ2_BIT & 0xFF

@@ -78,6 +78,7 @@ ST_RXV   equ 0x80
 ; control bits
 C_RESET  equ 0x02
 C_SOFEN  equ 0x04
+C_LOWSP  equ 0x10               ; run the port at 1.5 Mbps
 
 ; line-state bits
 L_DP     equ 0x01
@@ -250,6 +251,7 @@ start:
         jmp  quit
 .t3_fs:
         mov  byte [isls], 0
+        mov  byte [spdbit], 0
         call pass
         call show_line
         mov  dx, msg_fs
@@ -257,16 +259,11 @@ start:
         jmp  short .t3_done
 .t3_ls:
         mov  byte [isls], 1
+        mov  byte [spdbit], C_LOWSP
         call pass
         call show_line
         mov  dx, msg_ls
         call puts
-        ; The engine is a full-speed SIE. A low-speed device idles in the
-        ; opposite polarity and clocks 8x slower, so nothing below will work --
-        ; say so plainly rather than letting it fail as a timeout further down.
-        mov  dx, msg_lswarn
-        call puts
-        jmp  quit
 .t3_done:
 
 ; ---------------- 4: bus reset ----------------------------------------------
@@ -274,14 +271,20 @@ start:
         call puts
         SETDX O_CTRL
         mov  al, C_RESET
+        or   al, [spdbit]
         out  dx, al
         call delay_tick                 ; 55 ms of SE0, well over the 10 ms min
         SETDX O_CTRL
-        xor  al, al
+        mov  al, [spdbit]               ; release, keeping the speed selection
         out  dx, al
         call delay_tick                 ; and let the device come back up
         SETDX O_CTRL
         in   al, dx
+        ; L_FS, at BOTH speeds, and that is not a bug. LINE reports the engine's
+        ; view of the pins, and in low-speed mode those are SWAPPED at the pads
+        ; -- so a low-speed device, which really holds D- high, reads here as
+        ; "D+ high, idle J". The device is identified BEFORE the mode is set,
+        ; on bit 3; afterwards everything speaks the engine's language.
         test al, L_FS
         jnz  .t4_ok
         call fail
@@ -298,6 +301,7 @@ start:
         call puts
         SETDX O_CTRL
         mov  al, C_SOFEN
+        or   al, [spdbit]
         out  dx, al
         SETDX O_DIAG
         xor  al, al
@@ -1035,6 +1039,7 @@ ubase    dw BASE_P1
 portno   db '1'
 linest   db 0
 isls     db 0
+spdbit   db 0                    ; 0 or C_LOWSP, ORed into every CTRL write
 lineonly db 0
 ep0max  db 8
 reqtype db 0
@@ -1082,9 +1087,6 @@ msg_pd_dev   db '  A device is attached, so this says nothing about the', 13, 10
 msg_gone     db '  device vanished across the reset', 13, 10, '$'
 msg_fs       db '  full speed (12 Mbps)', 13, 10, '$'
 msg_ls       db '  LOW speed (1.5 Mbps)', 13, 10, '$'
-msg_lswarn   db '  this engine is full-speed only -- stopping here.', 13, 10
-             db '  a low-speed device needs inverted signalling and a', 13, 10
-             db '  32-clock bit time, neither of which is built yet.', 13, 10, '$'
 msg_ep0      db '  EP0 max packet  ', '$'
 msg_dev      db 'device:', 13, 10, '$'
 msg_vid      db '  VID ', '$'

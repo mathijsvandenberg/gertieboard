@@ -71,6 +71,7 @@ ST_RXV   equ 0x80
 
 C_RESET  equ 0x02
 C_SOFEN  equ 0x04
+C_LOWSP  equ 0x10
 
 L_FS     equ 0x04
 L_LS     equ 0x08
@@ -151,9 +152,10 @@ start:
         jnz  .dev_ok
         test al, L_LS
         jz   .nodev
+        mov  byte [spdbit], C_LOWSP     ; 1.5 Mbps for the rest of this run
         mov  dx, msg_ls
         call puts
-        jmp  quit
+        jmp  short .dev_ok
 .nodev:
         mov  dx, msg_nodev
         call puts
@@ -163,14 +165,16 @@ start:
 ; ---------------- reset, SOF ------------------------------------------------
         SETDX O_CTRL
         mov  al, C_RESET
+        or   al, [spdbit]
         out  dx, al
         call delay_tick
         SETDX O_CTRL
-        xor  al, al
+        mov  al, [spdbit]               ; release, keep the speed selection
         out  dx, al
         call delay_tick
         SETDX O_CTRL
         mov  al, C_SOFEN
+        or   al, [spdbit]
         out  dx, al
         ; LET SOF RUN BEFORE TALKING TO IT. usbenum happens to measure the
         ; frame counter here, which costs it a tick, and that tick is why it
@@ -942,6 +946,7 @@ mouse_int db 0
 in_mouse  db 0
 stage     db 0
 lastframe db 0
+spdbit    db 0                  ; 0 or C_LOWSP, ORed into every CTRL write
 accx      dw 0
 accy      dw 0
 curoff    dw 0
@@ -966,7 +971,7 @@ msg_nosig    db 'No A5 build signature: the bitstream is not this design.', 13, 
 msg_wrongwin db 'The engine reports a different I/O window.', 13, 10, '$'
 msg_nopll    db 'The 48 MHz PLL is not locked.', 13, 10, '$'
 msg_nodev    db 'Nothing plugged in (both lines low).', 13, 10, '$'
-msg_ls       db 'A LOW-speed device: this engine is full-speed only.', 13, 10, '$'
+msg_ls       db 'Low-speed device (1.5 Mbps).', 13, 10, '$'
 msg_failat   db 'FAILED at stage ', '$'
 msg_dash     db ' -- ', '$'
 msg_status   db '   status ', '$'
