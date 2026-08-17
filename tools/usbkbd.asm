@@ -576,6 +576,24 @@ ktab:
         db 0x52,0,0, 0x47,0,0, 0x49,0,0              ; Insert, Home, PgUp
         db 0x53,0,0, 0x4F,0,0, 0x51,0,0              ; Delete, End, PgDn
         db 0x4D,0,0, 0x4B,0,0, 0x50,0,0, 0x48,0,0    ; Right Left Down Up
+        ; ---- the keypad, 0x53-0x63 ----------------------------------------
+        ; A numeric keypad sends NOTHING below 0x53, so a table that stops at
+        ; the arrows drops every key on such a device and looks like a driver
+        ; that installed and did nothing.
+        ;
+        ; These are the NumLock-ON meanings: digits and symbols. NumLock itself
+        ; is not tracked yet, so the navigation alternates (KP 4 = Left and so
+        ; on) are not reachable -- deliberate, because a numpad plugged into a
+        ; DOS box is wanted for typing numbers, and guessing the other way round
+        ; would make it useless for that.
+        db 0x45,0,0                                  ; 53 Num Lock
+        db 0x35,'/','/', 0x37,'*','*'                ; 54 55
+        db 0x4A,'-','-', 0x4E,'+','+'                ; 56 57
+        db 0x1C,13,13                                ; 58 KP Enter
+        db 0x4F,'1','1', 0x50,'2','2', 0x51,'3','3'  ; 59 5A 5B
+        db 0x4B,'4','4', 0x4C,'5','5', 0x4D,'6','6'  ; 5C 5D 5E
+        db 0x47,'7','7', 0x48,'8','8', 0x49,'9','9'  ; 5F 60 61
+        db 0x52,'0','0', 0x53,'.','.'                ; 62 63
 KTAB_N  equ ($ - ktab) / 3
 
 end_resident:
