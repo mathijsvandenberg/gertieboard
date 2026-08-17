@@ -93,8 +93,21 @@ if (-not $tagAt) {
     }
     Write-Host "creating tag $Tag at $($head.Substring(0,7))" -ForegroundColor Cyan
     if (-not $DryRun) {
+        # git push reports PROGRESS on stderr even when it succeeds, and under
+        # $ErrorActionPreference = 'Stop' any native stderr is a TERMINATING
+        # error in PowerShell. So a completely successful push aborted the
+        # script -- after the tag had been created and pushed, which is the
+        # worst place to stop: the release then had a tag and no assets, and
+        # re-running wanted -CreateTag off. Exit codes are the truth here, not
+        # the stream.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         & git -C $root tag -a $Tag -m "Release $Tag"
-        & git -C $root push origin $Tag
+        if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = $prevEAP; throw "git tag failed ($LASTEXITCODE)" }
+        & git -C $root push origin $Tag 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+        $pushRc = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        if ($pushRc -ne 0) { throw "git push of tag $Tag failed ($pushRc)" }
     }
 } elseif ($tagAt.Trim() -ne $head) {
     throw ("tag $Tag points at $($tagAt.Trim().Substring(0,7)) but HEAD is $($head.Substring(0,7)).`n" +
