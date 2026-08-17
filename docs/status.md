@@ -66,25 +66,52 @@ in byte-wide mode however few of them you need.
 
 ### USB throughput
 
-**Reads are 1.66× faster than they were**, and the remaining work is known. Measured
-with [`USBPERF`](tools.md#usbperf--read-benchmark-and-regression-check), which reads a
-fixed 256 KB at each transfer size:
+**Reads peak at 221 KB/s.** Measured with
+[`USBPERF`](tools.md#usbperf--read-benchmark-and-regression-check), which reads a fixed
+256 KB at each transfer size.
 
-| per call | before | after |
+**Always record the bus clock beside the number.** These figures move with it, and an
+earlier version of this table did not say which clock it was taken at — which made it
+impossible to tell a real improvement from a faster machine until the runs were
+repeated:
+
+| per call | `REP INSB`, PSRAM, 5 MHz | SDRAM, 5 MHz | SDRAM, 10 MHz |
+|---|---|---|---|
+| 512 B | 69 KB/s | 87 | **141** |
+| 1 KB | 83 | 108 | **179** |
+| 4 KB | 101 | 133 | **211** |
+| 32 KB | 108 | 141 | **221** |
+| 63.5 KB | 107 | 140 | **220** |
+
+Two separate gains, and they say different things.
+
+**The middle column is 1.26–1.32× the first, uniformly across every transfer size.** That
+is the shape a faster copy loop makes — it scales the CPU's share and leaves the wire
+alone. It is attributed to conventional memory moving from PSRAM to SDRAM rather than
+measured as such: isolating it now would need a PSRAM build, and the uniformity is
+evidence rather than proof.
+
+**Doubling the clock gives 1.6×, not 2×**, and that is the more useful number. If the CPU
+were the only cost, 5 → 10 MHz would double the throughput. It does not, so the wire is
+now a visible fraction of the time:
+
+| | CPU | bus |
 |---|---|---|
-| 512 B | 49 KB/s | **69 KB/s** |
-| 1 KB | 56 | **83** |
-| 4 KB | 63 | **101** |
-| 32 KB | 65 | **108** |
-| 63.5 KB | 65 | **107** |
+| at 5 MHz | ~75 % | ~25 % |
+| at 10 MHz | ~60 % | ~40 % |
 
-The gain came from replacing the per-byte `IN`/`STOSB`/`LOOP` copy with a single
-`REP INSB` — see [storage](storage.md#the-80186-fast-path). Nothing changed on the
-wire: transactions went 22157 → 22164, and the seven extra are exactly the seven extra
-NAKs, with the integrity checksum unchanged.
+Still CPU-dominated, so the work below is still aimed at the right thing — but it has a
+ceiling now. On the same two-term model, a free copy would tend toward roughly
+**550 KB/s** at 32 KB transfers. That is a two-point extrapolation, so treat it as the
+order of magnitude and not a target.
 
-That the numbers converge at 107–108 KB/s says the bottleneck is still the CPU rather
-than the bus. What is left, in rough order of return:
+The `REP INSB` gain that produced the first column came from replacing the per-byte
+`IN`/`STOSB`/`LOOP` copy with a single string instruction — see
+[storage](storage.md#the-80186-fast-path). Nothing changed on the wire: transactions went
+22157 → 22164, and the seven extra are exactly the seven extra NAKs, with the integrity
+checksum unchanged.
+
+What is left, in rough order of return:
 
 1. **Memory-map the packet buffer** into M9K, so the copy becomes `REP MOVSB` from
    memory instead of a port read per byte

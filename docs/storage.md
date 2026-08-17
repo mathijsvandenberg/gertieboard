@@ -197,7 +197,9 @@ transfer size converged on the same ~65 KB/s: the size did not matter, the copy 
 The copy is now a single `REP INSB`, which reads the port `CX` times straight into
 `ES:DI`. It works because `U_DATA` auto-increments the controller's buffer pointer on
 every read, so repeated reads of one port walk the packet — exactly what `INS` expects.
-Worth **1.66×**, and the [numbers are in status](status.md#usb-throughput).
+Worth **1.66×** — measured on PSRAM at a 5 MHz bus clock, which is the baseline that
+number belongs to and not the machine's throughput today. Both have moved since; the
+[numbers are in status](status.md#usb-throughput).
 
 ### Why it is conditional
 

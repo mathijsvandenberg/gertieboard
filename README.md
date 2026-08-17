@@ -64,7 +64,7 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
 
 | | Planned |
 |---|---|
-| **USB throughput** | ~85 KB/s today, and the bottleneck is the CPU's byte-at-a-time copy, not the wire. Memory-mapping the packet buffer into M9K makes it a `rep movsb` |
+| **USB throughput** | ~220 KB/s at 10 MHz. Still mostly the CPU's byte-at-a-time copy rather than the wire — but only *mostly*: doubling the clock buys 1.6×, not 2×, so the bus is about 40 % of the time now. Memory-mapping the packet buffer into M9K makes the copy a `rep movsb` |
 | **USB hubs** | One device per port today. A hub needs the hub class driver, and a low-speed device behind a full-speed hub additionally needs `PRE` packets |
 | **NumLock and CapsLock** | The USB keyboard driver does not track either yet, so a numpad's navigation alternates are unreachable and Caps does nothing |
 | **AdLib / Sound Blaster** | The DMA controller and PIC are already there and proven; an OPL2 at `0x388` is the self-contained first step |
