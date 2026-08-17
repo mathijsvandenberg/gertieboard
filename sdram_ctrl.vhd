@@ -95,6 +95,21 @@ ARCHITECTURE behavior OF sdram_ctrl IS
   CONSTANT T_RCD  : integer := 2;                -- activate -> read/write, 20 ns
   CONSTANT T_RP   : integer := 2;                -- precharge, 20 ns
   CONSTANT T_RFC  : integer := 4;                -- refresh cycle, 60-70 ns
+  -- Auto-refreshes in the POWER-UP sequence. This was 2, and 2 is not a
+  -- number any datasheet for this part gives: vendors specify either "a
+  -- minimum of two" (Micron's MT48LC wording) or "8 auto-refresh cycles"
+  -- (ISSI, which is what is actually fitted here -- IS42S16160B). 8 satisfies
+  -- both readings, so it is the number that is correct whichever part ends up
+  -- on the board.
+  --
+  -- It costs nothing worth counting: 8 x T_RFC = 32 clocks = 640 ns, ONCE, at
+  -- power-on, inside a 100 us pause that already precedes it.
+  --
+  -- Not raised beyond 8 despite the temptation. Extra refreshes past the spec
+  -- do not buy robustness against a marginal power-up -- what would is a
+  -- longer T_INIT, letting the rails settle further before the first command,
+  -- and that is a separate change with a separate justification.
+  CONSTANT INIT_REF : integer := 8;
   CONSTANT T_MRD  : integer := 2;                -- mode register set
   CONSTANT CAS_LAT: integer := 2;
 
@@ -121,7 +136,14 @@ ARCHITECTURE behavior OF sdram_ctrl IS
   SIGNAL tmr    : integer RANGE 0 TO T_INIT := 0;
   SIGNAL refcnt : integer RANGE 0 TO T_REF  := 0;
   SIGNAL ref_due: std_logic := '0';
-  SIGNAL initn  : integer RANGE 0 TO 7 := 0;   -- auto-refreshes done in init
+  -- Auto-refreshes done so far in init. The range must reach INIT_REF, not
+  -- stop one below it: the count is compared BEFORE the increment, so the
+  -- signal really does take the value INIT_REF before the state advances.
+  -- Left at "RANGE 0 TO 7" with INIT_REF = 8 this would wrap to 0 in three
+  -- bits, the compare would never be satisfied, init would never finish and
+  -- MEM_READY would never assert -- a machine that hangs before the CPU is
+  -- even released, from a constant that looked like a comment change.
+  SIGNAL initn  : integer RANGE 0 TO INIT_REF := 0;
 
   SIGNAL a_row  : std_logic_vector(12 DOWNTO 0);
   SIGNAL a_col  : std_logic_vector(8 DOWNTO 0);
@@ -202,8 +224,9 @@ BEGIN
 
           ----------------------------------------------------------------
           -- Power-on: hold everything inert for 100 us, then precharge all
-          -- banks, refresh twice, and load the mode register. The order is
-          -- the part's, not a preference.
+          -- banks, issue INIT_REF auto-refreshes, and load the mode register.
+          -- The ORDER is the part's, not a preference -- and so is the COUNT,
+          -- which this used to get wrong. See INIT_REF.
           ----------------------------------------------------------------
           WHEN S_RESET =>
             cmd <= CMD_INHIB;
@@ -228,7 +251,7 @@ BEGIN
           WHEN S_INIT_REF =>
             IF tmr /= 0 THEN
               tmr <= tmr - 1;
-            ELSIF initn < 2 THEN
+            ELSIF initn < INIT_REF THEN
               cmd   <= CMD_REF;
               initn <= initn + 1;
               tmr   <= T_RFC;
