@@ -375,6 +375,59 @@ now a VHDL `CONSTANT` array, which always synthesises with its values.
 
 ---
 
+## "Ready" meant the init finished, not that the next access would work
+
+The CPU is held in reset until main memory reports `MEM_READY`. That signal says
+*the initialisation sequence has completed*. `clkgen` treated it as *the next
+access will succeed*, and dropped `RST_OUT` on the very next clock — so the
+CPU's first fetch raced the first cycle the memory controller had ever run for
+real.
+
+It failed about **one cold boot in seven**, and only from flash, never from a
+JTAG load. That combination is what made it so hard: a JTAG reload leaves the
+memory already initialised by the previous bitstream, so the race does not
+exist there.
+
+### The three numbers that solved it
+
+The boot loader's memory probe reports a code, a count, a value, **and the OR of
+every differing bit**. That last number is the one that mattered:
+
+```
+E3  1C  00  7F
+```
+
+The probe writes `offset XOR 0x5A`, so the expected value's bit 7 equals the
+offset's bit 7. `7F` means bit 7 *never* differed — so every one of the 28
+failures lay in the **first 128 bytes** of the block, and they read back `00`.
+
+**Early writes lost, later writes fine.** That is the shape of memory that is not
+quite awake. It is not the shape of broken memory, a wrong address decode, or a
+marginal data path — all of which scatter their errors across the block.
+
+Without that bit-mask the evidence pointed nowhere: the count and the value
+alone are consistent with half a dozen causes, and roughly that many were
+proposed and disproved before the mask was read properly.
+
+### What did not work, and why it is instructive
+
+`clkgen` already had a ten-clock reset stretch, and lengthening it changes
+nothing — `MEM_READY` dominates it by two orders of magnitude, so the stretch
+expires long before memory is up. **The gap was specifically *after* ready.**
+"Make the reset longer" is only useful once you know which part of it is short.
+
+The fix is 8192 bus clocks — about 1 ms, invisible against the second the FPGA
+already spends configuring from EPCS.
+
+### The general shape
+
+**A ready signal is a claim about the past, not a promise about the next
+cycle.** Anything that reports "initialised" deserves the question: does it mean
+the sequence finished, or that the device will answer correctly right now? On
+this board the two differ by about a millisecond, and one boot in seven found it.
+
+---
+
 ## A constraint that is met, against a premise that is wrong
 
 Adding a second USB engine stopped the machine booting. It was not the engine. Every
