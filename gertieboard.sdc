@@ -116,11 +116,49 @@ set_clock_groups -asynchronous \
 # these with single-cycle delays produces false failures (the -10.9 / -3.1 ns
 # paths in the previous report were entirely placeholder input/output delays).
 # -----------------------------------------------------------------------------
-set_false_path -from [get_ports {CPU_RD CPU_WR CPU_IOM CPU_ALE CPU_DEN \
-                                 CPU_DTR CPU_INTA CPU_HLDA}] -to *
-set_false_path -from [get_ports {CPU_A[*]}]  -to *
-set_false_path -from [get_ports {CPU_AD[*]}] -to *
 set_false_path -from * -to [get_ports {CPU_RST CPU_NMI CPU_INTR CPU_HLD}]
+
+# -----------------------------------------------------------------------------
+# ...AND THE INPUTS ARE NOT FALSE-PATHED EITHER, ANY MORE.
+#
+# CPU_A, CPU_AD, CPU_ALE and the command lines used to be deleted from analysis
+# with the same argument as the outputs: the bus cycle is long and READY governs
+# it. THAT ARGUMENT DOES NOT HOLD IN THIS DIRECTION.
+#
+# busdecode CAPTURES the address (busdecode.vhd, `maddr_l <= A & AD` under
+# `ALE = '1'`) on a clock edge. READY can extend a cycle; it cannot un-latch an
+# address that was sampled wrong. Miss that capture and every access in the
+# cycle goes somewhere else -- which presents as writes that vanish and reads
+# that return nothing, not as a bus that hangs.
+#
+# This is the same reasoning error that was made with CPU_RDY, left in place on
+# the other half of the bus. The header of this file claims "nothing off-chip is
+# unanalysed any more"; that was not true of the CPU's inputs.
+#
+# WHY BOUNDED DELAYS AND NOT set_input_delay. An input delay wants the CPU's
+# output-valid time referenced to the clock it receives, and on an 8088-class
+# part that is a large fraction of a bus period. This file declares
+# CPU_CLK_INT at the FASTEST ladder step -- 60 ns -- so honest input delays
+# would exceed the declared period and report failures that are artefacts of
+# the model, exactly what the note above warns about. Doing it properly needs
+# the uPD70108's tCLAV/tCLAX and a decision about which edge captures, i.e. the
+# datasheet and probably a scope.
+#
+# What can be said without either is the thing that actually went wrong: the
+# ON-CHIP part of these paths was UNBOUNDED. The fitter was free to route pad
+# to capture register however it liked, so it chose differently every build --
+# and cold boot became a lottery that any unrelated edit could re-roll. That is
+# the identical failure the PSRAM pads had, and it is fixed the identical way:
+# bound the FPGA's own share and leave the part's share to the datasheet.
+#
+# 20 ns is deliberately generous rather than tight. The point is to make the
+# number EXIST and stop moving, not to squeeze it -- a bound picked to just fit
+# today's measurement is how the PSRAM bound broke a build when a PLL signal
+# moved the placement. Tighten it only against a measurement that needs it.
+# -----------------------------------------------------------------------------
+set cpu_in [get_ports {CPU_A[*] CPU_AD[*] CPU_ALE CPU_RD CPU_WR CPU_IOM \
+                       CPU_DEN CPU_DTR CPU_INTA CPU_HLDA}]
+set_max_delay -from $cpu_in 20.000
 
 # -----------------------------------------------------------------------------
 # ...EXCEPT THE TWO SIGNALS THE HANDSHAKE CANNOT COVER.
