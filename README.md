@@ -51,6 +51,10 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
   Commander Keen 4 runs on it
 - **PS/2 keyboard** with extended keys, AltGr, and a hardware Ctrl+Alt+Del that no
   software can bypass
+- **USB mouse and keyboard** on the second port — a HID mouse driving `INT 33h`
+  (verified in Monkey Island and Arkanoid) and a HID keyboard typing into the BIOS
+  key buffer, both full speed and low speed. The USB keyboard works alongside the
+  PS/2 one; nothing contends for port 60h
 - **Two floppy drives**: `A:` served over serial from a host loader, `B:` a
   1.44 MB drive backed by the on-board SPI flash
 - 640 KB RAM, PC speaker, 8253 timer, 8259 PIC, 8237 DMA, 8255 PPI
@@ -61,12 +65,74 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
 | | Planned |
 |---|---|
 | **USB throughput** | ~85 KB/s today, and the bottleneck is the CPU's byte-at-a-time copy, not the wire. Memory-mapping the packet buffer into M9K makes it a `rep movsb` |
-| **USB keyboard** | The SIE exists now, so mostly a matter of low-speed support — most keyboards are 1.5 Mbps |
+| **USB hubs** | One device per port today. A hub needs the hub class driver, and a low-speed device behind a full-speed hub additionally needs `PRE` packets |
+| **NumLock and CapsLock** | The USB keyboard driver does not track either yet, so a numpad's navigation alternates are unreachable and Caps does nothing |
 | **AdLib / Sound Blaster** | The DMA controller and PIC are already there and proven; an OPL2 at `0x388` is the self-contained first step |
 | **EGA modes 0Eh and 10h** | Mode 0Dh works. The higher modes need 64 KB and 112 KB of planar memory and a 350-line CRTC; the planes are in SDRAM now, so the memory argument is settled and what remains is the mode plumbing |
 
 Full detail, including why each item is hard and what it needs, is in
 **[Status and roadmap](docs/status.md)**.
+
+## Release history
+
+Each release publishes three artifacts, and all three are needed: the `.jic` is the
+chipset, the `.sof` is the same thing over JTAG, and the `.64k` is the BIOS that runs
+on it. Updating one does not update the other.
+
+| Version | Date | Headline |
+|---|---|---|
+| *unreleased* | — | Low-speed USB, and a keyboard typing into DOS |
+| **[v1.20](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.20)** | 2026-08-17 | A USB mouse in real games — and the clock fix that raised the CPU ceiling |
+| **[v1.10](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.10)** | 2026-08-13 | EGA mode 0Dh, 640 KB in SDRAM, and every off-chip interface finally timed |
+| **[v1.00](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.00)** | 2026-07-30 | First release: a machine that boots on its own |
+
+### Unreleased
+
+| | |
+|---|---|
+| ✨ **Low speed (1.5 Mbps)** | The same SIE with a 32-clock bit time and the J/K polarity swapped once at the pads, so NRZI, CRC and the EOP detector are untouched. +141 logic elements, no second state machine |
+| ✨ **USB keyboard** | `USBKBD` puts a HID boot keyboard into the BIOS key buffer, so DOS sees it through `INT 16h`. Works alongside the PS/2 keyboard — nothing contends for port 60h. Ctrl+letter works here, which it does not on the PS/2 path |
+| 🐛 `CTRL` persists across programs | `LINE` reports the engine's *swapped* view once low speed is on, so a second tool read a low-speed device as full speed and drove it at 12 Mbps. Every tool now clears `CTRL` before asking |
+
+### v1.20 — USB input, and two boot-time races
+
+| | |
+|---|---|
+| ✨ **USB mouse on `INT 33h`** | Verified in *The Secret of Monkey Island* and *Arkanoid* — both reprogram PIT channel 0, which is exactly what breaks a timer-based driver |
+| ✨ **One USB engine per port** | `0xE8` and `0xA8`. The fixed disk and the hybrid port cannot interfere by construction |
+| ✨ **IRQ2 frame interrupt** | 125 Hz derived from SOF, a rate nothing in DOS can reprogram |
+| ✨ `USBENUM` `USBMOUSE` `USBMSDRV` | Enumerate and decode any device, a standalone cursor demo, and the resident driver |
+| 🔧 **CPU runs at 10 MHz** | Was 8.333. The READY budget had been derived from a datasheet figure specified at 4.5–5.5 V, on a part running at 3.33 V — every timing report green while the machine would not boot, and a finger on `CPU_CLK` fixed it |
+| 🐛 **Flash boot, 15/15 cold boots** | `MEM_READY` means the init sequence finished, not that the next access will work. The CPU's first fetch was racing the first real cycle |
+| 🐛 **Control transfers no longer assume a 64-byte EP0** | It is 8 on plenty of devices, and the old code ended the data stage on the first full packet *while reporting success* |
+| 🐛 **SDRAM power-up does 8 auto-refreshes** | Not 2. Eight is the count the part asks for |
+| 🔧 149 CPU input paths now analysed | They were false-pathed, so the fitter set their margin by accident and every build re-rolled it |
+
+### v1.10 — EGA, and the timing that made it stable
+
+| | |
+|---|---|
+| ✨ **EGA mode 0Dh** | 320×200×16, four 64 KB planes in SDRAM with the latch/ALU read-modify-write path, the 16-of-64 palette and CRTC page flipping. Commander Keen 4 runs |
+| ✨ **Conventional memory in SDRAM** | The 32 MB SDRAM, idle since day one, now holds all 640 KB at one speed |
+| ✨ **Programmable bus clock** | 5 – 16.667 MHz selected at run time, every edge on the 50 MHz grid |
+| ✨ **Blinking text cursor** | From registers the BIOS was already writing |
+| 🐛 **READY was arriving 14 ns late** | Against the V20's 8 ns allowance, and nothing had ever measured it — it was false-pathed. This is what made cold boot a lottery |
+| 🐛 **Nothing off-chip was timed** | SDRAM the textbook way, PSRAM and flash as bounded pad delays |
+| 🐛 **Keen 4's three pages landed on one** | The row stride is whatever the Offset register says, not 40 |
+| 🐛 **`INT 43h` was never set** | So nothing could find the 8×8 font, and text in graphics modes drew blanks |
+| 🐛 **The integrity checksum summed a live string** | So a serial boot and a flash boot could never agree, which is the one thing it existed to prove |
+
+### v1.00 — first release
+
+| | |
+|---|---|
+| ✨ **Runs standalone** | No host, no JTAG: the FPGA configures from its own flash, the BIOS comes from SPI flash, and DOS boots from the USB disk |
+| ✨ **USB hard disk as `C:`** | A full-speed host controller in fabric, with Bulk-Only Transport and SCSI in the BIOS. `FDISK`, `FORMAT` and `CHKDSK` all pass |
+| ✨ **MS-DOS 4.01 installed** | From its own three original floppies |
+| ✨ **Extended keyboard keys** | Arrows are arrows, not the keypad digits they share |
+| 🐛 **A long SPI read does not come back intact** | The boot ROM streamed 64 KB in one command and ~11,000 bytes came back wrong. Chunked at 512 bytes, zero |
+| 🐛 **The floppy handler scribbled on the keyboard's BDA bytes** | Phantom modifier keys, but only after disk activity, and only on the DOS versions that read them |
+| 🐛 **Two array writes in one clock** | Legal VHDL, simulates fine, does not synthesise — the `E0` prefix never reached the FIFO |
 
 ## Documentation
 
