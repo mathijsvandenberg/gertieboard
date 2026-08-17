@@ -4,7 +4,8 @@ Source: [`usb_host.vhd`](../../usb_host.vhd) · Instances `usb1` (port 0, `0xE8`
 `usb2` (port 1, `0xA8`) · Clocks `c0` (8.33 MHz CPU port) and `pll48` (48 MHz USB) ·
 ~900 logic elements each
 
-A **USB 1.1 full-speed host controller** with the serial interface engine in fabric.
+A **USB 1.1 host controller** — full speed and low speed — with the serial interface
+engine in fabric.
 Both USB ports on the top board are raw D+/D− straight to FPGA pins with the 15K
 pulldowns a host is supposed to have and no host-controller chip in between, so there
 was nothing else for it.
@@ -23,12 +24,13 @@ descriptor, assigns it an address and reads the descriptor again at the new addr
 
 ## What is in hardware and what is not
 
-Hardware does only what software cannot — bit-level timing at 12 Mbps:
+Hardware does only what software cannot — bit-level timing at 12 Mbps, or 1.5:
 
 - NRZI encode/decode, bit stuffing and unstuffing
 - the SYNC pattern and EOP
 - CRC5 for tokens, CRC16 for data
-- a 4× oversampling receiver that resynchronises on every transition
+- an oversampling receiver that resynchronises on every transition — 4× at full
+  speed, 32× at low
 - the response timeout
 - the 1 ms SOF that stops devices suspending after 3 ms of silence
 
@@ -50,6 +52,7 @@ this is the difference between an evening and a week. See [`tools/usbtest.asm`](
 | `RD` | IN | 1 | I/O read strobe, active low |
 | `WR` | IN | 1 | I/O write strobe, active low |
 | `DATAOUT` | INOUT | 8 | shared peripheral read bus |
+| `IRQ` | OUT | 1 | one-clock pulse every 8th frame while `CTRL[3]` is set. Leave `OPEN` on an instance that does not need it |
 | `USB_DP` / `USB_DM` | INOUT | 1 each | this instance's differential pair |
 
 The pair is driven only while transmitting and stays high-Z otherwise, so the pulldowns
@@ -82,7 +85,7 @@ port 1 substitute `0xA8`–`0xAF`.
 | | R | **DATA** ← RX buffer, pointer auto-increments |
 | `0xED` | W | **PTR** set both buffer pointers |
 | | R | current TX pointer |
-| `0xEE` | W | **CTRL** — `[0]` reserved (was port select) `[1]` BUSRESET `[2]` SOFEN |
+| `0xEE` | W | **CTRL** — `[0]` reserved (was port select) `[1]` BUSRESET `[2]` SOFEN `[3]` IRQEN `[4]` LOWSPEED |
 | | R | **LINE** — `[0]` D+ `[1]` D− `[2]` FS device `[3]` LS device `[4]` SOF running `[5]` PLL locked |
 | `0xEF` | W | **DIAG** select which counter the next read returns |
 | | R | **FRAME** low 8 bits of the frame counter (index `0x00`), or the selected counter |
@@ -101,12 +104,52 @@ wrong conclusions, so it can assert which port it is holding.
 
 ## Speed
 
-**Full speed only, 12 Mbps.** Mass storage is never low speed, and booting from a stick
-is the point of the exercise. A low-speed device is reported on `LINE[3]` and otherwise
-ignored.
+**Both: full speed (12 Mbps) and low speed (1.5 Mbps)**, selected by `CTRL[4]`. Software
+reads `LINE[2]` or `LINE[3]` to see which kind of device is attached and sets the bit to
+match **before** resetting the bus.
 
-48 MHz gives 4 samples per bit. See [clkgen / pll](clkgen-pll.md#pll48--48-mhz-for-usb)
-for why that number and why it is a second PLL.
+Low speed is the same engine with two differences and no second state machine — NRZI,
+bit stuffing, SYNC, CRC5, CRC16 and every packet format are identical at 1.5 Mbps:
+
+| | |
+|---|---|
+| **Bit time** | 48 MHz ÷ 1.5 Mbps = **32 clocks per bit** against full speed's 4. Both divide 48 MHz exactly, which is why that PLL frequency was chosen. Everything expressed in *bit times* scales with it — the response timeout and the receive guard included, or they would be 8× too short and report `TIMEOUT` for a device answering perfectly |
+| **Polarity** | J and K are named by which line is high, and low speed swaps them. The swap happens **once, at the pads**, so NRZI, the EOP detector and the idle checks are bit-for-bit the code that was already debugged. `SE0` is both lines low and survives the swap untouched, so bus reset and disconnect need no special case |
+
+The 1 ms marker differs too: full speed sends a SOF packet, low speed a bare **keep-alive
+EOP**, because a low-speed device never sees SOF — a hub does not forward it, so a SOF at
+1.5 Mbps would be a malformed packet rather than a frame marker. The frame counter
+advances either way, so `FRAME` and the interrupt read the same at both speeds.
+
+> `LINE` reports the **engine's** view of the pins, and low-speed mode swaps them. So a
+> low-speed device reads as `LINE[3]` *before* `CTRL[4]` is set and as `LINE[2]` — idle J
+> — *after*. Detect on bit 3, then use bit 2 downstream. `CTRL` also persists across
+> programs, so anything that cares must clear it before trusting `LINE`.
+
+**Not supported:** a low-speed device behind a full-speed hub. That needs `PRE` packets
+and a hub driver; directly attached needs neither.
+
+48 MHz gives 4 samples per bit at full speed, 32 at low. See
+[clkgen / pll](clkgen-pll.md#pll48--48-mhz-for-usb) for why that number and why it is a
+second PLL.
+
+## The frame interrupt
+
+`CTRL[3]` pulses the `IRQ` output every 8th frame — **125 Hz** — for an 8259 input. It
+needs `SOFEN`, since it counts frames. The top level wires it to **IRQ2** on the `usb2`
+instance and leaves `usb1`'s `OPEN`: the disk is polled by the BIOS and has no use for it.
+
+The point is what it is *not* derived from. A DOS mouse driver polling from `INT 08h`
+changes rate underneath itself the moment a game reprograms PIT channel 0 — which is most
+of the software anyone would want a mouse for. This clock cannot be touched from software.
+
+125 Hz is chosen rather than maximal: the endpoint offers 2 ms, but an 8088 servicing 500
+interrupts a second would spend a serious fraction of itself doing it, and mice of this era
+reported at 40–100 Hz.
+
+The crossing is a **toggle** in the 48 MHz domain, edge-detected in the CPU domain — never
+a pulse. A pulse a few 48 MHz cycles wide is invisible to a 10 MHz sampler, which is the
+lesson the `GO` handshake in this module taught three separate times.
 
 ## Bus reset is software-timed
 

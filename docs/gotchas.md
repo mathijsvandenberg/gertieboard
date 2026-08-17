@@ -1014,13 +1014,13 @@ rediscovered as bugs:
   [`SCROLLTST`](tools.md#scrolltst--does-the-display-start-address-land-where-it-should)
   exists to settle it; run that before wiring in the CGA half, rather than reading the
   screen.
-- **10 MHz does not boot.** The serial loader is never asked for a block. Partly explained
-  since: READY was arriving late enough to land in the CPU's sampling aperture (see
-  [above](#the-handshake-cannot-govern-the-handshake)), which gets worse as the step
-  rises, and that path is now bounded. Whether 10 MHz boots has not been re-tested since.
-  What has *not* been ruled out is the supply: pin 40 measures **3.33 V** on a part rated
-  4.5–5.5 V, with no droop during reset (scope-verified), and the default step is 8.333 MHz
-  on a `-8` part. Note also that the clock input is the one pin with a raised threshold —
+- ~~**10 MHz does not boot.**~~ **RESOLVED.** It was READY after all, and the fix was to
+  stop asking a pad to supply the skew: `cpuclk` now re-registers the bus clock on the
+  falling edge of the 100 MHz master, so `CPU_CLK` runs exactly 5 ns behind the internal
+  clock and that time goes straight to READY's aperture. The machine runs at **10 MHz**.
+  The supply was never the cause here, though it remains out of spec and worth stating:
+  pin 40 measures **3.33 V** on a part rated 4.5–5.5 V, with no droop during reset
+  (scope-verified), and the part is a `-8` being run at 10. Note also that the clock input is the one pin with a raised threshold —
   `VKH` is 3.9 V at 5 V VDD, 78 % of the rail where ordinary `VIH` is 44 % — and `tKKH` is
   measured at an **absolute** 3.0 V, which a 3.3 V LVTTL swing clears by very little. A
   single buffer on the clock line powered from the CPU's own rail would settle that

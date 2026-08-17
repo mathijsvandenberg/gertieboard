@@ -130,37 +130,33 @@ remove it.
 The software cursor also writes straight to `B800`, so it can fight with an application
 that redraws the same cell. A real driver would hide the cursor around video BIOS calls.
 
-### USB keyboard
+### USB keyboard — works
 
-The other half of the same dongle, and mostly the same work. A HID boot-protocol
-keyboard is one interrupt
-endpoint polled every 10 ms with fixed 8-byte reports, and
-[`ps2_kbd_ppi`](modules/ps2_kbd_ppi.md) already does the hard part downstream — HID usage
-codes to XT scancodes is the same class of translation it performs today, and the
-PPI-side interface would not change.
+A HID boot-protocol keyboard is one interrupt endpoint with fixed 8-byte reports, which
+is what makes it tractable: boot protocol means no HID report-descriptor parsing.
 
-The caveat used to be that most keyboards are **low speed** (1.5 Mbps) while `usb_host`
-is full-speed only, so this needed either a low-speed mode in the SIE — a different bit
-rate, and keep-alive instead of SOF — or a full-speed device.
+**Both speeds are supported now.** `usb_host` runs at 1.5 Mbps as well as 12, selected
+by `CTRL[4]` — a 32-clock bit time and the J/K polarity swapped once at the pads, so
+NRZI, CRC and the EOP detector are untouched. It cost 141 logic elements and no second
+state machine. See [usb_host](modules/usb_host.md#speed).
 
-A **Logitech Unifying receiver is a full-speed device**, which makes it the way in. One
-dongle presents three interfaces: a boot keyboard, a boot mouse, and a vendor HID++
-channel. Boot protocol on the first two means fixed 8-byte reports and no HID
-report-descriptor parsing, so the whole thing is software on the SIE that already
-exists. [`USBENUM`](tools.md#usbenum--what-is-plugged-in-and-how-to-drive-it) reads the
-layout off the device.
+[`USBKBD`](tools.md) is the driver. It enumerates a HID boot keyboard, services it from
+IRQ2 at 125 Hz and pushes translated keystrokes into the BDA key buffer, so DOS and
+every application see them through `INT 16h`.
 
-Low speed is still wanted eventually — it is what a *generic* wired mouse or keyboard
-needs — but it is no longer what stands between this board and a working pointer.
+**`INT 16h` rather than port 60h**, and that choice is what makes both keyboards work at
+once: [`ps2_kbd_ppi`](modules/ps2_kbd_ppi.md) owns 60h and drives IRQ1, so two things
+feeding one port would have to arbitrate in hardware. Injecting at the buffer needs no
+hardware change and nothing contends. The cost is real — the FPGA's Ctrl+Alt+Del
+detector watches the PS/2 scancode stream and cannot see a USB keyboard.
 
-Two things to know before writing that code. Its `bMaxPacketSize0` is **8**, which used
-to truncate every descriptor read from it — `u_ctl` now takes the size from the device
-instead of assuming 64, but `u_rq_cfg` still asks for only `U_BUFSZ` = 64 bytes of
-configuration descriptor and this one is 84, so HID awareness needs a larger buffer or a
-two-stage read; see [gotchas](gotchas.md). And there is no interrupt from `usb_host` yet, so a poll driven
-from `INT 08h` runs at 18.2 Hz — 55 ms per sample, which is visibly steppy for a
-pointer. `IRQ2` is free ([`int8259`](modules/int8259.md) has the port and the top level
-ties it low) and is the eventual answer.
+Ctrl actually works here, which it does not on the PS/2 path: that has no Ctrl
+translation at all, so Ctrl+C types a plain `c`. Ctrl+letter is masked to `0x01`–`0x1A`,
+so Ctrl+C breaks a program the way it should.
+
+Verified with a low-speed USB numpad typing into DOS. **Still missing:** NumLock and
+CapsLock are not tracked, so a numpad's navigation alternates are unreachable and Caps
+does nothing; and the driver does not uninstall.
 
 ### Sound: real FM, then the DSP
 
@@ -236,22 +232,6 @@ likely under CERN-OHL-P, since MIT does not really fit a PCB.
   of a rebuild. The buffer itself is already in M9K; this is the remaining half of that
   idea. Reasoning in [fixed disk](fixed-disk.md#where-the-buffer-lives).
 - **Real floppy drive** on a physical connector, instead of serving images.
-- **Make `c0` a single parameter.** It is now 8.33 MHz, but the rate still lives in six
-  places rather than one, and they must be kept in step by hand:
-
-  | Where | What it sets |
-  |---|---|
-  | `pll.vhd` `clk0_divide_by` | the rate itself — **and** `DIV_FACTOR0` in the Retrieval info, see [clkgen/pll](modules/clkgen-pll.md#the-megawizard-metadata-can-disagree-with-the-hardware) |
-  | `fdc8272` `CLK_FREQ` generic | the host link's baud divider — wrong and drive `A:` dies quietly. `BAUD_DIV` is an integer divide, so 8.33 MHz gives **1,041,667 baud** against the host's 1,000,000: 4.2 % fast, inside 8N1 tolerance but not comfortably. Only 10, 5 and 2 MHz divide exactly |
-  | `opl2_lite` `CLK_HZ` generic | AdLib sample rate and both detection timers |
-  | `sevenseg` `T_NIBBLE`/`T_BLANK` | raw cycle counts |
-  | `busdecode` READY backstop | counted in CPU clocks, so its *duration* scales |
-  | BIOS FDC and USB NAK budgets | iteration counts, so their duration scales too |
-
-  The last two are the dangerous ones, because nothing breaks visibly when they are
-  missed — a backstop that fires early returns undriven bus data, and a NAK budget that
-  expires early makes a merely-busy stick pad a sector from its stale buffer and report
-  success. Neither looks like a clock problem.
 
   **Speed grade is still undetectable.** An 8088, 8088-2 and 8088-1 are electrically
   identical; the grade is a marking on the package and a promise from Intel, exposed

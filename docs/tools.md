@@ -306,8 +306,15 @@ programmable from 5 to 16.667 MHz, so a calibrated spin is wrong at seven of the
 steps, and the 10 ms USB bus reset is a minimum rather than a suggestion. One tick is
 55 ms at every speed step, which over-satisfies it — the safe direction to be wrong in.
 
-A low-speed device is detected, named, and then declined: the SIE is full-speed only,
-so the tool says so plainly instead of letting it fail as a timeout several stages later.
+A low-speed device is detected, named and **driven**: the tool sets `CTRL[4]` from
+`LINE[3]` and carries on at 1.5 Mbps.
+
+It clears `CTRL` before reading `LINE`, and that is load-bearing rather than tidy.
+`CTRL` persists across programs, and `LINE` reports the engine's *swapped* view of the
+pins once low-speed mode is on — so after any tool leaves bit 4 set, the next one reads
+a low-speed device as full speed and drives it at 12 Mbps. That fails as a `TIMEOUT` on
+the first descriptor request, which looks exactly like a dead device. Running `USBENUM`
+twice in a row on a low-speed device used to fail the second time for this reason.
 
 ### USBMOUSE — a HID mouse moving a cursor
 

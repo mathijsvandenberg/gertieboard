@@ -158,7 +158,7 @@ memory bits before and after.
 | `0xEB` | [usb_host](modules/usb_host.md) | R/W | W TX length · R RX length |
 | `0xEC` | [usb_host](modules/usb_host.md) | R/W | Packet buffer, pointer auto-increments |
 | `0xED` | [usb_host](modules/usb_host.md) | R/W | Buffer pointer |
-| `0xEE` | [usb_host](modules/usb_host.md) | R/W | W bus reset / SOF enable (bit 0, port select, is now reserved) · R line state |
+| `0xEE` | [usb_host](modules/usb_host.md) | R/W | W bus reset / SOF enable / frame IRQ / low speed (bit 0, port select, is now reserved) · R line state |
 | `0xEF` | [usb_host](modules/usb_host.md) | R/W | W diagnostic index · R frame counter or selected counter |
 | `0x3D4` | [crtc6845](modules/crtc6845.md) | W | 6845 register index |
 | `0x3D5` | [crtc6845](modules/crtc6845.md) | R/W | 6845 register data — R14/R15 readable, R0–R13 read as 0 |
