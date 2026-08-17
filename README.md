@@ -12,7 +12,7 @@ had to be physical; a stock **Terasic DE0-Nano** underneath carries the FPGA.
    +----------------------------------------------------------+
    |  GERTIEBOARD MINI XT  -  MVDB 2021 REV 100                |
    |                                                            |
-   |    NEC V20 CPU  .  PSRAM  .  SPI FLASH (2 MB)             |
+   |    NEC V20 CPU  .  SPI FLASH (2 MB)  .  PSRAM (spare)     |
    |    VGA  .  PS/2 keyboard  .  2x USB  .  FTDI 3V3 serial   |
    |    7-segment POST display  .  buzzer  .  reset button     |
    +----------------------------------------------------------+
@@ -24,7 +24,8 @@ had to be physical; a stock **Terasic DE0-Nano** underneath carries the FPGA.
    |    8259 PIC, 8253 PIT, 8255 PPI, 8237 DMA, 8272 FDC,       |
    |    keyboard controller, USB host controller, boot ROM      |
    |                                                            |
-   |    also on it, unused: 32 MB SDRAM, accelerometer, ADC     |
+   |    32 MB SDRAM: all 640 KB of RAM and the EGA planes       |
+   |    also on it, unused: accelerometer, ADC                  |
    +----------------------------------------------------------+
 ```
 
