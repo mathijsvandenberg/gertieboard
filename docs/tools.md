@@ -38,11 +38,19 @@ WRITE:  FPGA -> host : 0x33 0x02 C H R <512 bytes>
 C = 0xFF  ->  serve from the BIOS image at offset (R-1) * 512
 ```
 
-**1 Mbaud, nominally.** `fdc8272` computes `BAUD_DIV = CLK_FREQ / BAUD` as an integer
-divide, so the real rate scales with `c0` and rarely lands on the round number. At the
-current 8.33 MHz it is `8333333 / 8` = **1,041,667** — 4.2 % fast, which the host's
-1000000 setting tolerates because 8N1 framing allows roughly 5 %. Only 10, 5 and 2 MHz
-divide exactly. If the host has to be halved to work, `c0` has halved.
+**1 Mbaud, exactly, at every speed step.** The UART has its own clock: `fdc8272` takes
+`CLK_UART` from `c3` (50 MHz, fixed), so `BAUD_DIV = 50_000_000 / 1_000_000` = **50**, a
+constant that does not move when the bus clock does.
+
+It used to divide the *bus* clock, and that stopped being survivable the moment the bus
+clock became a register. At 8.333 MHz the best divisor gave 1,041,667 baud — 4.2 % fast,
+inside 8N1's ~5 % envelope but not clear of it — and it could not scale at all: 2 Mbaud
+at 6.25 MHz wants a divisor of 3.125, and at 16.667 MHz a bit is 1.67 clocks and cannot
+be sampled. Putting the UART on a fixed clock made the link rate a property of the
+design rather than of whatever speed the machine happened to be running.
+
+Three **toggles** cross between the two domains — `tx_req`, `tx_ack`, `rx_tog` — never
+pulses. A 20 ns pulse does not survive a 200 ns clock.
 
 ## DOS diagnostics
 

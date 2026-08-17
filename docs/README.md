@@ -26,7 +26,7 @@
 ## Practical
 
 - **[Status and roadmap](status.md)** — what works today, and what is planned (USB
-  throughput, USB keyboard, Sound Blaster, EGA modes 0Eh/10h) with the real obstacle for
+  throughput, USB hubs, Sound Blaster, EGA modes 0Eh/10h) with the real obstacle for
   each.
 - **[Building](building.md)** — Quartus and assembler toolchains, the build
   scripts, and programming the FPGA and its configuration flash.
