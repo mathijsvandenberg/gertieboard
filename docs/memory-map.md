@@ -160,6 +160,12 @@ memory bits before and after.
 | `0xED` | [usb_host](modules/usb_host.md) | R/W | Buffer pointer |
 | `0xEE` | [usb_host](modules/usb_host.md) | R/W | W bus reset / SOF enable / frame IRQ / low speed (bit 0, port select, is now reserved) · R line state |
 | `0xEF` | [usb_host](modules/usb_host.md) | R/W | W diagnostic index · R frame counter or selected counter |
+| `0x3C0` | [ega_regs](modules/vga.md#ega-mode-0dh) | W | EGA attribute controller — index and data alternate on one port, steered by a flip-flop |
+| `0x3C1` | [ega_regs](modules/vga.md#ega-mode-0dh) | R | attribute controller data, indices 0–15 |
+| `0x3C4` | [ega_regs](modules/vga.md#ega-mode-0dh) | R/W | sequencer index (3 bits) |
+| `0x3C5` | [ega_regs](modules/vga.md#ega-mode-0dh) | R/W | sequencer data — map mask lives here |
+| `0x3CE` | [ega_regs](modules/vga.md#ega-mode-0dh) | R/W | graphics controller index (4 bits) |
+| `0x3CF` | [ega_regs](modules/vga.md#ega-mode-0dh) | R/W | graphics controller data — set/reset, function select, bit mask, read map |
 | `0x3D4` | [crtc6845](modules/crtc6845.md) | W | 6845 register index |
 | `0x3D5` | [crtc6845](modules/crtc6845.md) | R/W | 6845 register data — R14/R15 readable, R0–R13 read as 0 |
 | `0x3D8` | [vga](modules/vga.md) | W | CGA mode control |
@@ -178,7 +184,7 @@ memory bits before and after.
 | Ports | Why |
 |---|---|
 | `0x3B0`–`0x3BF` | MDA. Left floating (`0xFF`) so BIOSes that probe both pick CGA. |
-| `0x3C0`–`0x3CF` | EGA/VGA. Not implemented — this is a CGA machine. |
+| `0x3C2`, `0x3C6`–`0x3C9`, `0x3CA`–`0x3CD` | VGA-only registers and the EGA bits `ega_regs` does not need — miscellaneous output, the DAC, and the feature-control group. The EGA ports that *are* implemented are in the table above. |
 | `0x3F0`, `0x3F1`, `0x3F3`, `0x3F6` | Unused FDC registers. |
 
 > Note the SPI ports `0x98`–`0x9A` are **not** an IBM assignment; they were free on

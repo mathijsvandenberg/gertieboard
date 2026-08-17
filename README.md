@@ -9,24 +9,25 @@ Two stacked boards. The **Gertieboard Mini XT** top board carries everything tha
 had to be physical; a stock **Terasic DE0-Nano** underneath carries the FPGA.
 
 ```
-   +----------------------------------------------------------+
-   |  GERTIEBOARD MINI XT  -  MVDB 2021 REV 100                |
-   |                                                            |
-   |    NEC V20 CPU  .  SPI FLASH (2 MB)  .  PSRAM (spare)     |
-   |    VGA  .  PS/2 keyboard  .  2x USB  .  FTDI 3V3 serial   |
-   |    7-segment POST display  .  buzzer  .  reset button     |
-   +----------------------------------------------------------+
+   +--------------------------------------------------------------+
+   |  GERTIEBOARD MINI XT  -  MVDB 2021 REV 100                   |
+   |                                                              |
+   |    NEC V20 CPU  .  SPI FLASH (2 MB)  .  PSRAM (spare)        |
+   |    VGA  .  PS/2 keyboard  .  2x USB  .  FTDI 3V3 serial      |
+   |    7-segment POST display  .  buzzer  .  reset button        |
+   +--------------------------------------------------------------+
                   |  2x 40-pin GPIO
-   +----------------------------------------------------------+
-   |  Terasic DE0-Nano  (Cyclone IV EP4CE22F17C6)              |
-   |                                                            |
-   |    the chipset: bus decode, memory controller, CGA,        |
-   |    8259 PIC, 8253 PIT, 8255 PPI, 8237 DMA, 8272 FDC,       |
-   |    keyboard controller, USB host controller, boot ROM      |
-   |                                                            |
-   |    32 MB SDRAM: all 640 KB of RAM and the EGA planes       |
-   |    also on it, unused: accelerometer, ADC                  |
-   +----------------------------------------------------------+
+   +--------------------------------------------------------------+
+   |  Terasic DE0-Nano  (Cyclone IV EP4CE22F17C6)                 |
+   |                                                              |
+   |    the chipset: bus decode, memory controller,               |
+   |    CGA + EGA video, 8259 PIC, 8253 PIT, 8255 PPI,            |
+   |    8237 DMA, 8272 FDC, keyboard controller,                  |
+   |    USB host controller, boot ROM                             |
+   |                                                              |
+   |    32 MB SDRAM: all 640 KB of RAM and the EGA planes         |
+   |    also on it, unused: accelerometer, ADC                    |
+   +--------------------------------------------------------------+
 ```
 
 The CPU could have been a soft core in the FPGA, but putting a genuine processor
