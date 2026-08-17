@@ -83,18 +83,20 @@ on it. Updating one does not update the other.
 
 | Version | Date | Headline |
 |---|---|---|
-| *unreleased* | — | Low-speed USB, and a keyboard typing into DOS |
+| **[v1.21](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.21)** | 2026-08-17 | Low-speed USB, and a keyboard typing into DOS |
 | **[v1.20](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.20)** | 2026-08-17 | A USB mouse in real games — and the clock fix that raised the CPU ceiling |
 | **[v1.10](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.10)** | 2026-08-13 | EGA mode 0Dh, 640 KB in SDRAM, and every off-chip interface finally timed |
 | **[v1.00](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.00)** | 2026-07-30 | First release: a machine that boots on its own |
 
-### Unreleased
+### v1.21 — low speed, and a keyboard
 
 | | |
 |---|---|
 | ✨ **Low speed (1.5 Mbps)** | The same SIE with a 32-clock bit time and the J/K polarity swapped once at the pads, so NRZI, CRC and the EOP detector are untouched. +141 logic elements, no second state machine |
 | ✨ **USB keyboard** | `USBKBD` puts a HID boot keyboard into the BIOS key buffer, so DOS sees it through `INT 16h`. Works alongside the PS/2 keyboard — nothing contends for port 60h. Ctrl+letter works here, which it does not on the PS/2 path |
 | 🐛 `CTRL` persists across programs | `LINE` reports the engine's *swapped* view once low speed is on, so a second tool read a low-speed device as full speed and drove it at 12 Mbps. Every tool now clears `CTRL` before asking |
+| 🐛 The HID table stopped at usage `0x52` | Which is above every key a numpad sends, so the driver installed cleanly and typed nothing |
+| 📄 **Documentation audit** | Fourteen stale claims across seven files: USB documented as full-speed only, `CTRL` bits 3 and 4 undocumented, "10 MHz does not boot" (it does), the port map declaring the EGA registers absent that `ega_regs` implements, and throughput figures that disagreed with each other because none said which bus clock they were taken at |
 
 ### v1.20 — USB input, and two boot-time races
 
