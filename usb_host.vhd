@@ -68,6 +68,11 @@
 --                        SOFEN, since it counts frames. Independent of the PIT
 --                        on purpose: a DOS mouse driver on INT 08h changes rate
 --                        under itself the moment a game reprograms channel 0.
+--                    [4] LOWSPEED -- run the port at 1.5 Mbps instead of 12.
+--                        Set it BEFORE the bus reset, from LINE bit 3, and
+--                        leave it set for as long as that device is attached:
+--                        it changes the bit time and the line polarity, so
+--                        every packet either way depends on it being right.
 --         R  LINE    [0] D+ level        [1] D- level
 --                    [2] FS device seen  (idle J:  D+ high, D- low)
 --                    [3] LS device seen  (idle K:  D- high, D+ low)
@@ -78,9 +83,32 @@
 -- BUS RESET is deliberately software-timed. It has to be held at least 10 ms,
 -- which is an eternity in fabric and trivial in a DOS program.
 --
--- SPEED: full speed (12 Mbps) only. Mass storage is never low speed, and the
--- point of this is eventually to boot from a stick. A low-speed device will be
--- reported on bit 3 of LINE and otherwise ignored.
+-- SPEED: full speed (12 Mbps) and low speed (1.5 Mbps), selected by CTRL bit 4.
+-- Software reads LINE bit 2 or 3 to see which kind of device is attached and
+-- sets the bit to match before resetting the bus.
+--
+-- Low speed is the same engine with two differences and no third state machine:
+--
+--   BIT TIME   48 MHz / 1.5 Mbps = 32 clocks per bit instead of 4. Both divide
+--              48 MHz exactly, which is why this PLL frequency was chosen.
+--              Everything expressed in BIT TIMES scales with it -- the response
+--              timeout and the receive guard included, or they would be 8x too
+--              short and report TIMEOUT for a device answering perfectly.
+--
+--   POLARITY   J and K are defined by which line is high, and low speed swaps
+--              them. The swap is done ONCE, at the pads, so NRZI, SYNC, EOP,
+--              CRC and the idle checks are bit-for-bit the code that was
+--              already debugged. SE0 is both lines low and survives it
+--              untouched, so bus reset and disconnect need no special case.
+--
+-- The 1 ms marker differs too: full speed sends a SOF packet, low speed a bare
+-- keep-alive EOP, because a low-speed device never sees SOF -- a hub does not
+-- forward it. The frame counter advances either way, so FRAME and the IRQ read
+-- the same at both speeds.
+--
+-- NOT SUPPORTED: a low-speed device behind a full-speed hub. That needs PRE
+-- packets and a hub driver. Directly attached to this port, which is the case
+-- that matters here, needs neither.
 --
 -- ELECTRICAL CAVEAT: there are no series resistors on D+/D-, so the lines are
 -- driven straight from 3.3 V LVTTL pins with no source termination. That is out
@@ -132,9 +160,17 @@ ARCHITECTURE rtl OF usb_host IS
   CONSTANT PID_NAK   : std_logic_vector(7 DOWNTO 0) := x"5A";
   CONSTANT PID_STALL : std_logic_vector(7 DOWNTO 0) := x"1E";
 
-  -- 48 MHz / 12 Mbps = 4 clocks per bit
-  CONSTANT BIT_DIV   : integer := 4;
-  -- 1 ms of 48 MHz for the SOF generator
+  -- BIT TIME, AND IT IS NO LONGER A CONSTANT.
+  --   full speed  48 MHz / 12   Mbps =  4 clocks per bit
+  --   low  speed  48 MHz /  1.5 Mbps = 32 clocks per bit
+  -- Both divide 48 MHz exactly, which is the whole reason this PLL frequency
+  -- was chosen and the reason low speed costs a counter rather than a rethink.
+  CONSTANT BIT_DIV_FS : integer := 4;
+  CONSTANT BIT_DIV_LS : integer := 32;
+  SIGNAL   bit_div    : integer RANGE BIT_DIV_FS TO BIT_DIV_LS := BIT_DIV_FS;
+  -- 1 ms of 48 MHz. The same period at both speeds: full speed sends a SOF
+  -- packet, low speed a bare EOP keep-alive, but a device of either kind must
+  -- hear something inside 3 ms or it suspends.
   CONSTANT SOF_DIV   : integer := 48000;
   -- Response timeout. This bounds how long the device may take to START
   -- answering -- the FS limit is 7.5 bit times after EOP, so 24 is generous.
@@ -143,12 +179,19 @@ ARCHITECTURE rtl OF usb_host IS
   -- (SYNC 8 + PID 8 + EOP 3, plus turnaround) already needs ~27 bit times and an
   -- 8-byte DATA packet needs ~99. An earlier version timed the completion and so
   -- reported TIMEOUT for a device that was answering perfectly.
-  CONSTANT RX_TO     : integer := 24 * BIT_DIV;
+  -- Both bounds scale with the bit time, because both are expressed in BIT
+  -- TIMES in the spec and only happen to be cycle counts here. Left as
+  -- constants they would be 8x too short at low speed, and the engine would
+  -- report TIMEOUT for a device answering perfectly -- the same mistake the
+  -- note above records, one speed down.
+  SIGNAL   rx_to_max  : integer RANGE 0 TO 24*BIT_DIV_LS := 24*BIT_DIV_FS;
+  SIGNAL   rx_grd_max : integer RANGE 0 TO 1024*BIT_DIV_LS := 1024*BIT_DIV_FS;
+  CONSTANT RX_TO     : integer := 24 * BIT_DIV_FS;
   -- Backstop once a packet IS arriving: the longest legal one is a 64-byte DATA
   -- (8 + 8 + 512 + 16 + 3 bit times, plus stuffing), so 1024 bit times cannot cut
   -- a real packet short while still stopping a wedged receiver from hanging the
   -- engine. Bound the whole operation, not just each loop -- see docs/gotchas.md.
-  CONSTANT RX_GUARD  : integer := 1024 * BIT_DIV;
+  CONSTANT RX_GUARD  : integer := 1024 * BIT_DIV_LS;
 
   -- ---- CPU-side registers (CLK domain) -------------------------------------
   SIGNAL r_cmd      : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
@@ -221,12 +264,16 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL dp_r,  dm_r        : std_logic := '0';
   SIGNAL dp_p,  dm_p        : std_logic := '0';   -- previous, for edge detect
   SIGNAL tx_dp, tx_dm, tx_oe: std_logic := '0';
+  -- What actually reaches the pads: tx_dp/tx_dm swapped when low speed. VHDL
+  -- will not nest two conditional expressions in one concurrent assignment, so
+  -- the swap and the tri-state are separate steps rather than one line.
+  SIGNAL pad_dp, pad_dm     : std_logic;
 
   -- ---- transmitter ----------------------------------------------------------
   TYPE tx_st_t IS (T_IDLE, T_SYNC, T_BYTE, T_CRC, T_TAIL, T_EOP1, T_EOP2,
                    T_EOPJ, T_DONE);
   SIGNAL tx_st      : tx_st_t := T_IDLE;
-  SIGNAL tx_ph      : integer RANGE 0 TO BIT_DIV-1 := 0;
+  SIGNAL tx_ph      : integer RANGE 0 TO BIT_DIV_LS-1 := 0;
   SIGNAL tx_sh      : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
   SIGNAL tx_nbit    : integer RANGE 0 TO 8 := 0;
   SIGNAL tx_ones    : integer RANGE 0 TO 7 := 0;
@@ -249,6 +296,12 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL req_litn   : integer RANGE 0 TO 3 := 0;
   SIGNAL req_total  : std_logic_vector(6 DOWNTO 0) := (OTHERS => '0');
   SIGNAL req_crc16  : std_logic := '0';
+  -- "send nothing but an EOP". Low speed's 1 ms marker is a bare keep-alive,
+  -- not a SOF packet: a low-speed device never sees SOF (a hub does not forward
+  -- it), so sending one at 1.5 Mbps would be a malformed packet rather than a
+  -- frame marker. Latched with the same handshake as everything else here.
+  SIGNAL req_eop    : std_logic := '0';
+  SIGNAL tx_eop     : std_logic := '0';
   SIGNAL tx_go      : std_logic := '0';
   -- tx_go is a one-cycle pulse from the sequencer. If the transmitter is not in
   -- T_IDLE at that exact cycle the pulse is LOST, and the sequencer then waits
@@ -262,7 +315,7 @@ ARCHITECTURE rtl OF usb_host IS
   -- ---- receiver -------------------------------------------------------------
   TYPE rx_st_t IS (R_IDLE, R_SYNC, R_DATA, R_EOP);
   SIGNAL rx_st      : rx_st_t := R_IDLE;
-  SIGNAL rx_ph      : integer RANGE 0 TO BIT_DIV-1 := 0;
+  SIGNAL rx_ph      : integer RANGE 0 TO BIT_DIV_LS-1 := 0;
   SIGNAL rx_prev    : std_logic := '1';
   SIGNAL rx_ones    : integer RANGE 0 TO 7 := 0;
   SIGNAL rx_sh      : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
@@ -274,7 +327,7 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL rx_done    : std_logic := '0';
   SIGNAL rx_err     : std_logic := '0';
   SIGNAL rx_arm     : std_logic := '0';
-  SIGNAL rx_to_cnt  : integer RANGE 0 TO RX_TO := 0;
+  SIGNAL rx_to_cnt  : integer RANGE 0 TO 24*BIT_DIV_LS := 0;
   SIGNAL rx_gcnt   : integer RANGE 0 TO RX_GUARD := 0;
   -- Debounced SE0. D+ and D- do not switch at the same instant: on every J<->K
   -- transition there is a window of a few nanoseconds where D+ has already
@@ -363,11 +416,35 @@ BEGIN
   --  Pins.  This instance owns one port outright: driven while transmitting,
   --  high-Z otherwise so the pulldowns hold it at SE0.
   -- ==========================================================================
-  USB_DP <= tx_dp WHEN tx_oe = '1' ELSE 'Z';
-  USB_DM <= tx_dm WHEN tx_oe = '1' ELSE 'Z';
+  --  LOW SPEED IS THE SAME ENGINE WITH THE WIRES CROSSED.
+  --
+  --  J and K are defined by which line is high, and low speed swaps them: a
+  --  full-speed idle J is D+ high, a low-speed idle J is D- high. Rather than
+  --  teach NRZI, the SYNC pattern, the EOP detector and the idle checks each to
+  --  care about speed, the swap happens once, here, at the pads. Everything
+  --  inside the engine goes on thinking in full-speed terms and is bit-for-bit
+  --  unchanged -- which matters because those are the parts that were hard to
+  --  get right and are not worth re-proving.
+  --
+  --  SE0 is both lines low and survives the swap untouched, so bus reset, EOP
+  --  and disconnect detection need no special case at all.
+  pad_dp <= tx_dm WHEN ctrl_m(4) = '1' ELSE tx_dp;
+  pad_dm <= tx_dp WHEN ctrl_m(4) = '1' ELSE tx_dm;
 
-  dp_in <= USB_DP;
-  dm_in <= USB_DM;
+  USB_DP <= pad_dp WHEN tx_oe = '1' ELSE 'Z';
+  USB_DM <= pad_dm WHEN tx_oe = '1' ELSE 'Z';
+
+  dp_in <= USB_DM WHEN ctrl_m(4) = '1' ELSE USB_DP;
+  dm_in <= USB_DP WHEN ctrl_m(4) = '1' ELSE USB_DM;
+
+  -- ---- speed selection, all of it -------------------------------------------
+  -- CTRL bit 4 picks the bit time and both bit-time-derived bounds. Everything
+  -- else in the engine is speed-agnostic: NRZI, stuffing, CRC and the packet
+  -- formats are identical at 1.5 Mbps, which is why low speed costs a divisor
+  -- and a polarity swap rather than a second state machine.
+  bit_div    <= BIT_DIV_LS       WHEN ctrl_m(4) = '1' ELSE BIT_DIV_FS;
+  rx_to_max  <= 24*BIT_DIV_LS    WHEN ctrl_m(4) = '1' ELSE 24*BIT_DIV_FS;
+  rx_grd_max <= 1024*BIT_DIV_LS  WHEN ctrl_m(4) = '1' ELSE 1024*BIT_DIV_FS;
 
   io_hit <= '1' WHEN ADDR(15 DOWNTO 3) = IO_BASE(15 DOWNTO 3) ELSE '0';
   io_reg <= ADDR(2 DOWNTO 0);
@@ -582,8 +659,16 @@ BEGIN
           sie_txadr <= (OTHERS => '0');
           tx_src    <= '0';
           tx_crcen  <= '0';
-          IF tx_req = '1' THEN
+          IF tx_req = '1' AND req_eop = '1' THEN
+            -- keep-alive: straight to the EOP states, no SYNC, no PID, no CRC
             tx_req   <= '0';
+            tx_eop   <= '1';
+            tx_st    <= T_EOP1;
+            tx_oe    <= '1';
+            tx_dp    <= '0'; tx_dm <= '0';       -- SE0 immediately
+          ELSIF tx_req = '1' THEN
+            tx_req   <= '0';
+            tx_eop   <= '0';
             tx_st    <= T_SYNC;
             tx_nbit  <= 0;
             tx_oe    <= '1';
@@ -598,7 +683,7 @@ BEGIN
         -- pattern 00000001 through the NRZI encoder produces exactly that, and
         -- SYNC is never bit-stuffed.
         WHEN T_SYNC =>
-          IF tx_ph = BIT_DIV-1 THEN
+          IF tx_ph = bit_div-1 THEN
             tx_ph <= 0;
             IF tx_nbit = 7 THEN
               b := '1';
@@ -622,7 +707,7 @@ BEGIN
           END IF;
 
         WHEN T_BYTE =>
-          IF tx_ph = BIT_DIV-1 THEN
+          IF tx_ph = bit_div-1 THEN
             tx_ph <= 0;
             IF tx_stuff = '1' THEN
               -- forced 0 after six 1s
@@ -701,7 +786,7 @@ BEGIN
 
         -- CRC16 goes out inverted, MSB of the register first
         WHEN T_CRC =>
-          IF tx_ph = BIT_DIV-1 THEN
+          IF tx_ph = bit_div-1 THEN
             tx_ph <= 0;
             IF tx_stuff = '1' THEN
               tx_stuff <= '0'; tx_ones <= 0;
@@ -744,7 +829,7 @@ BEGIN
         -- A device that receives a SETUP whose last byte is missing answers
         -- STALL, which is exactly what the hardware did.
         WHEN T_TAIL =>
-          IF tx_ph = BIT_DIV-1 THEN
+          IF tx_ph = bit_div-1 THEN
             tx_ph <= 0;
             IF tx_stuff = '1' THEN
               -- A run of six 1s can end on the packet's very LAST bit, and the
@@ -769,14 +854,14 @@ BEGIN
 
         WHEN T_EOP1 =>                              -- SE0, two bit times
           tx_dp <= '0'; tx_dm <= '0';
-          IF tx_ph = BIT_DIV-1 THEN
+          IF tx_ph = bit_div-1 THEN
             tx_ph <= 0; tx_st <= T_EOP2;
           ELSE
             tx_ph <= tx_ph + 1;
           END IF;
 
         WHEN T_EOP2 =>
-          IF tx_ph = BIT_DIV-1 THEN
+          IF tx_ph = bit_div-1 THEN
             tx_ph <= 0; tx_st <= T_EOPJ;
             tx_dp <= '1'; tx_dm <= '0';             -- one bit of J
           ELSE
@@ -784,7 +869,7 @@ BEGIN
           END IF;
 
         WHEN T_EOPJ =>
-          IF tx_ph = BIT_DIV-1 THEN
+          IF tx_ph = bit_div-1 THEN
             tx_ph <= 0; tx_st <= T_DONE;
           ELSE
             tx_ph <= tx_ph + 1;
@@ -844,7 +929,7 @@ BEGIN
       samp := '0';
       IF edg = '1' THEN
         rx_ph <= 0;
-      ELSIF rx_ph = BIT_DIV-1 THEN
+      ELSIF rx_ph = bit_div-1 THEN
         rx_ph <= 0;
       ELSE
         IF rx_ph = 1 THEN
@@ -1004,6 +1089,14 @@ BEGIN
           rx_arm  <= '0';
           IF go_pend = '1' THEN                     -- a command is waiting
             go_pend  <= '0';
+            -- req_eop is a LATCH, and the keep-alive below sets it. Without
+            -- this clear, the first real token after a keep-alive would be
+            -- transmitted as a bare EOP: no SYNC, no PID, no CRC -- a packet
+            -- the device cannot even recognise as malformed, so it would
+            -- simply never answer and the engine would report TIMEOUT. That is
+            -- the fourth latched-handshake trap in this module; they all look
+            -- like a dead device.
+            req_eop  <= '0';
             c_txn    <= c_txn + 1;
             st_ack   <= '0'; st_nak <= '0'; st_stall <= '0';
             st_to    <= '0'; st_err <= '0'; st_rxv <= '0';
@@ -1029,13 +1122,25 @@ BEGIN
             IF ctrl_m(3) = '1' AND frame_cnt(2 DOWNTO 0) = "111" THEN
               irq_tog <= NOT irq_tog;
             END IF;
-            tok := frame_cnt(10 DOWNTO 0);
-            c5  := crc5(tok);
-            req_lit  <= (c5(0) & c5(1) & c5(2) & c5(3) & c5(4)
-                         & tok(10 DOWNTO 8)) & tok(7 DOWNTO 0) & PID_SOF;
-            req_litn <= 3;
-            req_crc16<= '0';
-            req_total<= (OTHERS => '0');
+            -- AT LOW SPEED THE 1 ms MARKER IS A BARE EOP, NOT A SOF PACKET.
+            -- A low-speed device never sees SOF: a hub does not forward it,
+            -- and the spec substitutes a keep-alive EOP so the device knows the
+            -- bus is alive without having to decode a frame number. Sending a
+            -- real SOF at 1.5 Mbps would be a malformed packet, not a marker.
+            -- The frame counter still advances, so IRQ and the FRAME register
+            -- read the same at both speeds.
+            IF ctrl_m(4) = '1' THEN
+              req_eop  <= '1';
+            ELSE
+              req_eop  <= '0';
+              tok := frame_cnt(10 DOWNTO 0);
+              c5  := crc5(tok);
+              req_lit  <= (c5(0) & c5(1) & c5(2) & c5(3) & c5(4)
+                           & tok(10 DOWNTO 8)) & tok(7 DOWNTO 0) & PID_SOF;
+              req_litn <= 3;
+              req_crc16<= '0';
+              req_total<= (OTHERS => '0');
+            END IF;
             tx_go    <= '1';
             tx_wcnt   <= 0;
             se      <= S_SOFW;
@@ -1113,7 +1218,7 @@ BEGIN
           ELSIF rx_st = R_IDLE THEN
             -- nothing has started arriving yet: this is the real response
             -- timeout, and the only case that should report TIMEOUT
-            IF rx_to_cnt = RX_TO-1 THEN
+            IF rx_to_cnt = rx_to_max-1 THEN
               rx_arm <= '0';
               st_to  <= '1';
               c_tmo  <= c_tmo + 1;
@@ -1123,7 +1228,7 @@ BEGIN
             END IF;
           ELSE
             -- a packet is coming in; let it finish, but do not wait forever
-            IF rx_gcnt = RX_GUARD-1 THEN
+            IF rx_gcnt = rx_grd_max-1 THEN
               rx_arm <= '0';
               st_err <= '1';
               se     <= S_FIN;
