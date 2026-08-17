@@ -286,6 +286,43 @@ must already be clear.
 
 ---
 
+## A constant that is really a property of the device
+
+A USB control data stage ends when a packet arrives that is **shorter than the
+endpoint's max packet size**. The BIOS's `u_ctl` wrote that test as `cmp cx, 64`.
+
+That is right for every device this board has ever talked to, because mass-storage
+sticks use a 64-byte control endpoint — and wrong for anything with a smaller one. A
+Logitech Unifying receiver reports `bMaxPacketSize0 = 8`, so on that device the **first
+full packet already looks short**: the data stage ends after 8 bytes and returns success.
+An 18-byte device descriptor comes back as 8 valid bytes followed by 10 bytes of
+whatever was in the buffer, with `CF` clear.
+
+Nothing about that failure points at the short-packet test. The transfer succeeded, the
+first eight bytes are correct, and `bLength` in byte 0 is right — so the *header* of
+every descriptor reads fine and only the tail is garbage.
+
+The number 64 was never a constant of the protocol. It was a property of the one device
+in front of us, promoted to a constant because it never varied. Modelling the two rules
+against a reconstructed `046D:C52B` descriptor set:
+
+| short-packet test | device descriptor | configuration descriptor |
+|---|---|---|
+| `64` | 8 of 18 bytes | 8 of 84 bytes |
+| `bMaxPacketSize0` | 18 of 18 | 84 of 84 |
+
+**When a value is read from the device during enumeration, using it is not optional —
+and a literal that happens to match every device you own is a constant waiting to
+expire.**
+
+The sharpest detail: `bMaxPacketSize0` was *already being stored* in BDA `0xC7` at
+enumeration stage 3, and nothing ever read it. The right value was present the whole
+time and the constant was used anyway. `u_ctl` now copies `0xC7` per call and tests
+against that, and `u_enum` resets `0xC7` to 8 before stage 3 — that byte is RAM, so a
+warm boot would otherwise inherit the *previous* device's size.
+
+---
+
 ## Timing races in I/O sequences
 
 The [`flash`](modules/flash.md) SPI engine latches its transmit on the **falling edge**
@@ -335,6 +372,115 @@ quartus_sta gertieboard 2>&1 | grep "could not be matched"     # must be empty
 Quartus reported **0 memory bits**, never listed the MIF as a used source, and warned
 that `rom` "was never assigned a value". For a boot ROM that is silent and fatal. It is
 now a VHDL `CONSTANT` array, which always synthesises with its values.
+
+---
+
+## "Ready" meant the init finished, not that the next access would work
+
+The CPU is held in reset until main memory reports `MEM_READY`. That signal says
+*the initialisation sequence has completed*. `clkgen` treated it as *the next
+access will succeed*, and dropped `RST_OUT` on the very next clock — so the
+CPU's first fetch raced the first cycle the memory controller had ever run for
+real.
+
+It failed about **one cold boot in seven**, and only from flash, never from a
+JTAG load. That combination is what made it so hard: a JTAG reload leaves the
+memory already initialised by the previous bitstream, so the race does not
+exist there.
+
+### The three numbers that solved it
+
+The boot loader's memory probe reports a code, a count, a value, **and the OR of
+every differing bit**. That last number is the one that mattered:
+
+```
+E3  1C  00  7F
+```
+
+The probe writes `offset XOR 0x5A`, so the expected value's bit 7 equals the
+offset's bit 7. `7F` means bit 7 *never* differed — so every one of the 28
+failures lay in the **first 128 bytes** of the block, and they read back `00`.
+
+**Early writes lost, later writes fine.** That is the shape of memory that is not
+quite awake. It is not the shape of broken memory, a wrong address decode, or a
+marginal data path — all of which scatter their errors across the block.
+
+Without that bit-mask the evidence pointed nowhere: the count and the value
+alone are consistent with half a dozen causes, and roughly that many were
+proposed and disproved before the mask was read properly.
+
+### What did not work, and why it is instructive
+
+`clkgen` already had a ten-clock reset stretch, and lengthening it changes
+nothing — `MEM_READY` dominates it by two orders of magnitude, so the stretch
+expires long before memory is up. **The gap was specifically *after* ready.**
+"Make the reset longer" is only useful once you know which part of it is short.
+
+The fix is 8192 bus clocks — about 1 ms, invisible against the second the FPGA
+already spends configuring from EPCS.
+
+### The general shape
+
+**A ready signal is a claim about the past, not a promise about the next
+cycle.** Anything that reports "initialised" deserves the question: does it mean
+the sequence finished, or that the device will answer correctly right now? On
+this board the two differ by about a millisecond, and one boot in seven found it.
+
+---
+
+## A constraint that is met, against a premise that is wrong
+
+Adding a second USB engine stopped the machine booting. It was not the engine. Every
+report was clean — 0 errors, positive slack at every corner, no unmatched constraint —
+and the board would not fetch its BIOS over serial. **Putting a finger on `CPU_CLK` made
+it work.**
+
+A fingertip is tens of picofarads: a few hundred picoseconds of extra delay on the
+clock. Delaying the CPU's clock hands that time straight to READY, which is the lever
+the SDC already pulls deliberately with its pad minimum. So the hardware was saying the
+READY aperture was too narrow — while the analyser insisted the constraint was met.
+
+Both were right. The constraint *was* met. It was derived from `tSRYLK = 8 ns`, and that
+figure is the µPD70108 datasheet's **at 4.5–5.5 V**. [This part runs at
+3.33 V](hardware.md). Undervolted CMOS is slower by an amount no datasheet for this
+operating point states, so the real allowance is smaller than 8 ns and the budget built
+on it was too generous.
+
+**This fails differently from a violated path, and that is the whole lesson.** A
+violation is red in a report and someone eventually looks at it. A constraint met
+against a wrong premise is green forever. It presents as:
+
+- every timing report clean, across every corner
+- the machine dead, or intermittently dead
+- unrelated edits deciding whether it boots, because they shift placement inside a
+  margin that was never really there
+- **a finger fixing it**
+
+If touching a pin changes behaviour, stop reasoning about logic. That is an analogue
+measurement, and it outranks the reports — the reports are only as good as the numbers
+they were derived from, and a datasheet figure quoted outside its supply range is not a
+number, it is an assumption.
+
+The repair was to stop asking a pad to supply the skew. `cpuclk` re-registers the bus
+clock on the falling edge of the 100 MHz master, so `CPU_CLK` runs exactly 5 ns behind —
+a clock edge, identical at every step, corner and build, where the pad minimum was
+2.5 ns that the fitter would only ever promise 2.722 of. The internal bus clock is
+untouched, so peripheral edges stay on `c3`'s 20 ns grid.
+
+Three sub-traps came with it, each of which failed the build on its own:
+
+- **Slowing the pad is the wrong lever, twice over.** 4 mA bought 0.225 ns and pushed
+  the pad to 6.037 ns against a 6.000 ceiling — and the V20 measures its clock high time
+  at 3.0 V, so time spent in transition comes straight out of `tKKH`.
+- **A new register lands where the fitter likes.** The delayed flop cost 1.6 ns of
+  routing to the pin until `FAST_OUTPUT_REGISTER` put it in the I/O cell.
+- **The old bound was load-bearing only while it was the only one.** Leaving the pad
+  minimum at 2.500 failed hold by 0.676 ns once the register moved into the IOE.
+
+And the margin that was won was **not** banked: `CPU_RDY` stays constrained at 10.35 ns
+against a budget that is now 14.35, because the 4 ns is being held against `tSRYLK`
+being wrong at 3.33 V. Relaxing a constraint to whatever the new number allows rebuilds
+the same lottery one level up.
 
 ---
 

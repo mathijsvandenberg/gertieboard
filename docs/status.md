@@ -97,17 +97,70 @@ Writes still use the byte loop. `REP OUTSB` is the same one-line change, but wan
 [`USBSOAK`](tools.md#usbsoak--sustained-write--read--verify) pass on a scratch stick
 first, not on the disk with DOS installed on it.
 
+### USB input — the mouse works, in real software
+
+**A USB mouse drives `INT 33h` on this machine**, verified in *The Secret of Monkey
+Island* and *Arkanoid*. `USBMSDRV.COM` enumerates a Logitech Unifying receiver on the
+hybrid port, puts its mouse interface into boot protocol, and services it from **IRQ2 at
+125 Hz**. `USBMOUSE.COM` is the standalone demo that proved the path first.
+
+That those two games work is the specific thing worth testing, because they are what a
+timer-based driver would have broken. Polling from `INT 08h` is the obvious approach and
+the wrong one: PIT channel 0 gets reprogrammed by anything wanting its own tick rate, so
+a driver hanging off it changes rate underneath itself or stops — on exactly the
+software someone wants a mouse for. The poll clock is the USB frame counter instead
+(`usb_host` CTRL bit 3), which nothing in DOS can touch.
+
+What the device reports, read off it with
+[`USBENUM`](tools.md#usbenum--what-is-plugged-in-and-how-to-drive-it):
+
+| | |
+|---|---|
+| Device | `046D:C52B`, full speed, EP0 max packet **8** |
+| Interface 0 | HID boot **keyboard**, `ep 81` IN, every 8 ms |
+| Interface 1 | HID boot **mouse**, `ep 82` IN, every 2 ms |
+| Interface 2 | vendor HID++, `ep 83` IN, every 2 ms |
+
+Still open: **uninstall is not implemented**. `USBMSDRV /u` says so rather than
+pretending. Doing it properly means finding the resident copy through the vector,
+restoring both vectors from its data, masking IRQ2, clearing IRQEN and freeing the
+block — and refusing when something else has hooked `INT 33h` afterwards. Reboot to
+remove it.
+
+The software cursor also writes straight to `B800`, so it can fight with an application
+that redraws the same cell. A real driver would hide the cursor around video BIOS calls.
+
 ### USB keyboard
 
-The easy one now that the SIE exists. A HID boot-protocol keyboard is one interrupt
+The other half of the same dongle, and mostly the same work. A HID boot-protocol
+keyboard is one interrupt
 endpoint polled every 10 ms with fixed 8-byte reports, and
 [`ps2_kbd_ppi`](modules/ps2_kbd_ppi.md) already does the hard part downstream — HID usage
 codes to XT scancodes is the same class of translation it performs today, and the
 PPI-side interface would not change.
 
-One caveat: most keyboards are **low speed** (1.5 Mbps) and `usb_host` is full-speed
-only. So this needs either a low-speed mode in the SIE — a different bit rate, and
-keep-alive instead of SOF — or a full-speed keyboard.
+The caveat used to be that most keyboards are **low speed** (1.5 Mbps) while `usb_host`
+is full-speed only, so this needed either a low-speed mode in the SIE — a different bit
+rate, and keep-alive instead of SOF — or a full-speed device.
+
+A **Logitech Unifying receiver is a full-speed device**, which makes it the way in. One
+dongle presents three interfaces: a boot keyboard, a boot mouse, and a vendor HID++
+channel. Boot protocol on the first two means fixed 8-byte reports and no HID
+report-descriptor parsing, so the whole thing is software on the SIE that already
+exists. [`USBENUM`](tools.md#usbenum--what-is-plugged-in-and-how-to-drive-it) reads the
+layout off the device.
+
+Low speed is still wanted eventually — it is what a *generic* wired mouse or keyboard
+needs — but it is no longer what stands between this board and a working pointer.
+
+Two things to know before writing that code. Its `bMaxPacketSize0` is **8**, which used
+to truncate every descriptor read from it — `u_ctl` now takes the size from the device
+instead of assuming 64, but `u_rq_cfg` still asks for only `U_BUFSZ` = 64 bytes of
+configuration descriptor and this one is 84, so HID awareness needs a larger buffer or a
+two-stage read; see [gotchas](gotchas.md). And there is no interrupt from `usb_host` yet, so a poll driven
+from `INT 08h` runs at 18.2 Hz — 55 ms per sample, which is visibly steppy for a
+pointer. `IRQ2` is free ([`int8259`](modules/int8259.md) has the port and the top level
+ties it low) and is the eventual answer.
 
 ### Sound: real FM, then the DSP
 

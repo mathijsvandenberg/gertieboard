@@ -149,16 +149,17 @@ memory bits before and after.
 | `0x98` | [flash](modules/flash.md) | R/W | SPI: write starts a byte exchange; read returns the received byte |
 | `0x99` | [flash](modules/flash.md) | R | SPI status — bit 7 = BUSY |
 | `0x9A` | [flash](modules/flash.md) | W | SPI control — bit 0 = `/CS` (0 = assert) |
+| `0xA8`–`0xAF` | [usb_host](modules/usb_host.md) `usb2` | R/W | **USB port 1**, the hybrid port. Same eight registers as `0xE8`–`0xEF` below |
 | `0xE2` | [bootrom](modules/bootrom.md) | W | bit 0 = 1 disables the boot ROM overlay |
 | `0xE4` | [ctrl_reg](modules/ctrl_reg.md) | W | PSRAM timing: `SCK_DIV` (2:0), `RD_LAT` (6:3) |
-| `0xE8` | [usb_host](modules/usb_host.md) | R/W | USB command / status |
+| `0xE8` | [usb_host](modules/usb_host.md) `usb1` | R/W | **USB port 0**, the fixed disk. Command / status |
 | `0xE9` | [usb_host](modules/usb_host.md) | W | USB device address |
 | `0xEA` | [usb_host](modules/usb_host.md) | R/W | W endpoint · R raw PID of the last packet received |
 | `0xEB` | [usb_host](modules/usb_host.md) | R/W | W TX length · R RX length |
 | `0xEC` | [usb_host](modules/usb_host.md) | R/W | Packet buffer, pointer auto-increments |
 | `0xED` | [usb_host](modules/usb_host.md) | R/W | Buffer pointer |
-| `0xEE` | [usb_host](modules/usb_host.md) | R/W | W port select / bus reset / SOF enable · R line state |
-| `0xEF` | [usb_host](modules/usb_host.md) | R | USB frame counter, low byte |
+| `0xEE` | [usb_host](modules/usb_host.md) | R/W | W bus reset / SOF enable (bit 0, port select, is now reserved) · R line state |
+| `0xEF` | [usb_host](modules/usb_host.md) | R/W | W diagnostic index · R frame counter or selected counter |
 | `0x3D4` | [crtc6845](modules/crtc6845.md) | W | 6845 register index |
 | `0x3D5` | [crtc6845](modules/crtc6845.md) | R/W | 6845 register data — R14/R15 readable, R0–R13 read as 0 |
 | `0x3D8` | [vga](modules/vga.md) | W | CGA mode control |

@@ -19,6 +19,26 @@ ARCHITECTURE behavior OF clkgen IS
 
 SIGNAL CNT : INTEGER RANGE 0 TO 16 := 0;
 
+-- SETTLING TIME AFTER MAIN MEMORY REPORTS READY.
+--
+-- MEM_READY says "the initialisation sequence has finished", which is not the
+-- same claim as "the next access will work". Until now RST_OUT dropped on the
+-- clock immediately after mr_sync went high, so the CPU's very first fetch
+-- raced the first cycle the controller had ever run for real.
+--
+-- The failure that motivates this: on a cold boot the loader's memory probe
+-- reports ~28 of 256 bytes wrong, CLUSTERED IN THE FIRST HALF of the block and
+-- reading back 00 -- early writes lost, later ones fine. That is the shape of
+-- memory that is not quite awake yet, not of memory that is broken.
+--
+-- 8192 bus clocks is about 1 ms at the 8.333 MHz boot step. Invisible: the
+-- FPGA spends the best part of a second configuring from EPCS before any of
+-- this runs. Deliberately generous rather than minimal -- if it turns out to
+-- be the fix, the interesting number is which value stops working, and that
+-- is a later experiment.
+CONSTANT SETTLE_N : INTEGER := 8192;
+SIGNAL SETTLE : INTEGER RANGE 0 TO SETTLE_N := 0;
+
 -- MEM_READY crosses from c3 (50 MHz) into this c0 domain. It is a level that
 -- rises once and stays, so two flops are enough and metastability cannot do
 -- worse than delay the release of reset by one clock.
@@ -46,12 +66,17 @@ BEGIN
 			mr_sync <= mr_sync(0) & MEM_READY;
 			IF (RESET = '0') THEN
 				CNT <= 0;
+				SETTLE <= 0;
 				RST_OUT <= '1';
 			ELSIF (CNT < 10) THEN
 				RST_OUT <= '1';
 				CNT <= CNT + 1;
 			ELSIF (mr_sync(1) = '0') THEN
 				RST_OUT <= '1';          -- memory is not up yet
+				SETTLE <= 0;             -- and has not started settling either
+			ELSIF (SETTLE < SETTLE_N) THEN
+				RST_OUT <= '1';          -- up, but give it a moment before the
+				SETTLE <= SETTLE + 1;    -- first fetch races the first access
 			ELSE
 				RST_OUT <= '0';
 			END IF;

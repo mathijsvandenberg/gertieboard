@@ -88,7 +88,11 @@ ENTITY cpuclk IS
         WR       : IN    std_logic;                       -- active-low I/O write
         DATAOUT  : INOUT std_logic_vector(7 DOWNTO 0);
         -- the clock itself
-        CLK_CPU  : OUT   std_logic;
+        CLK_CPU  : OUT   std_logic;   -- internal bus clock, on c3's 20 ns grid
+        -- The same clock delayed half a 100 MHz period (5 ns), for the CPU pin
+        -- ONLY. See the note at its process. Drive CPU_CLK from this, never
+        -- from CLK_CPU, or the 5 ns of READY aperture goes away silently.
+        CLK_CPU_PAD : OUT std_logic;
         -- everything downstream that is tuned in clocks and has to stay tuned
         -- in seconds. See the tables below.
         OPL_SMP  : OUT   integer RANGE 1 TO 1023;
@@ -163,6 +167,7 @@ ARCHITECTURE behavior OF cpuclk IS
   SIGNAL lo_r   : integer RANGE 2 TO 10 := LO_TAB(DEF_IDX);
   SIGNAL cnt    : integer RANGE 0 TO 10 := HI_TAB(DEF_IDX);
   SIGNAL clk_q  : std_logic := '0';
+  SIGNAL clk_pad : std_logic := '0';   -- clk_q delayed 5 ns, for the CPU pin
 
 BEGIN
 
@@ -220,6 +225,44 @@ BEGIN
        ELSE LO_TAB(CONV_INTEGER(idx_ok));
 
   CLK_CPU <= clk_q;
+
+  ------------------------------------------------------------------------------
+  -- THE CPU'S OWN COPY OF THE CLOCK, DELIBERATELY 5 ns LATE.
+  --
+  -- clk_q toggles on the RISING edge of CLK100, so re-registering it on the
+  -- FALLING edge produces the same waveform delayed by exactly half a 100 MHz
+  -- period. Not approximately: the delay is a clock edge, so it is the same at
+  -- every speed step, every corner and every build, which is the whole point.
+  --
+  -- WHY. READY has to be valid by CLK-fall AT THE CPU plus tSRYLK, and holding
+  -- the CPU's clock back hands that time straight to READY. The SDC already
+  -- does this with a 2.5 ns min-delay on the pad -- this is the same lever,
+  -- an order of magnitude larger, and in the fabric where it can be guaranteed
+  -- rather than at a pad where the fitter could only ever promise ~2.7 ns.
+  --
+  -- The board said it needed this before the analysis could. With the pad at
+  -- maximum drive the machine would not fetch its BIOS at all; a FINGER on
+  -- CPU_CLK -- tens of picofarads, a few hundred ps -- got it to boot. Dropping
+  -- the pad to 4 mA bought 0.225 ns and left it "barely booting, no keyboard".
+  -- The requirement is nanoseconds, and only a clock edge supplies those.
+  --
+  -- It costs nothing on the other side. Read data must be valid tSDK before the
+  -- same edge, so moving that edge LATER helps data setup too; the budget there
+  -- has ~29 ns spare in any case. Only the CPU's own outputs shift, and they
+  -- shift together with the clock they are referenced to.
+  --
+  -- The INTERNAL bus clock is untouched: peripherals still run on clk_q, which
+  -- keeps every edge on c3's 20 ns grid. Only the pin moves off it, and nothing
+  -- inside the FPGA is clocked by the pin.
+  ------------------------------------------------------------------------------
+  PROCESS (CLK100)
+  BEGIN
+    IF falling_edge(CLK100) THEN
+      clk_pad <= clk_q;
+    END IF;
+  END PROCESS;
+
+  CLK_CPU_PAD <= clk_pad;
 
   ------------------------------------------------------------------------------
   -- The step register, on the clock it controls. Same shape as ctrl_reg: watch

@@ -225,6 +225,159 @@ is impossible, and that is the reading that means the pulldowns or the wiring ar
 > "the SETUP stage was ACKed but the IN data stage failed" point at completely different
 > halves of the problem.
 
+### USBENUM — what is plugged in, and how to drive it
+
+`USBTEST` proves the controller works and reads a device descriptor. `USBENUM` goes one
+step further and walks the **configuration** descriptor, which is what you need before
+writing a driver: how many interfaces the device has, what class each one is, and which
+endpoint to poll at what interval.
+
+```
+usbenum            enumerate port 1, the hybrid port
+usbenum 0          enumerate port 0 — this resets the fixed disk out from
+                   under DOS, so do not run it with a mounted C:
+usbenum 1 L        report the line state and stop, no device needed
+```
+
+**Run `usbenum 1 L` with nothing plugged in first**, especially after any work on the
+port. It is the only measurement of whether the pulldowns are doing their job, and only
+four readings are possible:
+
+| `D+/D-` | Meaning |
+|---|---|
+| `00` | bare bus, pulldowns holding `SE0` — what you want with nothing attached |
+| `01` | `D+` high: a full-speed device is attached |
+| `02` | `D-` high: a low-speed device is attached |
+| `03` | impossible on a real bus — **the pins are floating** |
+
+`03` with nothing attached means a missing, open or badly soldered pulldown. That matters
+more than it looks: a floating port does not fail cleanly, it *half* enumerates, and
+every reading taken afterwards is noise that happens to resemble data. Anything from 15K
+to 22K reads identically here — see [hardware](hardware.md#usb).
+
+Expected with a Logitech Unifying receiver on port 1:
+
+```
+port 1 at 0xA8
+ engine responds   ok
+ 48 MHz locked     ok
+ device present    ok
+   full speed (12 Mbps)
+ bus reset         ok
+ SOF running       ok
+ descriptor @ 0    ok
+   EP0 max packet  8
+ SET_ADDRESS(1)    ok
+ device descriptor ok
+device:
+  VID 046D  PID C52B  class 00/00/00  configs 1
+  device class 0 = composite; the interfaces carry the classes
+ configuration     ok
+configuration: 3 interface(s), total length 0x0054
+  iface 0 alt 0 class 03/01/01  (HID boot keyboard)
+    ep 81 IN  interrupt max 0x0008 every 8 ms
+  iface 1 alt 0 class 03/01/02  (HID boot mouse)
+    ep 82 IN  interrupt max 0x0008 every 2 ms
+  iface 2 alt 0 class 03/00/00  (HID, not boot protocol)
+    ep 83 IN  interrupt max 0x0020 every 2 ms
+```
+
+Three things here are worth more than they look.
+
+**It asks the engine which window it decodes** (diagnostic index `0x0E`) and refuses to
+continue if that disagrees with the window it is driving. With two engines answering at
+two addresses, a tool pointed at the wrong one reads plausible registers and draws
+confident wrong conclusions — the same class of mistake the `0xA5` build signature
+exists to prevent, one level up.
+
+**The data stage ends on a packet shorter than the ENDPOINT's max packet size**, not
+shorter than 64. `bMaxPacketSize0` is 8 on plenty of devices, and on those a hardcoded
+64 makes the *first full packet* look short: an 18-byte device descriptor comes back
+with 8 valid bytes and 10 bytes of stale buffer, and the transfer reports **success**.
+
+**The descriptor chain is a linked list by length, not a fixed layout.** Each entry
+starts with `bLength`/`bDescriptorType`, and unknown types have to be skipped by their
+own length. A HID descriptor sits between every interface and its endpoints, so a
+fixed-stride walk finds the interfaces and then reads the HID descriptor where it
+expected an endpoint.
+
+**Delays come from the BIOS tick at `40:6C`**, not a spin loop. The bus clock here is
+programmable from 5 to 16.667 MHz, so a calibrated spin is wrong at seven of the eight
+steps, and the 10 ms USB bus reset is a minimum rather than a suggestion. One tick is
+55 ms at every speed step, which over-satisfies it — the safe direction to be wrong in.
+
+A low-speed device is detected, named, and then declined: the SIE is full-speed only,
+so the tool says so plainly instead of letting it fail as a timeout several stages later.
+
+### USBMOUSE — a HID mouse moving a cursor
+
+The first USB input device on this board, and the proof that the HID path works.
+
+```
+usbmouse           port 1, the hybrid port
+usbmouse 0         port 0 — resets the fixed disk, not with a mounted C:
+```
+
+It enumerates, finds the boot-protocol mouse interface, configures it, and polls. An
+inverted cell moves around the text screen, the left button turns it red, and the
+position and button byte appear in the top-right corner. ESC restores the cell and exits.
+
+Four things in here are the difference between working and not:
+
+**Boot protocol removes the parser.** A HID device normally describes its reports in a
+report descriptor, which is a small stack language. `SET_PROTOCOL(0)` makes it promise a
+fixed three-byte report instead — buttons, signed X, signed Y — so there is none here.
+
+**NAK is the normal answer**, so polling uses a *non-retrying* transaction. An idle mouse
+NAKs constantly; the control-transfer helper retries NAK 400 times, which is right for
+control and catastrophic in a poll loop.
+
+**The endpoint must belong to the mouse interface.** On a composite device the endpoint
+following interface 0 is the *keyboard's*. The walk only accepts an endpoint while the
+last interface it saw was the mouse.
+
+**SOF must already be running before the first control transfer.** `USBENUM` gets this
+by accident — it measures the frame counter, which costs it a tick. `USBMOUSE` enabled
+SOF and went straight to `GET_DESCRIPTOR`, and failed until the delay was made explicit.
+A device fresh out of reset wants frames on the bus before it is addressed.
+
+If enumeration fails it names the stage, the request, and the raw status and PID —
+STALL is a refusal, TIMEOUT is nobody home, and they point at opposite problems.
+
+### USBMSDRV — the INT 33h mouse driver
+
+The resident driver, so ordinary DOS software sees a mouse. Verified in *The Secret of
+Monkey Island* and *Arkanoid*.
+
+```
+usbmsdrv           install on the hybrid port
+usbmsdrv /u        not implemented — says so and exits
+```
+
+About 2 KB resident. Hooks `INT 33h` and `INT 0Ah`, enables the frame interrupt
+(`usb_host` CTRL bit 3), unmasks IRQ2 and services the mouse at **125 Hz**. Answers
+`INT 33h` functions 0 (reset), 1 (show), 2 (hide), 3 (position and buttons), 4 (set
+position) and 11 (motion counters).
+
+**It is on IRQ2 rather than the timer, and that is the whole design.** PIT channel 0 is
+reprogrammed by any game that wants its own tick rate, so a driver polling from
+`INT 08h` changes rate underneath itself or stops — on exactly the software anyone
+would want a mouse for. Monkey Island and Arkanoid are the test *because* they do this.
+
+Constraints a resident driver has that a demo does not, all of them load-bearing:
+
+- the ISR does no DOS calls and never blocks; NAK from an idle mouse is "no news"
+- `wait_done`'s budget is **1024** here against 65536 in the diagnostic tools — this
+  spins with interrupts disabled inside an interrupt handler, so a wedged engine would
+  hold the whole machine off for the length of that loop
+- vectors are hooked **before** the interrupt is enabled, or the first IRQ2 lands on
+  whatever was in the slot
+- EOI on every path out, including the re-entry guard
+- `INT 33h` speaks **virtual pixels**, 8 per text cell — reporting cells directly puts
+  every application's cursor in column 10
+- reading the motion counters **clears** them; leaving them accumulating makes callers
+  drift
+
 ### USBSOAK — sustained write / read / verify
 
 The instrument that found the bit-stuffing bug. Every failure in the storage stack looks

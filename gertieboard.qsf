@@ -379,3 +379,36 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DRAM_WE_N
 # where it was being routed differently on every build. See gertieboard.sdc.
 set_instance_assignment -name FAST_INPUT_REGISTER ON -to DRAM_DQ
 
+
+# =============================================================================
+
+# =============================================================================
+# CPU CLOCK EDGE RATE -- 2026-08-16
+#
+# CPU_CLK and CPU_RDY are both at MAXIMUM CURRENT above, and CPU_CLK's is
+# deliberate rather than left over. It was reduced to 4 mA for one build, to
+# add pad delay: the board needed the CPU's clock held back, and a FINGER on
+# the pin -- tens of picofarads -- was the difference between the serial BIOS
+# fetch failing outright and completing. 4 mA bought 0.225 ns and left the
+# machine "barely booting, no keyboard". The requirement was nanoseconds.
+#
+# That delay now comes from the fabric instead: cpuclk re-registers the bus
+# clock on the falling edge of the 100 MHz master, so the pin runs exactly 5 ns
+# behind, at every step and corner. With a real 5 ns in hand the pad should be
+# FAST again -- a lazy clock edge into an undervolted CPU helps nothing, and at
+# 4 mA the pad path reached 6.013 ns against the SDC's 6.000 ceiling, which is
+# a violation bought for 0.225 ns of skew that the fabric now supplies twenty
+# times over.
+#
+# SLEW_RATE is not an option on this pin in any case: Cyclone IV rejects a slew
+# setting on 3.3-V LVTTL at 4 mA outright (errors 169303 / 169205).
+# =============================================================================
+
+# Put clk_pad's flop IN the I/O cell. Without this the fitter places it in the
+# fabric wherever it likes and the route to the pin costs ~1.6 ns on top of the
+# pad -- 6.037 ns against the SDC's 6.000 ceiling, i.e. a violation created
+# purely by where a new register landed. In the IOE the path is the pad and
+# nothing else, which is both shorter and the same on every build. The 5 ns of
+# deliberate skew lives in WHICH EDGE clocks this flop, not in how far its
+# output has to travel, so shortening this costs none of it.
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to CPU_CLK

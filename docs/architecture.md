@@ -30,7 +30,7 @@ flowchart TB
             CST["cga_status<br/>0x3DA"]
             FDC["fdc8272<br/>0x3F2-0x3F7"]
             COM["com1_stub<br/>0x3F8-0x3FF"]
-            USB["usb_host<br/>0xE8-0xEF"]
+            USB["usb_host x2<br/>0xE8-0xEF · 0xA8-0xAF"]
         end
 
         subgraph MEMB["Memory bus"]

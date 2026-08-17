@@ -83,6 +83,8 @@ ARCHITECTURE structural OF gertieboard IS
   -- cpuclk1 divides the PLL's 100 MHz c0 down to the selected step, so the
   -- speed is a register the CPU can write. See cpuclk.vhd.
   SIGNAL n_cpuclk               : std_logic;
+  -- The CPU pin's copy of the bus clock, 5 ns late on purpose. See cpuclk.vhd.
+  SIGNAL n_cpuclk_pad           : std_logic;
   SIGNAL n_c100                 : std_logic;   -- pll1 c0, 100 MHz
   SIGNAL n_opl_smp              : integer RANGE 1 TO 1023;
   SIGNAL n_opl_t1               : integer RANGE 1 TO 8191;
@@ -468,6 +470,7 @@ BEGIN
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
       CLK_CPU              => n_cpuclk,
+      CLK_CPU_PAD          => n_cpuclk_pad,
       OPL_SMP              => n_opl_smp,
       OPL_T1               => n_opl_t1,
       OPL_T2               => n_opl_t2
@@ -774,7 +777,20 @@ BEGIN
       locked               => n_usb_locked
     );
 
+  -- ONE ENGINE PER PORT. usb_host used to drive both pin pairs from a single
+  -- SIE selected by a CTRL bit, which made the fixed disk on port 0 and any
+  -- device on port 1 share one set of registers -- a poll of one could repoint
+  -- the pins in the middle of a transaction on the other. Two instances cost
+  -- ~900 LEs on a part with roughly three quarters of its logic free, and they
+  -- cannot interfere by construction.
+  --
+  -- The instance label `usb1` is kept for the PORT 0 engine even though `usb2`
+  -- below serves port 1. Labels here are the original schematic names and are
+  -- deliberately never renamed; the off-by-one is in the name only.
   usb1 : ENTITY work.usb_host
+    GENERIC MAP (
+      IO_BASE              => x"00E8"    -- port 0: drive C:, the fixed disk
+    )
     PORT MAP (
       CLK                  => n_cpuclk,
       CLK48                => n_clk48,
@@ -785,10 +801,31 @@ BEGIN
       RD                   => n_io_rd,
       WR                   => n_io_wr,
       DATAOUT              => n_periph_rdata,
-      USB0_DP              => USB0_DP,
-      USB0_DM              => USB0_DM,
-      USB1_DP              => USB1_DP,
-      USB1_DM              => USB1_DM
+      IRQ                  => OPEN,       -- the disk is polled, not driven
+      USB_DP               => USB0_DP,
+      USB_DM               => USB0_DM
+    );
+
+  -- Port 1: the hybrid port -- HID, or a USB floppy, or whatever is plugged in.
+  -- 0xA8..0xAF is clear of everything this board decodes and, unlike the
+  -- adjacent 0xF0..0xFF, is not the 8087 window that real software probes.
+  usb2 : ENTITY work.usb_host
+    GENERIC MAP (
+      IO_BASE              => x"00A8"
+    )
+    PORT MAP (
+      CLK                  => n_cpuclk,
+      CLK48                => n_clk48,
+      LOCKED               => n_usb_locked,
+      RESET                => n_rst_out,
+      DATAIN               => n_cpu_wdata,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      IRQ                  => n_irq2,
+      USB_DP               => USB1_DP,
+      USB_DM               => USB1_DM
     );
 
   inst3 : ENTITY work.ps2_kbd_ppi
@@ -809,13 +846,18 @@ BEGIN
     );
 
   -- constant tie-offs (GND/VCC symbols in the schematic)
-  n_irq2 <= '0';
+  -- IRQ2 is usb2's frame interrupt now. It was tied low; on a PC/XT with a
+  -- single 8259 this line is genuinely free (it is the AT that uses it as the
+  -- slave cascade), and this board implements neither the EGA nor the network
+  -- cards that were the other XT claimants.
   n_iochk_n <= '0';
   n_cpu_nmi <= '0';
   n_g0 <= '1';
 
   -- top-level pin connections
-  CPU_CLK <= n_cpuclk;
+  -- The CPU gets the DELAYED copy, never n_cpuclk. That 5 ns is READY's
+  -- aperture -- see cpuclk.vhd. Peripherals keep the undelayed clock.
+  CPU_CLK <= n_cpuclk_pad;
   CPU_RST <= n_rst_out;
   VGA_HS <= n_hs;
   VGA_VS <= n_vs;
@@ -902,6 +944,6 @@ BEGIN
   DBG(7) <= '0';
   DBG(4) <= '0';
   DBG(5) <= '0';
-  -- USB0_DP/DM and USB1_DP/DM are driven by usb_host now.
+  -- USB0_DP/DM and USB1_DP/DM are driven by their own usb_host instance now.
 
 END structural;

@@ -52,12 +52,44 @@ param(
     [string[]]$Files,
     [string]$Token = $env:GITHUB_TOKEN,
     [switch]$PreRelease,
+    [switch]$CreateTag,
+    [switch]$AllowDirty,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = 'mathijsvandenberg/gertieboard'
 $root = Split-Path -Parent $PSScriptRoot
+
+# ---- the tag has to be a real thing, on this commit -------------------------
+# Without this the release is created from a tag NAME, and GitHub happily
+# invents the tag at whatever the default branch happens to be. That is fine
+# right up until it is not: publish from a feature branch, or after one more
+# commit, and the release points at code nobody built. The artifacts would be
+# correct and the source link would be wrong, which is the worst combination
+# because only the source link is checkable later.
+$gitStatus = & git -C $root status --porcelain
+if ($gitStatus -and -not $AllowDirty) {
+    throw ("the working tree is dirty:`n  " + (($gitStatus | Select-Object -First 10) -join "`n  ") +
+           "`n`nA release built from uncommitted work cannot be reproduced from the tag." +
+           " Commit it, or pass -AllowDirty if you genuinely mean to.")
+}
+
+$head = (& git -C $root rev-parse HEAD).Trim()
+$tagAt = & git -C $root rev-list -n 1 $Tag 2>$null
+if (-not $tagAt) {
+    if (-not $CreateTag) {
+        throw "tag $Tag does not exist. Create it, or pass -CreateTag to tag HEAD ($($head.Substring(0,7)))."
+    }
+    Write-Host "creating tag $Tag at $($head.Substring(0,7))" -ForegroundColor Cyan
+    if (-not $DryRun) {
+        & git -C $root tag -a $Tag -m "Release $Tag"
+        & git -C $root push origin $Tag
+    }
+} elseif ($tagAt.Trim() -ne $head) {
+    throw ("tag $Tag points at $($tagAt.Trim().Substring(0,7)) but HEAD is $($head.Substring(0,7)).`n" +
+           "Publishing would ship artifacts built from HEAD under a tag naming other code.")
+}
 $stage = Join-Path $root "release-staging\$Tag"
 
 # ---- descriptions shown in the loader's picker ------------------------------
@@ -170,6 +202,28 @@ if ($stale) {
            " .64k - then publish. Shipping a mismatched set is how a release ends up" +
            " with a BIOS and a bitstream from different builds.")
 }
+
+# ---- the BIOS must agree with the tag ---------------------------------------
+# The staleness check above catches a BIOS older than its source. It does NOT
+# catch a BIOS that was rebuilt correctly and still says the previous version,
+# because forgetting to bump the string is not a timestamp problem. That is a
+# release which is internally consistent, freshly built, and lies to the user
+# on the POST screen -- and the POST screen is the ONLY place a user can see
+# which firmware they are running.
+#
+# The version lives in three .asciz strings in xtbios_src.s. This checks the
+# built image rather than the source, because what ships is the image.
+$verWanted = "Release " + ($Tag -replace '^[vV]', '')
+foreach ($b in ($selected | Where-Object { (Get-Kind $_.Name) -eq 'bios' })) {
+    $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($b.FullName))
+    if ($text -notlike "*$verWanted*") {
+        throw ("$($b.Name) does not contain `"$verWanted`".`n`n" +
+               "Bump the version strings in tools\xtbios_src.s and rebuild with" +
+               " tools\mkbios.sh. Publishing $Tag with a BIOS that reports a" +
+               " different release is not something anyone finds later.")
+    }
+}
+Write-Host "  BIOS reports $verWanted" -ForegroundColor DarkGray
 
 # ---- stage ------------------------------------------------------------------
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -Confirm:$false }

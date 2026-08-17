@@ -78,9 +78,43 @@ display cannot distinguish "halted here" from "looping here". See
 ### USB
 
 Both ports are raw `D+`/`D-` on FPGA pins (`USB0_DP`/`USB0_DM`, `USB1_*`), with the
-host-side 15K pulldowns on the board and no host-controller chip in between — so the
-serial interface engine lives in fabric. [`usb_host`](modules/usb_host.md) drives them
-and enumerates a full-speed device.
+host-side pulldowns on the board and no host-controller chip in between — so the
+serial interface engine lives in fabric. Each port gets **its own**
+[`usb_host`](modules/usb_host.md) instance, so port 0 (the fixed disk) and port 1
+cannot interfere: `usb1` at `0xE8`–`0xEF`, `usb2` at `0xA8`–`0xAF`.
+
+#### The pulldowns are a range, not a magic number
+
+A downstream port needs a pulldown on each of `D+` and `D-`. The classic figure is 15K,
+but USB 2.0 specifies a **range of roughly 14.25 kΩ to 24.8 kΩ**, and that window is
+deliberately asymmetric: it opens *upward*.
+
+The reason is that a larger pulldown loads the device's 1.5K pull-up **less**, so the
+idle single-ended high level goes up rather than down:
+
+| Rpd | idle high at V<sub>TERM</sub> 3.3 V | SE0 level at 10 µA pin leakage | in spec? |
+|---|---|---|---|
+| 10K | 2.87 V | 0.10 V | **no** — below the 14.25 kΩ floor |
+| 15K | 3.00 V | 0.15 V | yes, near the bottom of the range |
+| 18K | 3.05 V | 0.18 V | yes |
+| 20K | 3.07 V | 0.20 V | yes |
+| 22K | 3.09 V | 0.22 V | yes |
+
+Both columns have to hold. The left one is margin over V<sub>IH</sub> (2.0 V) when a
+device is attached and idling; the right is how well the pulldown holds `SE0` against
+pin leakage with **nothing** attached, which is what sets the upper limit. Cyclone IV E
+tri-state leakage is ±10 µA worst case, so even 22K sits four times under the 0.8 V
+V<sub>IL</sub> threshold.
+
+So anything from 15K to 22K is fine, 18K and 20K are E12 values and therefore easy to
+buy, and 5 % parts are good enough — 20K ±5 % is 19–21 kΩ, nowhere near either limit.
+**Use the same value on `D+` and `D-` of a given port**: matching within the pair matters
+more than the absolute value, because a mismatch puts a small differential offset on the
+idle state. The two ports do not have to match each other.
+
+> **Fitting a resistor to a port that already has one puts the two in parallel.** 15K in
+> parallel with 20K is 8.6 kΩ, which is below the floor and in the one direction the
+> range does not allow. Measure the pad to ground before adding, not after.
 
 > **No series resistors** on D+/D-. USB wants ~22-33 ohm of source termination and there
 > is none, so the lines are driven straight from 3.3 V LVTTL pins. It works on the bench;

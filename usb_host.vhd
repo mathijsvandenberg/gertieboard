@@ -5,6 +5,15 @@
 -- 15K pulldowns a host is supposed to have and no host-controller chip in
 -- between. So the serial interface engine lives here, in fabric.
 --
+-- ONE INSTANCE DRIVES ONE PORT. It used to drive both, muxed by a port-select
+-- bit in CTRL, which meant the fixed disk on USB0 and anything on USB1 shared a
+-- single engine: a mouse poll landing between the CBW and the CSW of a disk
+-- transfer would repoint the pins mid-transaction. The top level now
+-- instantiates this entity twice, once per port, at two I/O windows chosen by
+-- the IO_BASE generic. The cost is ~900 LEs on a part with room to spare; what
+-- it buys is that the two ports cannot interfere at all, and the disk path is
+-- unchanged rather than merely arbitrated.
+--
 -- WHAT IS IN HARDWARE AND WHAT IS NOT
 -- -----------------------------------
 -- Hardware does only what software cannot: bit-level timing at 12 Mbps. That is
@@ -16,7 +25,11 @@
 -- be changed with a rebuild instead of a reflash. The CPU sets up one
 -- transaction, starts it, and reads the result. See tools/usbtest.asm.
 --
--- I/O MAP  (0xE8..0xEF, next to the other custom registers at 0xE2/0xE4)
+-- I/O MAP  (8 registers at IO_BASE, which must be 8-byte aligned)
+--   USB0 / fixed disk : 0xE8..0xEF, next to the other custom registers
+--   USB1 / everything else : 0xA8..0xAF
+-- The offsets below are named relative to IO_BASE; the 0xE8.. addresses are
+-- spelled out because every existing tool and the BIOS use them literally.
 -- ---------------------------------------------------------------------
 --   0xE8  W  CMD     [2:0] operation   0 = NOP
 --                                      1 = SETUP  token + DATA0 + handshake
@@ -45,9 +58,16 @@
 --         R  DATA    read a byte from the RX buffer, pointer auto-increments
 --   0xED  W  PTR     set both buffer pointers (normally 0)
 --         R  PTR     current TX pointer
---   0xEE  W  CTRL    [0] port select, 0 = USB0, 1 = USB1
+--   0xEE  W  CTRL    [0] RESERVED -- was port select while one engine drove both
+--                        ports. Ignored now; each instance has its own pins.
+--                        Software that writes 0 here is unaffected, which is
+--                        every caller that only ever used USB0.
 --                    [1] BUSRESET -- drive SE0 while set (software times 10 ms)
 --                    [2] SOFEN    -- run the 1 ms SOF generator
+--                    [3] IRQEN    -- pulse IRQ every 8th frame (125 Hz). Needs
+--                        SOFEN, since it counts frames. Independent of the PIT
+--                        on purpose: a DOS mouse driver on INT 08h changes rate
+--                        under itself the moment a game reprograms channel 0.
 --         R  LINE    [0] D+ level        [1] D- level
 --                    [2] FS device seen  (idle J:  D+ high, D- low)
 --                    [3] LS device seen  (idle K:  D- high, D+ low)
@@ -75,6 +95,12 @@ USE  IEEE.STD_LOGIC_ARITH.all;
 USE  IEEE.STD_LOGIC_UNSIGNED.all;
 
 ENTITY usb_host IS
+  GENERIC (
+    -- Base of this instance's 8-register I/O window. MUST be 8-byte aligned:
+    -- the decode compares ADDR(15 DOWNTO 3) and indexes with ADDR(2 DOWNTO 0),
+    -- so a misaligned base would silently answer at the wrong eight addresses.
+    IO_BASE   : std_logic_vector(15 DOWNTO 0) := x"00E8"
+  );
   PORT (
     CLK       : IN    std_logic;                     -- 10 MHz CPU I/O bus (c0)
     CLK48     : IN    std_logic;                     -- 48 MHz USB domain
@@ -85,10 +111,11 @@ ENTITY usb_host IS
     RD        : IN    std_logic;                     -- active low
     WR        : IN    std_logic;                     -- active low
     DATAOUT   : INOUT std_logic_vector(7 DOWNTO 0);
-    USB0_DP   : INOUT std_logic;
-    USB0_DM   : INOUT std_logic;
-    USB1_DP   : INOUT std_logic;
-    USB1_DM   : INOUT std_logic
+    -- One-clock pulse every 8 SOF frames while CTRL bit 3 is set, for an 8259
+    -- input. Leave OPEN on an instance that does not need it.
+    IRQ       : OUT   std_logic;
+    USB_DP    : INOUT std_logic;
+    USB_DM    : INOUT std_logic
   );
 END usb_host;
 
@@ -142,6 +169,19 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL wr_prev    : std_logic := '1';
   SIGNAL rd_prev    : std_logic := '1';
   SIGNAL rd_data_c  : std_logic := '0';   -- a read of 0xEC is in progress
+
+  -- ---- I/O window decode ----------------------------------------------------
+  -- Split once, here, so no decode site has to know the base address.
+  SIGNAL io_hit     : std_logic;                        -- ADDR is in our window
+  SIGNAL io_reg     : std_logic_vector(2 DOWNTO 0);     -- which of the eight
+  CONSTANT RG_CMD    : std_logic_vector(2 DOWNTO 0) := "000";  -- 0xE8
+  CONSTANT RG_DEVA   : std_logic_vector(2 DOWNTO 0) := "001";  -- 0xE9
+  CONSTANT RG_ENDP   : std_logic_vector(2 DOWNTO 0) := "010";  -- 0xEA
+  CONSTANT RG_LEN    : std_logic_vector(2 DOWNTO 0) := "011";  -- 0xEB
+  CONSTANT RG_DATA   : std_logic_vector(2 DOWNTO 0) := "100";  -- 0xEC
+  CONSTANT RG_PTR    : std_logic_vector(2 DOWNTO 0) := "101";  -- 0xED
+  CONSTANT RG_CTRL   : std_logic_vector(2 DOWNTO 0) := "110";  -- 0xEE
+  CONSTANT RG_DIAG   : std_logic_vector(2 DOWNTO 0) := "111";  -- 0xEF
 
   -- ---- status back from the USB domain -------------------------------------
   SIGNAL st_busy    : std_logic := '0';
@@ -257,6 +297,12 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL se_d1     : std_logic := '0';
   SIGNAL sof_cnt   : integer RANGE 0 TO SOF_DIV-1 := 0;
   SIGNAL sof_req   : std_logic := '0';
+  -- Frame interrupt. A TOGGLE in the 48 MHz domain, edge-detected in the CPU
+  -- domain -- not a pulse. A pulse a few 48 MHz cycles wide is invisible to a
+  -- 10 MHz sampler, which is the same lesson the GO handshake taught this
+  -- module three times over.
+  SIGNAL irq_tog   : std_logic := '0';
+  SIGNAL irq_m1, irq_m2, irq_m3 : std_logic := '0';
   -- GO must be LATCHED, not edge-detected in place. "go_m3 /= go_m2" is true
   -- for exactly one 48 MHz cycle as the toggle walks the synchroniser, so a
   -- command issued while the sequencer was busy -- sending a SOF, for instance,
@@ -314,16 +360,19 @@ ARCHITECTURE rtl OF usb_host IS
 BEGIN
 
   -- ==========================================================================
-  --  Pins.  Only the selected port is ever driven; the other stays high-Z so
-  --  its pulldowns hold it at SE0.
+  --  Pins.  This instance owns one port outright: driven while transmitting,
+  --  high-Z otherwise so the pulldowns hold it at SE0.
   -- ==========================================================================
-  USB0_DP <= tx_dp WHEN (tx_oe = '1' AND ctrl_m(0) = '0') ELSE 'Z';
-  USB0_DM <= tx_dm WHEN (tx_oe = '1' AND ctrl_m(0) = '0') ELSE 'Z';
-  USB1_DP <= tx_dp WHEN (tx_oe = '1' AND ctrl_m(0) = '1') ELSE 'Z';
-  USB1_DM <= tx_dm WHEN (tx_oe = '1' AND ctrl_m(0) = '1') ELSE 'Z';
+  USB_DP <= tx_dp WHEN tx_oe = '1' ELSE 'Z';
+  USB_DM <= tx_dm WHEN tx_oe = '1' ELSE 'Z';
 
-  dp_in <= USB1_DP WHEN ctrl_m(0) = '1' ELSE USB0_DP;
-  dm_in <= USB1_DM WHEN ctrl_m(0) = '1' ELSE USB0_DM;
+  dp_in <= USB_DP;
+  dm_in <= USB_DM;
+
+  io_hit <= '1' WHEN ADDR(15 DOWNTO 3) = IO_BASE(15 DOWNTO 3) ELSE '0';
+  io_reg <= ADDR(2 DOWNTO 0);
+
+  IRQ <= irq_m2 XOR irq_m3;
 
   se_code <= x"0" WHEN se = S_IDLE   ELSE
              x"1" WHEN se = S_TOKEN  ELSE
@@ -370,6 +419,13 @@ BEGIN
             (LOCKED & go_pend & tx_req & st_busy &
              sof_req & ctrl_m(1) & rx_code)
                                    WHEN diag_sel = x"0D" ELSE
+            -- Which instance is answering. With two engines at two windows, a
+            -- tool pointed at the wrong one reads plausible-looking registers
+            -- and draws confident wrong conclusions -- the same failure mode as
+            -- the build signature below, one level up. This reads back the low
+            -- byte of the window the instance actually decodes, so software can
+            -- assert it is talking to the port it thinks it is.
+            IO_BASE(7 DOWNTO 0)    WHEN diag_sel = x"0E" ELSE
             -- Build signature. Twice now, a board running an older bitstream has
             -- been diagnosed as a USB fault: the registers still answer, so the
             -- controller looks present, and the numbers look like a real failure.
@@ -382,16 +438,16 @@ BEGIN
   -- ==========================================================================
   DATAOUT <=
       (st_rxv & st_rxd1 & st_err & st_to & st_stall & st_nak & st_ack & st_busy)
-        WHEN (RD = '0' AND ADDR = x"00E8") ELSE
-      ('0' & r_devaddr)              WHEN (RD = '0' AND ADDR = x"00E9") ELSE
-      rx_pid                         WHEN (RD = '0' AND ADDR = x"00EA") ELSE
-      ('0' & rx_len)                 WHEN (RD = '0' AND ADDR = x"00EB") ELSE
-      rxb_q                          WHEN (RD = '0' AND ADDR = x"00EC") ELSE
-      ('0' & tx_ptr)                 WHEN (RD = '0' AND ADDR = x"00ED") ELSE
+        WHEN (RD = '0' AND io_hit = '1' AND io_reg = RG_CMD)  ELSE
+      ('0' & r_devaddr)  WHEN (RD = '0' AND io_hit = '1' AND io_reg = RG_DEVA) ELSE
+      rx_pid             WHEN (RD = '0' AND io_hit = '1' AND io_reg = RG_ENDP) ELSE
+      ('0' & rx_len)     WHEN (RD = '0' AND io_hit = '1' AND io_reg = RG_LEN)  ELSE
+      rxb_q              WHEN (RD = '0' AND io_hit = '1' AND io_reg = RG_DATA) ELSE
+      ('0' & tx_ptr)     WHEN (RD = '0' AND io_hit = '1' AND io_reg = RG_PTR)  ELSE
       ("00" & LOCKED & ctrl_s(2) &
        (dm_r AND NOT dp_r) & (dp_r AND NOT dm_r) & dm_r & dp_r)
-                                     WHEN (RD = '0' AND ADDR = x"00EE") ELSE
-      diag_q                         WHEN (RD = '0' AND ADDR = x"00EF") ELSE
+                         WHEN (RD = '0' AND io_hit = '1' AND io_reg = RG_CTRL) ELSE
+      diag_q             WHEN (RD = '0' AND io_hit = '1' AND io_reg = RG_DIAG) ELSE
       "ZZZZZZZZ";
 
   CPU_REGS : PROCESS (CLK)
@@ -404,27 +460,27 @@ BEGIN
         rx_ptr <= (OTHERS => '0'); go_cpu <= '0';
       ELSE
         -- falling edge of WR: DATAIN is valid and this fires exactly once
-        IF (wr_prev = '1' AND WR = '0') THEN
-          CASE ADDR IS
-            WHEN x"00E8" =>
+        IF (wr_prev = '1' AND WR = '0' AND io_hit = '1') THEN
+          CASE io_reg IS
+            WHEN RG_CMD =>
               r_cmd <= DATAIN;
               IF DATAIN(7) = '1' THEN
                 go_cpu <= NOT go_cpu;        -- level toggle crosses cleanly
               END IF;
-            WHEN x"00E9" => r_devaddr <= DATAIN(6 DOWNTO 0);
-            WHEN x"00EA" => r_endp    <= DATAIN(3 DOWNTO 0);
-            WHEN x"00EB" => r_txlen   <= DATAIN(6 DOWNTO 0);
-            WHEN x"00EC" =>
+            WHEN RG_DEVA => r_devaddr <= DATAIN(6 DOWNTO 0);
+            WHEN RG_ENDP => r_endp    <= DATAIN(3 DOWNTO 0);
+            WHEN RG_LEN  => r_txlen   <= DATAIN(6 DOWNTO 0);
+            WHEN RG_DATA =>
               IF tx_ptr < 64 THEN
                 txbuf(conv_integer(tx_ptr(5 DOWNTO 0))) <= DATAIN;
                 tx_ptr <= tx_ptr + 1;
               END IF;
-            WHEN x"00ED" =>
+            WHEN RG_PTR =>
               tx_ptr <= DATAIN(6 DOWNTO 0);
               rx_ptr <= DATAIN(6 DOWNTO 0);
-            WHEN x"00EE" => r_ctrl <= DATAIN;
-            WHEN x"00EF" => diag_sel <= DATAIN;   -- pick a counter to read
-            WHEN OTHERS  => NULL;
+            WHEN RG_CTRL => r_ctrl <= DATAIN;
+            WHEN RG_DIAG => diag_sel <= DATAIN;   -- pick a counter to read
+            WHEN OTHERS => NULL;
           END CASE;
         END IF;
 
@@ -434,7 +490,7 @@ BEGIN
         -- Latch the fact during the cycle and act at the end, rather than
         -- testing ADDR on the closing edge: ADDR is held by busdecode until the
         -- next ALE, but not relying on that is free.
-        IF (RD = '0' AND ADDR = x"00EC") THEN
+        IF (RD = '0' AND io_hit = '1' AND io_reg = RG_DATA) THEN
           rd_data_c <= '1';
         END IF;
         IF (rd_prev = '0' AND RD = '1' AND rd_data_c = '1') THEN
@@ -448,6 +504,15 @@ BEGIN
       wr_prev <= WR;
       rd_prev <= RD;
 
+      -- Frame interrupt into this domain. Three stages, then a difference:
+      -- the toggle is asynchronous to CLK, so it needs the metastability
+      -- filter, and the XOR of the last two turns it back into exactly one
+      -- CLK-wide pulse. int8259 samples IRQ on this same clock and triggers on
+      -- a rising edge, so one clock is enough and two would risk a second one.
+      irq_m1 <= irq_tog;
+      irq_m2 <= irq_m1;
+      irq_m3 <= irq_m2;
+
       rxb_q <= rxbuf(conv_integer(rx_ptr(5 DOWNTO 0)));
     END IF;
   END PROCESS;
@@ -455,8 +520,8 @@ BEGIN
   -- ==========================================================================
   --  Clock crossing.  The command registers are only sampled while the SIE is
   --  idle, and go_cpu is a toggle, so a plain two-stage synchroniser is enough.
-  --  ctrl_m is used combinationally for the port mux, so it gets its own
-  --  synchroniser rather than being read straight out of the CLK domain.
+  --  ctrl_m is used combinationally by the transmitter (BUSRESET), so it gets
+  --  its own synchroniser rather than being read straight out of the CLK domain.
   -- ==========================================================================
   SYNC48 : PROCESS (CLK48)
   BEGIN
@@ -950,6 +1015,20 @@ BEGIN
           ELSIF sof_req = '1' THEN
             sof_req   <= '0';
             frame_cnt <= frame_cnt + 1;
+            -- Periodic interrupt, every 8th frame = 8 ms = 125 Hz. Derived
+            -- from SOF rather than from the PIT on purpose: channel 0 is
+            -- reprogrammed by any game that wants its own tick rate, so a
+            -- mouse driver hanging off INT 08h changes rate underneath itself
+            -- or stops. This clock cannot be touched from software.
+            --
+            -- 125 Hz is chosen, not maximal. The endpoint offers 2 ms and an
+            -- 8088 servicing 500 interrupts a second would spend a serious
+            -- fraction of itself doing it; period mice of this era reported at
+            -- 40-100 Hz, so 125 is already better than the hardware being
+            -- emulated and costs an eighth of the interrupts.
+            IF ctrl_m(3) = '1' AND frame_cnt(2 DOWNTO 0) = "111" THEN
+              irq_tog <= NOT irq_tog;
+            END IF;
             tok := frame_cnt(10 DOWNTO 0);
             c5  := crc5(tok);
             req_lit  <= (c5(0) & c5(1) & c5(2) & c5(3) & c5(4)
