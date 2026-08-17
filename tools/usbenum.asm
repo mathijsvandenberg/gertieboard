@@ -237,6 +237,16 @@ start:
 ;  also the only check on the pulldowns -- see the L mode below.
         mov  dx, msg_t3
         call puts
+                ; CLEAR THE SPEED BIT BEFORE LOOKING AT THE LINE.
+        ; CTRL persists across programs, and LINE reports the ENGINE's view of
+        ; the pins -- which low-speed mode SWAPS. So if any earlier tool left
+        ; bit 4 set, a low-speed device reads back here as "D+ high, full
+        ; speed", and this would then drive a 1.5 Mbps device at 12. That is a
+        ; TIMEOUT on the very first descriptor request, with nothing to suggest
+        ; the speed was the problem.
+        SETDX O_CTRL
+        xor  al, al
+        out  dx, al
         SETDX O_CTRL
         in   al, dx
         mov  [linest], al

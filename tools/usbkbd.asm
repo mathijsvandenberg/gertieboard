@@ -600,6 +600,16 @@ install:
         call puts
         jmp  bail
 .sig_ok:
+                ; CLEAR THE SPEED BIT BEFORE LOOKING AT THE LINE.
+        ; CTRL persists across programs, and LINE reports the ENGINE's view of
+        ; the pins -- which low-speed mode SWAPS. So if any earlier tool left
+        ; bit 4 set, a low-speed device reads back here as "D+ high, full
+        ; speed", and this would then drive a 1.5 Mbps device at 12. That is a
+        ; TIMEOUT on the very first descriptor request, with nothing to suggest
+        ; the speed was the problem.
+        SETDX O_CTRL
+        xor  al, al
+        out  dx, al
         SETDX O_CTRL
         in   al, dx
         test al, L_LOCK
@@ -644,6 +654,7 @@ install:
         out  dx, al
         mov  byte [ep0max], 8
 
+        mov  byte [stage], 1
         mov  si, sp_getdev8
         mov  di, devbuf
         mov  cx, 8
@@ -652,6 +663,7 @@ install:
         mov  al, [devbuf+7]
         mov  [ep0max], al
 
+        mov  byte [stage], 2
         mov  si, sp_setaddr
         mov  di, devbuf
         xor  cx, cx
@@ -662,12 +674,14 @@ install:
         out  dx, al
         call delay_tick
 
+        mov  byte [stage], 3
         mov  si, sp_getdev18
         mov  di, devbuf
         mov  cx, 18
         call ctl_xfer
         jc   .enum_bad
 
+        mov  byte [stage], 4
         mov  si, sp_getcfg9
         mov  di, cfgbuf
         mov  cx, 9
@@ -680,14 +694,14 @@ install:
 .fits:
         mov  [cfglen], ax
         mov  [sp_getcfgn+6], ax
+        mov  byte [stage], 5
         mov  si, sp_getcfgn
         mov  di, cfgbuf
         mov  cx, [cfglen]
         call ctl_xfer
         jnc  .enum_ok
 .enum_bad:
-        mov  dx, msg_enumfail
-        call puts
+        call fail_stage
         jmp  bail
 .enum_ok:
         mov  al, [cfgbuf+5]
@@ -702,6 +716,7 @@ install:
 
         mov  al, [cfgval]
         mov  [sp_setcfg+2], al
+        mov  byte [stage], 6
         mov  si, sp_setcfg
         mov  di, devbuf
         xor  cx, cx
@@ -711,6 +726,7 @@ install:
 
         mov  al, [kbd_if]
         mov  [sp_setidle+4], al
+        mov  byte [stage], 7
         mov  si, sp_setidle
         mov  di, devbuf
         xor  cx, cx
@@ -718,14 +734,14 @@ install:
 
         mov  al, [kbd_if]
         mov  [sp_setproto+4], al
+        mov  byte [stage], 8
         mov  si, sp_setproto
         mov  di, devbuf
         xor  cx, cx
         call ctl_xfer
         jnc  .proto_ok
 .cfg_bad:
-        mov  dx, msg_cfgfail
-        call puts
+        call fail_stage
         jmp  bail
 .proto_ok:
 
@@ -825,6 +841,72 @@ find_kbd:
         stc
         ret
 
+; fail_stage -- which request, and what came back. STALL is a refusal, TIMEOUT
+;               is nobody home; they point at opposite halves of the problem,
+;               and "Enumeration failed" said neither.
+fail_stage:
+        push ax
+        push bx
+        mov  dx, msg_failat
+        call puts
+        mov  al, [stage]
+        add  al, '0'
+        mov  dl, al
+        mov  ah, 2
+        int  0x21
+        mov  dx, msg_dash
+        call puts
+        mov  bl, [stage]
+        xor  bh, bh
+        dec  bx
+        shl  bx, 1
+        mov  dx, [stagetab+bx]
+        call puts
+        mov  dx, msg_status
+        call puts
+        SETDX O_CMD
+        in   al, dx
+        call puthex
+        mov  dx, msg_rxpid
+        call puts
+        SETDX O_ENDP
+        in   al, dx
+        call puthex
+        mov  dx, msg_crlf
+        call puts
+        pop  bx
+        pop  ax
+        ret
+
+puthex:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov  bl, al
+        mov  cl, 4
+        shr  al, cl
+        call .nib
+        mov  al, bl
+        and  al, 0x0F
+        call .nib
+        pop  dx
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+.nib:
+        and  al, 0x0F
+        cmp  al, 10
+        jb   .n0
+        add  al, 'A'-10
+        jmp  short .n1
+.n0:    add  al, '0'
+.n1:    mov  dl, al
+        mov  ah, 2
+        int  0x21
+        ret
+
 delay_tick:
         push ax
         push bx
@@ -858,6 +940,7 @@ cfglen    dw 0
 cfgval    db 1
 kbd_if    db 0
 in_kbd    db 0
+stage     db 0
 
 sp_getdev8   db 0x80, 6, 0x00, DT_DEVICE, 0, 0, 8, 0
 sp_getdev18  db 0x80, 6, 0x00, DT_DEVICE, 0, 0, 18, 0
@@ -873,9 +956,21 @@ msg_nosig    db 'No A5 build signature: wrong bitstream.', 13, 10, '$'
 msg_nopll    db 'The 48 MHz PLL is not locked.', 13, 10, '$'
 msg_nodev    db 'Nothing plugged into the hybrid port.', 13, 10, '$'
 msg_ls       db 'Low-speed device (1.5 Mbps).', 13, 10, '$'
-msg_enumfail db 'Enumeration failed -- run USBENUM for detail.', 13, 10, '$'
+msg_failat   db 'FAILED at stage ', '$'
+msg_dash     db ' -- ', '$'
+msg_status   db '   status ', '$'
+msg_rxpid    db '  rxpid ', '$'
+msg_crlf     db 13, 10, '$'
+kn1 db 'GET_DESCRIPTOR(device,8) at address 0', '$'
+kn2 db 'SET_ADDRESS(1)', '$'
+kn3 db 'GET_DESCRIPTOR(device,18) at address 1', '$'
+kn4 db 'GET_DESCRIPTOR(config,9)', '$'
+kn5 db 'GET_DESCRIPTOR(config,full)', '$'
+kn6 db 'SET_CONFIGURATION', '$'
+kn7 db 'SET_IDLE', '$'
+kn8 db 'SET_PROTOCOL(boot)', '$'
+stagetab dw kn1, kn2, kn3, kn4, kn5, kn6, kn7, kn8
 msg_nokbd    db 'No boot-protocol keyboard on this device.', 13, 10, '$'
-msg_cfgfail  db 'SET_CONFIGURATION or SET_PROTOCOL failed.', 13, 10, '$'
 msg_ok       db 'Installed. Type away.', 13, 10, '$'
 
 devbuf  times 20 db 0
