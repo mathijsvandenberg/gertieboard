@@ -77,12 +77,16 @@ if ($gitStatus -and -not $AllowDirty) {
 
 $head = (& git -C $root rev-parse HEAD).Trim()
 
-# "does this tag exist" has to tolerate the answer being no, and under
-# $ErrorActionPreference = 'Stop' a native command writing to stderr is a
-# TERMINATING error in PowerShell -- so the ordinary not-found case would throw
-# an unhandled exception instead of being handled. --verify --quiet keeps git
-# silent and returns a non-zero exit code, and the preference is relaxed across
-# the call so that exit code is a value rather than an exception.
+# "does this tag exist" has to tolerate the answer being no. The 2>$null below
+# is a REDIRECTION, and in PowerShell 5.1 redirecting a native command's stderr
+# wraps each line in a NativeCommandError -- which under $ErrorActionPreference
+# = 'Stop' terminates, so the ordinary not-found case would throw instead of
+# being handled. (Redirection is the trigger, not stderr as such: an
+# unredirected native command writing to stderr does not terminate. See the
+# -CreateTag block for the same trap arriving from the caller's side.)
+# --verify --quiet keeps git silent and returns a non-zero exit code, and the
+# preference is relaxed across the call so that exit code is a value rather
+# than an exception.
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $tagAt = & git -C $root rev-parse --verify --quiet "refs/tags/$Tag^{commit}" 2>$null
@@ -93,21 +97,41 @@ if (-not $tagAt) {
     }
     Write-Host "creating tag $Tag at $($head.Substring(0,7))" -ForegroundColor Cyan
     if (-not $DryRun) {
-        # git push reports PROGRESS on stderr even when it succeeds, and under
-        # $ErrorActionPreference = 'Stop' any native stderr is a TERMINATING
-        # error in PowerShell. So a completely successful push aborted the
-        # script -- after the tag had been created and pushed, which is the
-        # worst place to stop: the release then had a tag and no assets, and
-        # re-running wanted -CreateTag off. Exit codes are the truth here, not
-        # the stream.
+        # git push writes its "To <url> / * [new tag]" summary to stderr even
+        # when it succeeds. On its own that is harmless: PowerShell 5.1 only
+        # wraps native stderr in a NativeCommandError when the stream is
+        # REDIRECTED, and under 'Stop' that wrapper is what terminates. A bare
+        # call is safe whether or not its output is captured -- measured, all
+        # three of console / $x = / | Out-Null survive; only an explicit 2>&1
+        # dies.
+        #
+        # The redirection need not be on this line to do it. Publishing v1.21
+        # was invoked as `... -CreateTag ... 2>&1 | Select-Object -Last 18`,
+        # and the CALLER's 2>&1 reached in and killed the push here, at the
+        # worst possible moment: tag created and pushed, no assets uploaded,
+        # and the retry then had to drop -CreateTag because the tag it was
+        # asked to create already existed.
+        #
+        # So this is not defence against git, it is defence against however the
+        # script gets invoked -- a CI step or a `> build.log` would do the same.
+        # Relax the preference across both calls and let the exit codes decide.
+        # Do NOT add 2>&1 here to capture the output: that is the one thing
+        # that reliably breaks it.
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         & git -C $root tag -a $Tag -m "Release $Tag"
-        if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = $prevEAP; throw "git tag failed ($LASTEXITCODE)" }
-        & git -C $root push origin $Tag 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
-        $pushRc = $LASTEXITCODE
+        $tagRc = $LASTEXITCODE
+        if ($tagRc -eq 0) {
+            & git -C $root push origin $Tag
+            $pushRc = $LASTEXITCODE
+        }
         $ErrorActionPreference = $prevEAP
-        if ($pushRc -ne 0) { throw "git push of tag $Tag failed ($pushRc)" }
+        if ($tagRc -ne 0) { throw "git tag $Tag failed (exit $tagRc)" }
+        if ($pushRc -ne 0) {
+            throw ("git push of tag $Tag failed (exit $pushRc). The tag exists LOCALLY -- " +
+                   "delete it with ``git tag -d $Tag`` before retrying, or the retry will " +
+                   "refuse to create it.")
+        }
     }
 } elseif ($tagAt.Trim() -ne $head) {
     throw ("tag $Tag points at $($tagAt.Trim().Substring(0,7)) but HEAD is $($head.Substring(0,7)).`n" +
