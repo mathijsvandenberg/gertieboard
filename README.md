@@ -233,7 +233,17 @@ more than that.
 Gertieboard is named after my father, **Geert**, known to everyone as
 **Gertie** — like me, an enthusiast for retro computing.
 
-> _Personal note to be expanded by the author._
+It was made for him. Not a product and not a project looking for an audience: one
+board, for one person, as a gift he could solder himself. That is the reason nearly
+everything on it is through-hole and the only fine-pitch device is the off-the-shelf
+DE0-Nano underneath — the whole design answers the question *"can he build this at
+his own bench, with his own iron?"*
+
+Putting it on GitHub came later. The board worked, the documentation had been written
+anyway, and there are other people out there who would enjoy building one and having
+it explained rather than handed over as a black box. So it is open hardware and open
+source now, for those enthusiasts — but it started as a present, and the shape of it
+still shows that.
 
 ## Contributing
 
