@@ -99,3 +99,10 @@ tools/KQ1/
 
 # staged artifacts for tools/publish-release.ps1
 release-staging/
+
+# Altium source project (GertieXT) and its KiCad translation.
+# Altium isn't OSHW-friendly, so the board has been migrated to KiCad.
+# The Altium sources are kept locally for reference only and are not published.
+# The translated KiCad project in hardware/kicad/ could be tracked later by
+# un-ignoring it -- deliberately left out for now.
+hardware/
