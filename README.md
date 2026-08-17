@@ -239,6 +239,16 @@ everything on it is through-hole and the only fine-pitch device is the off-the-s
 DE0-Nano underneath — the whole design answers the question *"can he build this at
 his own bench, with his own iron?"*
 
+One detail closed a circle that nobody planned. The **Philips P2120** this machine
+descends from left the factory at 4.77 MHz — but the chip inside it was an **8088-1**, a
+part rated for 10. One of the first things my father and grandfather did was enable the
+turbo pin, so the family's real PC ran at 10 MHz from early on.
+
+**This board runs at 10 MHz too.** It arrived there from the opposite direction: the V20
+in the socket is a `-8`, so it is over its rating where theirs was inside it, and getting
+there took [finding out why READY had been late all along](docs/gotchas.md). Same number,
+four decades apart, for the same reason — somebody wanted to know if it would go faster.
+
 Putting it on GitHub came later. The board worked, the documentation had been written
 anyway, and there are other people out there who would enjoy building one and having
 it explained rather than handed over as a black box. So it is open hardware and open

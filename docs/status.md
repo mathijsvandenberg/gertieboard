@@ -8,7 +8,7 @@ marketing: if something is listed as working it has been run on hardware.
 | Feature | Detail |
 |---|---|
 | **Real CPU** | NEC V20 (µPD70108C-8) on the [top board](hardware.md), FPGA as the surrounding chipset |
-| **8.33 MHz bus** | `c0` = 50 MHz ÷ 6 drives the CPU and the whole I/O bus, 1.67× the 5 MHz this ran at for most of its life. 10 MHz does not boot on the current V20 — [clkgen/pll](modules/clkgen-pll.md) |
+| **Programmable bus clock** | 5 / 6.25 / 7.143 / 8.333 / 10 / 12.5 / 16.667 MHz, selected at run time through I/O `0xE5` — [`cpuclk`](modules/cpuclk.md) divides the PLL's 100 MHz master, it is not a PLL output. **8.333 MHz at reset, and verified running at 10.** The V20 fitted is a `-8`, so 10 MHz is over its rating and works anyway; what used to stop it was READY, not the part — [gotchas](gotchas.md) |
 | **Measured CPU clock** | POST times a calibrated loop against PIT channel 2 and prints the result, so the displayed rate is what the machine is *doing* rather than what a constant says — [bios](bios.md) |
 | **Runs standalone** | FPGA configures from its own flash, BIOS from the on-board SPI flash, DOS from the USB disk — nothing attached but power and a monitor — [boot](boot.md) |
 | **Boots MS-DOS 4.01** | The Dutch release shipped with the Philips P2120, **installed onto `C:` from its original install floppies** — see [storage](storage.md#installing-an-operating-system-onto-it). PC-DOS 3.30 runs too, from a served floppy image |
