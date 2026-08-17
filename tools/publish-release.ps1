@@ -76,7 +76,17 @@ if ($gitStatus -and -not $AllowDirty) {
 }
 
 $head = (& git -C $root rev-parse HEAD).Trim()
-$tagAt = & git -C $root rev-list -n 1 $Tag 2>$null
+
+# "does this tag exist" has to tolerate the answer being no, and under
+# $ErrorActionPreference = 'Stop' a native command writing to stderr is a
+# TERMINATING error in PowerShell -- so the ordinary not-found case would throw
+# an unhandled exception instead of being handled. --verify --quiet keeps git
+# silent and returns a non-zero exit code, and the preference is relaxed across
+# the call so that exit code is a value rather than an exception.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$tagAt = & git -C $root rev-parse --verify --quiet "refs/tags/$Tag^{commit}" 2>$null
+$ErrorActionPreference = $prevEAP
 if (-not $tagAt) {
     if (-not $CreateTag) {
         throw "tag $Tag does not exist. Create it, or pass -CreateTag to tag HEAD ($($head.Substring(0,7)))."
