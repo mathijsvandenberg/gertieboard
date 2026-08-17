@@ -230,7 +230,15 @@ def main():
           f"BIOS {len(bios)} bytes, {args.settle:.0f} s off, "
           f"{args.timeout:.0f} s to boot\n")
 
-    ser = serial.Serial(args.port, args.baud, timeout=0.2)
+    try:
+        ser = serial.Serial(args.port, args.baud, timeout=0.2)
+    except serial.SerialException as e:
+        sys.exit(
+            f"cannot open {args.port}: {e}\n\n"
+            "If GertieBoardLoader (or floppy_host.py) is running, CLOSE IT.\n"
+            "This script serves the BIOS and floppy itself for the duration of\n"
+            "a run -- two programs cannot own the same port, and the board would\n"
+            "be answered by whichever won the race.")
     ser_ref["s"] = ser
     results = []
     try:
