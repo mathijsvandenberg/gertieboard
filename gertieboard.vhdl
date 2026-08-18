@@ -468,7 +468,15 @@ BEGIN
   cpuclk1 : ENTITY work.cpuclk
     GENERIC MAP (
       MAX_IDX              => 6,          -- 16.667 MHz, the -16 parts' rating
-      DEF_IDX              => 0           -- 5 MHz on every reset
+      -- 10 MHz on every reset (idx 4). This is the top of what the -8 part in
+      -- this machine will do -- 12.5 fails -- so the board now BOOTS at its
+      -- ceiling rather than starting at 5 and being stepped up.
+      --
+      -- That is a different test from running at 10 MHz: reset, the memory
+      -- settle and the whole BIOS POST now happen at the fastest step, and
+      -- those are exactly the paths the cold-boot faults lived in. Keep a
+      -- 5 MHz .jic to fall back to.
+      DEF_IDX              => 4           -- 10 MHz on every reset
     )
     PORT MAP (
       CLK100               => n_c100,

@@ -298,6 +298,8 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL aud_smp   : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
   SIGNAL aud_ph    : integer RANGE 0 TO 4 := 4;   -- L.lo L.hi R.lo R.hi, 4 = idle
   SIGNAL aud_tick  : std_logic := '0';            -- frame boundary, from SEQ
+  SIGNAL aud_swp   : std_logic := '0';            -- swap pending, waiting for
+                                                  -- the byte cursor to go idle
   SIGNAL aud_en_m1 : std_logic := '0';
   SIGNAL aud_en_s  : std_logic := '0';            -- AUD_EN, resynchronised
   -- bytes per frame = samples * 4 (16-bit stereo). 7 bits of AUD_NSMP is
@@ -714,7 +716,28 @@ BEGIN
         aud_q <= audbuf(conv_integer((NOT aud_wbank) & sie_txadr));
 
         -- ---- frame boundary: hand the filled bank over ----
+        -- DEFERRED until the byte cursor is idle. A sample takes four cycles
+        -- to write and the tick is asynchronous to it, so a tick landing
+        -- mid-sample used to abort the remaining bytes: the frame went out
+        -- with 190 bytes instead of 192 -- 47 and a HALF samples -- and the
+        -- device got a packet that was not a whole number of stereo frames.
+        --
+        -- The phases are fixed relative to each other (48000 and 1000 both
+        -- divide CLK48), so this is all-or-nothing: either it never happens or
+        -- it happens on every single frame, 1000 times a second. That makes it
+        -- a coin toss decided at power-up, which is the worst kind of bug to
+        -- own -- it would look like a device that distorts on some builds and
+        -- not others, with nothing in the design having changed.
+        --
+        -- Waiting costs at most four of the 48000 cycles in a frame, and the
+        -- SIE does not read the bank until the SOF packet has finished going
+        -- out, hundreds of cycles later.
         IF aud_tick = '1' THEN
+          aud_swp <= '1';
+        END IF;
+
+        IF aud_swp = '1' AND aud_ph = 4 THEN
+          aud_swp <= '0';
           IF aud_en_s = '1' THEN
             -- A partial bank is a fault, not something to paper over: report
             -- it and send what there is rather than trailing stale bytes from
@@ -731,7 +754,7 @@ BEGIN
           END IF;
           aud_wbank <= NOT aud_wbank;
           aud_wlen  <= (OTHERS => '0');
-          aud_ph    <= 4;                  -- idle, NOT 0: see below
+          -- aud_ph is already 4; that is the condition for being here at all.
         END IF;
 
         -- ---- a new sample: write its four bytes over the next four cycles --
@@ -773,7 +796,7 @@ BEGIN
 
         IF RESET = '1' THEN
           aud_wbank <= '0'; aud_wlen <= (OTHERS => '0');
-          aud_run   <= '0'; aud_und  <= '0'; aud_ph <= 4;
+          aud_run   <= '0'; aud_und  <= '0'; aud_ph <= 4; aud_swp <= '0';
         END IF;
       END IF;
     END PROCESS;
