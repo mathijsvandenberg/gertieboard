@@ -47,6 +47,9 @@
 ;            0 / 1   which USB port (default 1, the hybrid port)
 ;            Gn      gain, n = 0..7, a right shift. 0 is loudest, default 1
 ;            S       stop: disable streaming and exit
+;            F       force: accept a vendor-specific (class FF) interface whose
+;                    isochronous OUT endpoint is 192 bytes, inferring the format
+;                    from that size. See find_vendor.
 ; ============================================================================
 
         CPU 8086
@@ -137,6 +140,10 @@ start:
         je   .sstop
         cmp  al, 's'
         je   .sstop
+        cmp  al, 'F'
+        je   .sforce
+        cmp  al, 'f'
+        je   .sforce
         cmp  al, 'G'
         je   .sgain
         cmp  al, 'g'
@@ -153,6 +160,9 @@ start:
         jmp  short .snext
 .sstop:
         mov  byte [stopreq], 1
+        jmp  short .snext
+.sforce:
+        mov  byte [forced], 1
 .snext:
         loop .scan
 .parsed:
@@ -270,7 +280,14 @@ start:
 
 ; ---------------- find an audio streaming alternate setting -----------------
         call find_alt
+        jnc  .gotalt
+        cmp  byte [forced], 0
+        je   .e_noalt
+        call find_vendor
         jc   .e_noalt
+        mov  dx, msg_forced
+        call puts
+.gotalt:
 
 ; ---------------- configure -------------------------------------------------
         mov  al, [cfgbuf+5]             ; bConfigurationValue
@@ -297,6 +314,12 @@ start:
 ; sampling frequency control, and answers STALL. That is legal and not fatal --
 ; it is already running at the only rate it has, which find_alt checked is
 ; 48000. So a failure here is reported and stepped over rather than fatal.
+; A vendor-specific interface has no endpoint sampling-frequency control to
+; write to -- that control is an audio-class construct. Asking anyway would at
+; best draw a STALL and at worst confuse a device that is decoding the request
+; as something of its own, so skip it entirely rather than tolerate the error.
+        cmp  byte [forced], 0
+        jne  .rateok
         mov  al, [epaddr]
         mov  [sp_setrate+4], al
         call set_rate
@@ -526,6 +549,139 @@ find_alt:
         jmp  .walk
 
 .nomatch:
+        stc
+.out:
+        pop  si
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+
+; ============================================================================
+;  find_vendor -- last resort: infer the format from the packet SIZE
+;
+;  Some perfectly good audio hardware is not USB Audio Class at all. The Line 6
+;  TonePort UX1 reports class FF/00/00 on every alternate setting, carries no
+;  class-specific descriptors, and drives its isochronous endpoints with a
+;  proprietary protocol. find_alt correctly refuses it: there is no FORMAT_TYPE
+;  block, so there is nothing that PROVES a format.
+;
+;  But the packet size is not nothing. A frame is exactly 1 ms, so an
+;  isochronous OUT endpoint's wMaxPacketSize IS the byte rate per millisecond,
+;  and 192 has only one sensible reading -- 48 samples of 16-bit stereo, i.e.
+;  48 kHz. That is the same arithmetic the class descriptor would have spelled
+;  out. On the UX1 the five alternate settings read straight off:
+;
+;      192 = 48 x 4   48 kHz 16-bit stereo      <- exactly what we want
+;      180 = 45 x 4   44.1 kHz 16-bit
+;      288 = 48 x 6   48 kHz 24-bit
+;      270 = 45 x 6   44.1 kHz 24-bit
+;
+;  So this prefers an endpoint of EXACTLY 192 and takes it immediately. A
+;  larger one is accepted only as a fallback and is a guess -- 288 would be
+;  24-bit and our 16-bit samples would come out as noise -- which is why this
+;  is behind a flag and prints a warning.
+;
+;  It may still not play. A vendor device is free to require an initialisation
+;  sequence before it will emit anything, and the UX1's lives in Line 6's
+;  protocol (Linux implements it in sound/usb/line6/toneport.c). This costs one
+;  SET_INTERFACE to find out, which is worth trying before writing any of that.
+; ============================================================================
+find_vendor:
+        push ax
+        push bx
+        push cx
+        push si
+        mov  si, cfgbuf
+        mov  cx, [cfglen]
+        mov  byte [cand], 0
+        mov  word [bestmax], 0
+.walk:
+        cmp  cx, 2
+        jb   .done
+        mov  al, [si]
+        test al, al
+        jz   .done
+        xor  ah, ah
+        cmp  ax, cx
+        ja   .done
+        mov  bl, [si+1]
+
+        cmp  bl, DT_IFACE
+        jne  .nf_if
+        mov  al, [si+3]                 ; bAlternateSetting
+        test al, al
+        jz   .nocand                    ; alt 0 never carries the stream
+        mov  [curalt], al
+        mov  al, [si+2]
+        mov  [curif], al
+        mov  byte [cand], 1
+        jmp  short .next
+.nocand:
+        mov  byte [cand], 0
+        jmp  short .next
+
+.nf_if:
+        cmp  bl, DT_ENDP
+        jne  .next
+        cmp  byte [cand], 0
+        je   .next
+        mov  bl, [si+3]                 ; bmAttributes
+        and  bl, 0x03
+        cmp  bl, 0x01                   ; isochronous
+        jne  .next
+        mov  bl, [si+2]                 ; bEndpointAddress
+        test bl, 0x80
+        jnz  .next                      ; IN is capture, not ours
+        mov  ax, [si+4]
+        and  ax, 0x07FF
+        cmp  ax, 192
+        jb   .next
+        je   .take                      ; exactly right, stop looking
+        cmp  word [bestmax], 0
+        jne  .next                      ; already have a fallback
+        call .remember
+        jmp  short .next
+.take:
+        call .remember
+        jmp  .found
+
+.next:
+        mov  al, [si]
+        xor  ah, ah
+        add  si, ax
+        sub  cx, ax
+        jmp  .walk
+
+.remember:
+        mov  [bestmax], ax
+        mov  [bestep], bl
+        push ax
+        mov  al, [curif]
+        mov  [bestif], al
+        mov  al, [curalt]
+        mov  [bestalt], al
+        pop  ax
+        ret
+
+.done:
+        cmp  word [bestmax], 0
+        je   .none
+.found:
+        mov  al, [bestif]
+        mov  [ifnum], al
+        mov  al, [bestalt]
+        mov  [altnum], al
+        mov  al, [bestep]
+        mov  [epaddr], al
+        mov  ax, [bestmax]
+        mov  [epmax], ax
+        ; inferred, not read: say so honestly in the summary
+        mov  byte [nrch], 2
+        mov  byte [nbits], 16
+        clc
+        jmp  short .out
+.none:
         stc
 .out:
         pop  si
@@ -956,6 +1112,13 @@ nrch    db 0
 nbits   db 0
 cand    db 0
 fmtok   db 0
+forced  db 0
+curif   db 0
+curalt  db 0
+bestif  db 0
+bestalt db 0
+bestep  db 0
+bestmax dw 0
 cfglen  dw 0
 
 ; ---- setup packets ----
@@ -980,7 +1143,9 @@ msg_edesc    db 'failed reading the device descriptor', 13, 10, '$'
 msg_eaddr    db 'SET_ADDRESS failed', 13, 10, '$'
 msg_ecfg     db 'failed reading the configuration descriptor', 13, 10, '$'
 msg_enoalt   db 'no usable alternate setting: needs isochronous OUT,', 13, 10
-             db '2 channels, 16 bits, 48000 Hz, 192-byte packets', 13, 10, '$'
+             db '2 channels, 16 bits, 48000 Hz, 192-byte packets', 13, 10
+             db 'if this is a vendor-specific device (class FF) with a', 13, 10
+             db '192-byte isoc OUT, try:  USBAUDIO F', 13, 10, '$'
 msg_esetcfg  db 'SET_CONFIGURATION failed', 13, 10, '$'
 msg_esetif   db 'SET_INTERFACE failed -- the pipe never opened', 13, 10, '$'
 msg_norate   db 'note: SET_CUR rate refused; using the device default', 13, 10, '$'
@@ -989,6 +1154,8 @@ msg_iface    db 'iface ', '$'
 msg_alt      db '  alt ', '$'
 msg_ep       db '  ep ', '$'
 msg_mps      db '  maxpkt ', '$'
+msg_forced   db 'FORCED: vendor-specific interface, format INFERRED from the', 13, 10
+             db 'packet size. It may need a vendor init sequence to make sound.', 13, 10, '$'
 msg_fmt      db 'format:     ', '$'
 msg_ch       db ' channels, ', '$'
 msg_bits     db ' bits, 48000 Hz', 13, 10, '$'

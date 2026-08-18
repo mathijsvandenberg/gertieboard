@@ -870,3 +870,30 @@ It requires 2 channels, 16 bits, 48000 Hz and a packet of at least 192 bytes,
 and reports what it found. A low-speed device is refused with a reason: USB
 Audio Class is full speed only, and 1.5 Mbps could not carry the data anyway.
 
+### Devices that are not USB Audio Class
+
+`USBAUDIO F` accepts a **vendor-specific** (class `FF`) interface, inferring the
+format from the packet size instead of from a descriptor. A 1 ms frame means an
+isochronous OUT endpoint's `wMaxPacketSize` *is* the byte rate per millisecond,
+and 192 has one sensible reading: 48 samples of 16-bit stereo.
+
+The Line 6 TonePort UX1 is the case this was written for. It reports class
+`FF/00/00` on all five alternate settings and carries no class descriptors at
+all, but its packet sizes read straight off:
+
+| alt | OUT max | inferred |
+|---|---|---|
+| 1 | 192 | 48 kHz, 16-bit stereo |
+| 2 | 180 | 44.1 kHz, 16-bit |
+| 3 | 288 | 48 kHz, 24-bit |
+| 4 | 270 | 44.1 kHz, 24-bit |
+
+So `F` prefers an endpoint of **exactly 192** and takes it at once. A larger one
+is a fallback and a genuine guess — 288 would be 24-bit, and 16-bit samples sent
+into it come out as noise — which is why the mode is behind a flag and warns.
+
+It may still be silent. A vendor device may require an initialisation sequence
+before it emits anything; the UX1's lives in Line 6's protocol, which Linux
+implements in `sound/usb/line6/toneport.c`. `F` costs one `SET_INTERFACE` to
+find out, which is worth trying before writing any of that.
+
