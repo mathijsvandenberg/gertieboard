@@ -149,6 +149,12 @@ memory bits before and after.
 | `0x98` | [flash](modules/flash.md) | R/W | SPI: write starts a byte exchange; read returns the received byte |
 | `0x99` | [flash](modules/flash.md) | R | SPI status — bit 7 = BUSY |
 | `0x9A` | [flash](modules/flash.md) | W | SPI control — bit 0 = `/CS` (0 = assert) |
+| `0xA0` | [usb_audio](modules/usb_audio.md) | R/W | W stream enable / clear underrun · R `0xA` signature, enable, sticky underrun |
+| `0xA1` | [usb_audio](modules/usb_audio.md) | W | USB device address of the audio device |
+| `0xA2` | [usb_audio](modules/usb_audio.md) | W | its isochronous OUT endpoint number |
+| `0xA3` | [usb_audio](modules/usb_audio.md) | W | samples per frame — 48, for 48 kHz |
+| `0xA4` | [usb_audio](modules/usb_audio.md) | W | gain, a right shift (0 = loudest) |
+| `0xA5` | [usb_audio](modules/usb_audio.md) | R | count of short frames, saturating at 255 |
 | `0xA8`–`0xAF` | [usb_host](modules/usb_host.md) `usb2` | R/W | **USB port 1**, the hybrid port. Same eight registers as `0xE8`–`0xEF` below |
 | `0xE2` | [bootrom](modules/bootrom.md) | W | bit 0 = 1 disables the boot ROM overlay |
 | `0xE4` | [ctrl_reg](modules/ctrl_reg.md) | W | PSRAM timing: `SCK_DIV` (2:0), `RD_LAT` (6:3) |

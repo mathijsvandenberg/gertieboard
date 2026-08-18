@@ -839,3 +839,34 @@ Two rules, both learned the hard way:
 - [Fixed disk](fixed-disk.md), [BIOS](bios.md) — what they test
 - [Status and roadmap](status.md) — what is verified working
 - [Gotchas](gotchas.md)
+
+## USBAUDIO
+
+`USBAUDIO [0|1] [Gn] [S]` -- point the AdLib output at a **USB Audio Class**
+device on the hybrid port. `Gn` sets gain as a right shift (0 loudest, default
+1); `S` stops streaming.
+
+**It is not a TSR.** It enumerates the device, picks an alternate setting, tells
+the hardware where to send audio, and exits. Sound keeps playing afterwards, and
+keeps playing inside a game that has taken over the machine -- because the CPU
+was never in the audio path. See [usb_audio](modules/usb_audio.md).
+
+What it has to get right, and what each failure looks like:
+
+| Step | If it is skipped |
+|---|---|
+| Clear `CTRL` before reading `LINE` | a leftover low-speed bit from another tool makes a full-speed device read as low speed, and it is rejected |
+| `SET_INTERFACE` to a **non-zero** alternate setting | everything enumerates perfectly and there is **silence** -- see below |
+| `SET_CUR` sampling frequency | plays at whatever rate the device defaulted to, so the pitch is wrong |
+| Walk the descriptor by `bLength` | a parser assuming a fixed layout works on one dongle and no others |
+
+> **Alternate setting 0 has no endpoint.** The class *requires* it: alt 0 is the
+> idle setting, so an audio device nobody is using costs the bus no bandwidth.
+> Leave the interface there and the device is configured, the descriptors are
+> right, nothing reports an error anywhere, and nothing plays. This is the most
+> common way to get a UAC device that enumerates beautifully and is silent.
+
+It requires 2 channels, 16 bits, 48000 Hz and a packet of at least 192 bytes,
+and reports what it found. A low-speed device is refused with a reason: USB
+Audio Class is full speed only, and 1.5 Mbps could not carry the data anyway.
+

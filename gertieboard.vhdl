@@ -93,6 +93,15 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_c2                   : std_logic;
   SIGNAL n_c3                   : std_logic;
   SIGNAL n_clk48       : std_logic;
+  -- OPL2 PCM tap -> usb2's isochronous streamer, both in the 48 MHz domain
+  SIGNAL n_opl_pcm     : std_logic_vector(15 DOWNTO 0);
+  SIGNAL n_opl_pcm_stb : std_logic;
+  SIGNAL n_aud_en      : std_logic;
+  SIGNAL n_aud_addr    : std_logic_vector(6 DOWNTO 0);
+  SIGNAL n_aud_endp    : std_logic_vector(3 DOWNTO 0);
+  SIGNAL n_aud_nsmp    : std_logic_vector(7 DOWNTO 0);
+  SIGNAL n_aud_gain    : std_logic_vector(2 DOWNTO 0);
+  SIGNAL n_aud_under   : std_logic;
   SIGNAL n_usb_locked  : std_logic;
   SIGNAL n_pll_locked  : std_logic;   -- pll1 has locked; nothing runs before it
   SIGNAL n_clock50              : std_logic;
@@ -459,7 +468,7 @@ BEGIN
   cpuclk1 : ENTITY work.cpuclk
     GENERIC MAP (
       MAX_IDX              => 6,          -- 16.667 MHz, the -16 parts' rating
-      DEF_IDX              => 3           -- 8.333 MHz on every reset
+      DEF_IDX              => 0           -- 5 MHz on every reset
     )
     PORT MAP (
       CLK100               => n_c100,
@@ -722,7 +731,14 @@ BEGIN
       SND                  => n_opl_snd,
       SAMPLE_DIV           => n_opl_smp,
       T1_DIV               => n_opl_t1,
-      T2_DIV               => n_opl_t2
+      T2_DIV               => n_opl_t2,
+      -- The PCM tap runs from the USB PLL, not from the CPU bus clock. That is
+      -- the whole reason it can hold a sample rate: n_cpuclk is 5-10 MHz and
+      -- changes at run time with the speed ladder, while a USB frame is a hard
+      -- 1 ms. Sharing n_clk48 makes 48 samples per frame exact by construction.
+      CLK48                => n_clk48,
+      PCM                  => n_opl_pcm,
+      PCM_STB              => n_opl_pcm_stb
     );
 
   fdc1 : ENTITY work.fdc8272
@@ -811,7 +827,8 @@ BEGIN
   -- adjacent 0xF0..0xFF, is not the 8087 window that real software probes.
   usb2 : ENTITY work.usb_host
     GENERIC MAP (
-      IO_BASE              => x"00A8"
+      IO_BASE              => x"00A8",
+      AUDIO                => true
     )
     PORT MAP (
       CLK                  => n_cpuclk,
@@ -825,7 +842,38 @@ BEGIN
       DATAOUT              => n_periph_rdata,
       IRQ                  => n_irq2,
       USB_DP               => USB1_DP,
-      USB_DM               => USB1_DM
+      USB_DM               => USB1_DM,
+      AUD_PCM              => n_opl_pcm,
+      AUD_STB              => n_opl_pcm_stb,
+      AUD_EN               => n_aud_en,
+      AUD_ADDR             => n_aud_addr,
+      AUD_ENDP             => n_aud_endp,
+      AUD_NSMP             => n_aud_nsmp,
+      AUD_GAIN             => n_aud_gain,
+      AUD_UNDER            => n_aud_under
+    );
+
+  -- Audio streams on the hybrid port, so this is where the streamer is built.
+  -- usb1 leaves every AUD_* port open and its generic false: the disk port
+  -- cannot be an audio device, and unbuilt logic costs nothing.
+  usbaud1 : ENTITY work.usb_audio
+    GENERIC MAP (
+      IO_BASE              => x"00A0"
+    )
+    PORT MAP (
+      CLK                  => n_cpuclk,
+      RESET                => n_rst_out,
+      DATA                 => n_cpu_wdata,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      AUD_EN               => n_aud_en,
+      AUD_ADDR             => n_aud_addr,
+      AUD_ENDP             => n_aud_endp,
+      AUD_NSMP             => n_aud_nsmp,
+      AUD_GAIN             => n_aud_gain,
+      AUD_UNDER            => n_aud_under
     );
 
   inst3 : ENTITY work.ps2_kbd_ppi

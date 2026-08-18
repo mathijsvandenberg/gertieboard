@@ -127,7 +127,12 @@ ENTITY usb_host IS
     -- Base of this instance's 8-register I/O window. MUST be 8-byte aligned:
     -- the decode compares ADDR(15 DOWNTO 3) and indexes with ADDR(2 DOWNTO 0),
     -- so a misaligned base would silently answer at the wrong eight addresses.
-    IO_BASE   : std_logic_vector(15 DOWNTO 0) := x"00E8"
+    IO_BASE   : std_logic_vector(15 DOWNTO 0) := x"00E8";
+    -- Build the isochronous audio streamer into THIS instance. False on the
+    -- disk port, where it would be ~400 LEs and 4096 memory bits of logic that
+    -- can never fire. The extra ports below are ignored when it is false, so
+    -- an instance that does not want audio can leave every one of them open.
+    AUDIO     : boolean := false
   );
   PORT (
     CLK       : IN    std_logic;                     -- 10 MHz CPU I/O bus (c0)
@@ -143,7 +148,26 @@ ENTITY usb_host IS
     -- input. Leave OPEN on an instance that does not need it.
     IRQ       : OUT   std_logic;
     USB_DP    : INOUT std_logic;
-    USB_DM    : INOUT std_logic
+    USB_DM    : INOUT std_logic;
+
+    -- ---- isochronous audio streamer (only when GENERIC AUDIO is true) -------
+    -- The CPU is not in this path. It enumerates the device, picks the
+    -- alternate setting and then sets AUD_EN; from that point one ISO OUT goes
+    -- out per frame, sourced from fabric, whatever the CPU is doing. That is
+    -- the entire point -- a DOS game will not yield 1 ms service to anyone, and
+    -- an isochronous endpoint that misses its frame is a click in the audio.
+    AUD_PCM   : IN  std_logic_vector(15 DOWNTO 0) := (OTHERS => '0'); -- signed
+    AUD_STB   : IN  std_logic := '0';               -- one CLK48 tick per sample
+    AUD_EN    : IN  std_logic := '0';               -- stream while high
+    AUD_ADDR  : IN  std_logic_vector(6 DOWNTO 0) := (OTHERS => '0');
+    AUD_ENDP  : IN  std_logic_vector(3 DOWNTO 0) := (OTHERS => '0');
+    AUD_NSMP  : IN  std_logic_vector(7 DOWNTO 0) := x"30";  -- samples/frame, 48
+    AUD_GAIN  : IN  std_logic_vector(2 DOWNTO 0) := "000";  -- right shift
+    -- Sticky: the writer did not deliver a full frame before the swap. Means
+    -- the sample clock and the frame clock have drifted apart, which cannot
+    -- happen while both come from CLK48 -- so if this ever sets, the wiring is
+    -- wrong, not the timing.
+    AUD_UNDER : OUT std_logic
   );
 END usb_host;
 
@@ -244,7 +268,44 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL rxbuf     : buf_t;
   SIGNAL txb_q     : std_logic_vector(7 DOWNTO 0);
   SIGNAL rxb_q     : std_logic_vector(7 DOWNTO 0);
-  SIGNAL sie_txadr : std_logic_vector(5 DOWNTO 0) := (OTHERS => '0');
+  -- 8 bits, not 6. An isochronous audio packet is 192 bytes (48 stereo frames
+  -- of 4), so the transmit side has to address past the 64-byte control/bulk
+  -- buffer. The CPU-facing TXLEN is untouched and still 0..64 -- only the
+  -- engine's own counters grew, and only the audio path ever uses the range.
+  SIGNAL sie_txadr : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
+
+  -- ---- isochronous audio double buffer --------------------------------------
+  -- Two banks of 256 bytes. The PCM writer fills one while the SIE transmits
+  -- the other, and they swap on the frame boundary.
+  --
+  -- A double buffer rather than a FIFO because the rates are EXACT: the 48 kHz
+  -- sample strobe and the 1 kHz frame tick are both divided from CLK48, so
+  -- every frame gets 48 samples, never 47 or 49. A FIFO would be machinery for
+  -- absorbing a drift that cannot occur, and would replace a deterministic
+  -- swap with a fill level to reason about.
+  CONSTANT AUD_BANK : integer := 256;
+  TYPE audbuf_t IS ARRAY(0 TO 2*AUD_BANK-1) OF std_logic_vector(7 DOWNTO 0);
+  SIGNAL audbuf    : audbuf_t;
+  SIGNAL aud_q     : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL aud_wbank : std_logic := '0';            -- bank the writer is filling
+  -- bytes written into the current bank; doubles as the write offset, which
+  -- is why there is no separate pointer (Quartus merged the two when there was)
+  SIGNAL aud_wlen  : std_logic_vector(8 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL aud_tlen  : std_logic_vector(8 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL aud_run   : std_logic := '0';            -- this frame has data to send
+  SIGNAL aud_act   : std_logic := '0';            -- SEQ is doing the ISO OUT
+  SIGNAL aud_und   : std_logic := '0';
+  SIGNAL aud_smp   : std_logic_vector(15 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL aud_ph    : integer RANGE 0 TO 4 := 4;   -- L.lo L.hi R.lo R.hi, 4 = idle
+  SIGNAL aud_tick  : std_logic := '0';            -- frame boundary, from SEQ
+  SIGNAL aud_en_m1 : std_logic := '0';
+  SIGNAL aud_en_s  : std_logic := '0';            -- AUD_EN, resynchronised
+  -- bytes per frame = samples * 4 (16-bit stereo). 7 bits of AUD_NSMP is
+  -- ample: 48 at full speed, and the whole packet has to fit a 256-byte bank.
+  SIGNAL aud_nsmp_x4 : std_logic_vector(8 DOWNTO 0);
+  -- What the transmitter actually shifts out: the control/bulk buffer, or the
+  -- audio bank. One mux instead of threading a source select through TXP.
+  SIGNAL tx_byte   : std_logic_vector(7 DOWNTO 0);
   SIGNAL sie_rxadr : std_logic_vector(5 DOWNTO 0) := (OTHERS => '0');
   SIGNAL sie_rxwe  : std_logic := '0';
   SIGNAL sie_rxd   : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
@@ -279,12 +340,15 @@ ARCHITECTURE rtl OF usb_host IS
   SIGNAL tx_ones    : integer RANGE 0 TO 7 := 0;
   SIGNAL tx_j       : std_logic := '1';          -- current NRZI level (1 = J)
   SIGNAL tx_stuff   : std_logic := '0';
-  SIGNAL tx_cnt     : std_logic_vector(6 DOWNTO 0) := (OTHERS => '0');
-  SIGNAL tx_total   : std_logic_vector(6 DOWNTO 0) := (OTHERS => '0');
+  -- 9 bits: see sie_txadr above. Nothing the CPU can ask for exceeds 64; the
+  -- width exists for the 192-byte audio packet the streamer sends itself.
+  SIGNAL tx_cnt     : std_logic_vector(8 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL tx_total   : std_logic_vector(8 DOWNTO 0) := (OTHERS => '0');
   SIGNAL tx_crcen   : std_logic := '0';
   SIGNAL tx_crc16   : std_logic_vector(15 DOWNTO 0) := (OTHERS => '1');
   SIGNAL tx_crcsel  : std_logic := '0';          -- 1 = append CRC16
   SIGNAL tx_src     : std_logic := '0';          -- 0 = literal reg, 1 = buffer
+  SIGNAL tx_aud     : std_logic := '0';          -- buffer is audbuf, not txbuf
   SIGNAL tx_lit     : std_logic_vector(23 DOWNTO 0) := (OTHERS => '0');
   SIGNAL tx_litn    : integer RANGE 0 TO 3 := 0;
 
@@ -294,7 +358,7 @@ ARCHITECTURE rtl OF usb_host IS
   -- single driver per signal, and sharing them is what an earlier version did.
   SIGNAL req_lit    : std_logic_vector(23 DOWNTO 0) := (OTHERS => '0');
   SIGNAL req_litn   : integer RANGE 0 TO 3 := 0;
-  SIGNAL req_total  : std_logic_vector(6 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL req_total  : std_logic_vector(8 DOWNTO 0) := (OTHERS => '0');
   SIGNAL req_crc16  : std_logic := '0';
   -- "send nothing but an EOP". Low speed's 1 ms marker is a bare keep-alive,
   -- not a SOF packet: a low-speed device never sees SOF (a hub does not forward
@@ -619,10 +683,117 @@ BEGIN
   BUF48 : PROCESS (CLK48)
   BEGIN
     IF rising_edge(CLK48) THEN
-      txb_q <= txbuf(conv_integer(sie_txadr));
+      -- sie_txadr is 8 bits for the audio path; txbuf is still 64, so index it
+      -- with the low 6. Without the slice a control transfer would read past
+      -- the array the moment the counter went above 63.
+      txb_q <= txbuf(conv_integer(sie_txadr(5 DOWNTO 0)));
       IF sie_rxwe = '1' THEN
         rxbuf(conv_integer(sie_rxadr)) <= sie_rxd;
       END IF;
+    END IF;
+  END PROCESS;
+
+  -- ==========================================================================
+  --  Isochronous audio buffer.  Present only where the generic asks for it.
+  --
+  --  The writer turns each 48 kHz mono sample into four little-endian bytes --
+  --  L.lo L.hi R.lo R.hi -- because essentially every USB Audio Class device
+  --  on sale is 16-bit STEREO and refuses a mono alternate setting. The OPL2
+  --  is mono, so both channels carry the same sample; that is a doubling of
+  --  bus bandwidth to say nothing, and it is still the interoperable choice.
+  -- ==========================================================================
+  AUDGEN : IF AUDIO GENERATE
+
+    AUDWR : PROCESS (CLK48)
+      VARIABLE wa : integer RANGE 0 TO 2*AUD_BANK-1;
+      VARIABLE by : std_logic_vector(7 DOWNTO 0);
+    BEGIN
+      IF rising_edge(CLK48) THEN
+        -- read port, one cycle ahead exactly like txbuf. The transmit bank is
+        -- always the one the writer is NOT filling.
+        aud_q <= audbuf(conv_integer((NOT aud_wbank) & sie_txadr));
+
+        -- ---- frame boundary: hand the filled bank over ----
+        IF aud_tick = '1' THEN
+          IF aud_en_s = '1' THEN
+            -- A partial bank is a fault, not something to paper over: report
+            -- it and send what there is rather than trailing stale bytes from
+            -- the previous frame, which would be a buzz instead of a gap.
+            -- One sample of slack, for the case where a strobe lands astride
+            -- the tick and its four bytes belong to the next frame.
+            IF aud_wlen + 4 < aud_nsmp_x4 THEN
+              aud_und <= '1';
+            END IF;
+            aud_tlen  <= aud_wlen;
+            aud_run   <= '1';
+          ELSE
+            aud_run   <= '0';
+          END IF;
+          aud_wbank <= NOT aud_wbank;
+          aud_wlen  <= (OTHERS => '0');
+          aud_ph    <= 4;                  -- idle, NOT 0: see below
+        END IF;
+
+        -- ---- a new sample: write its four bytes over the next four cycles --
+        -- aud_ph is a 0..4 cursor where 4 means idle. The strobe arms it at 0
+        -- and the ELSIF walks it to 4, writing on 0, 1, 2 and 3 -- all four
+        -- bytes. An earlier version ran `aud_ph < 3`, which stopped one short
+        -- and dropped the high byte of the right channel from every sample:
+        -- three bytes per 4-byte frame, so the whole stream walked out of
+        -- alignment and would have arrived as noise rather than as music.
+        --
+        -- The frame tick therefore parks it at 4, not at 0. Parking at 0 would
+        -- re-run the cursor over a stale aud_smp and put four bytes nobody
+        -- asked for at the head of the new bank.
+        --
+        -- ELSIF, so the write cursor never advances on the strobe cycle
+        -- itself: aud_smp is registered there and is not readable until the
+        -- next edge. There are 1000 CLK48 cycles between samples, so four
+        -- cycles of work can never collide with the following strobe.
+        IF AUD_STB = '1' AND aud_en_s = '1' THEN
+          -- Gain is a right shift, applied once here rather than per byte.
+          -- ARITH's shr on a SIGNED replicates the sign bit, which is what a
+          -- volume control has to do -- a logical shift would turn quiet
+          -- negative samples into very loud positive ones.
+          aud_smp <= std_logic_vector(
+                       shr(signed(AUD_PCM), unsigned(AUD_GAIN)));
+          aud_ph  <= 0;
+        ELSIF aud_ph < 4 AND aud_wlen < AUD_BANK THEN
+          aud_ph <= aud_ph + 1;
+          CASE aud_ph IS
+            WHEN 0      => by := aud_smp(7 DOWNTO 0);    -- left  lo
+            WHEN 1      => by := aud_smp(15 DOWNTO 8);   -- left  hi
+            WHEN 2      => by := aud_smp(7 DOWNTO 0);    -- right lo
+            WHEN OTHERS => by := aud_smp(15 DOWNTO 8);   -- right hi
+          END CASE;
+          wa := conv_integer(aud_wbank & aud_wlen(7 DOWNTO 0));
+          audbuf(wa) <= by;
+          aud_wlen <= aud_wlen + 1;
+        END IF;
+
+        IF RESET = '1' THEN
+          aud_wbank <= '0'; aud_wlen <= (OTHERS => '0');
+          aud_run   <= '0'; aud_und  <= '0'; aud_ph <= 4;
+        END IF;
+      END IF;
+    END PROCESS;
+
+  END GENERATE;
+
+  AUD_UNDER   <= aud_und;
+  aud_nsmp_x4 <= AUD_NSMP(6 DOWNTO 0) & "00";
+  tx_byte     <= aud_q WHEN tx_aud = '1' ELSE txb_q;
+
+  -- AUD_EN is written by the CPU in the bus-clock domain and gates a state
+  -- transition in the 48 MHz sequencer, so it gets the two flops. The other
+  -- config ports do not: they are static before EN goes high and never change
+  -- while it is, so there is nothing for a synchroniser to catch. EN is the
+  -- one that moves underneath a running engine.
+  ENSYNC : PROCESS (CLK48)
+  BEGIN
+    IF rising_edge(CLK48) THEN
+      aud_en_m1 <= AUD_EN;
+      aud_en_s  <= aud_en_m1;
     END IF;
   END PROCESS;
 
@@ -752,9 +923,9 @@ BEGIN
                     IF tx_total > 0 THEN
                       tx_src   <= '1';
                       tx_crcen <= '1';
-                      tx_sh    <= txb_q;
+                      tx_sh    <= tx_byte;
                       tx_cnt   <= tx_cnt + 1;
-                      sie_txadr<= tx_cnt(5 DOWNTO 0) + 1;
+                      sie_txadr<= tx_cnt(7 DOWNTO 0) + 1;
                     ELSIF tx_crcsel = '1' THEN
                       tx_st  <= T_CRC;
                       tx_nbit<= 0;
@@ -765,9 +936,9 @@ BEGIN
                   END IF;
                 ELSE
                   IF tx_cnt < tx_total THEN
-                    tx_sh     <= txb_q;
+                    tx_sh     <= tx_byte;
                     tx_cnt    <= tx_cnt + 1;
-                    sie_txadr <= tx_cnt(5 DOWNTO 0) + 1;
+                    sie_txadr <= tx_cnt(7 DOWNTO 0) + 1;
                   ELSIF tx_crcsel = '1' THEN
                     tx_st    <= T_CRC;
                     tx_nbit  <= 0;
@@ -1055,7 +1226,8 @@ BEGIN
     VARIABLE c5  : std_logic_vector(4 DOWNTO 0);
   BEGIN
     IF rising_edge(CLK48) THEN
-      tx_go <= '0';
+      tx_go    <= '0';
+      aud_tick <= '0';
 
       -- Catch the GO toggle whenever it arrives; S_IDLE consumes it when it can.
       --
@@ -1087,6 +1259,7 @@ BEGIN
 
         WHEN S_IDLE =>
           rx_arm  <= '0';
+          tx_aud  <= '0';
           IF go_pend = '1' THEN                     -- a command is waiting
             go_pend  <= '0';
             -- req_eop is a LATCH, and the keep-alive below sets it. Without
@@ -1108,6 +1281,10 @@ BEGIN
           ELSIF sof_req = '1' THEN
             sof_req   <= '0';
             frame_cnt <= frame_cnt + 1;
+            -- Swap the audio banks here, at the top of the frame, so the bank
+            -- the streamer is about to transmit is already closed by the time
+            -- the SOF packet has finished going out.
+            aud_tick  <= '1';
             -- Periodic interrupt, every 8th frame = 8 ms = 125 Hz. Derived
             -- from SOF rather than from the PIT on purpose: channel 0 is
             -- reprogrammed by any game that wants its own tick rate, so a
@@ -1148,12 +1325,23 @@ BEGIN
 
         -- ---- token packet: PID + address/endpoint + CRC5 ----
         WHEN S_TOKEN =>
-          tok := endp_s & dev_s;
+          -- The streamer addresses its own device: the CPU's DEVADDR/ENDP
+          -- registers belong to whatever transaction software is running, and
+          -- an audio frame goes out between them without disturbing either.
+          IF aud_act = '1' THEN
+            tok := AUD_ENDP & AUD_ADDR;
+          ELSE
+            tok := endp_s & dev_s;
+          END IF;
           c5  := crc5(tok);
           CASE se_op IS
             WHEN "001"  => req_lit(7 DOWNTO 0) <= PID_SETUP;
             WHEN "010"  => req_lit(7 DOWNTO 0) <= PID_IN;
+            -- 011 = OUT, 100 = ISO OUT. Same token on the wire: isochronous is
+            -- an OUT that nobody answers, and only the host's own behaviour
+            -- afterwards differs.
             WHEN "011"  => req_lit(7 DOWNTO 0) <= PID_OUT;
+            WHEN "100"  => req_lit(7 DOWNTO 0) <= PID_OUT;
             WHEN OTHERS => req_lit(7 DOWNTO 0) <= PID_SOF;
           END CASE;
           -- CRC5 is transmitted MSb first, so the field is the REVERSE of the
@@ -1193,7 +1381,16 @@ BEGIN
           END IF;
           req_litn  <= 1;
           req_crc16 <= '1';
-          req_total <= txlen_s;
+          -- The streamer sends from its own bank and its own length; a CPU
+          -- transaction sends TXLEN from txbuf. tx_aud picks the byte source
+          -- for the whole packet and is cleared back in S_IDLE.
+          IF aud_act = '1' THEN
+            req_total <= aud_tlen;
+            tx_aud    <= '1';
+          ELSE
+            req_total <= "00" & txlen_s;
+            tx_aud    <= '0';
+          END IF;
           tx_go     <= '1';
           tx_wcnt   <= 0;
           se        <= S_TXDW;
@@ -1205,9 +1402,26 @@ BEGIN
             tx_wcnt <= tx_wcnt + 1;
           END IF;
           IF tx_done = '1' THEN
-            rx_arm    <= '1';
-            rx_to_cnt <= 0;
-            se        <= S_RXWAIT;
+            -- ISOCHRONOUS HAS NO HANDSHAKE. There is no ACK to wait for and no
+            -- retry if it went wrong -- that is the bargain isochronous makes,
+            -- guaranteed bandwidth in exchange for guaranteed delivery. Waiting
+            -- for one here would time out every frame and hold BUSY for the
+            -- whole 18-bit-time window, which at 1000 frames a second would
+            -- leave no room for anything else on the port.
+            IF se_op = "100" THEN
+              IF aud_act = '1' THEN
+                -- housekeeping, like SOF: BUSY belongs to the CPU's
+                -- transaction and this must leave it exactly as it found it
+                aud_act <= '0';
+                se      <= S_IDLE;
+              ELSE
+                se <= S_FIN;
+              END IF;
+            ELSE
+              rx_arm    <= '1';
+              rx_to_cnt <= 0;
+              se        <= S_RXWAIT;
+            END IF;
           END IF;
 
         -- ---- wait for the device ----
@@ -1314,7 +1528,21 @@ BEGIN
             tx_wcnt <= tx_wcnt + 1;
           END IF;
           IF tx_done = '1' THEN
-            se <= S_IDLE;
+            -- The audio packet rides immediately behind the SOF, which is
+            -- where an isochronous transfer belongs in a frame: it is the
+            -- only traffic with a deadline, so it goes before software gets a
+            -- chance to start a bulk transfer that would push it late.
+            --
+            -- 192 bytes at 12 Mbps is 128 us of a 1000 us frame, so a control
+            -- or bulk transaction still has the rest of the frame to itself.
+            IF AUDIO AND aud_en_s = '1' AND aud_run = '1' AND aud_tlen > 0 THEN
+              aud_act <= '1';
+              se_op   <= "100";
+              se_d1   <= '0';        -- isochronous is always DATA0
+              se      <= S_TOKEN;
+            ELSE
+              se <= S_IDLE;
+            END IF;
           END IF;
 
         WHEN S_FIN =>
@@ -1327,7 +1555,7 @@ BEGIN
 
       IF RESET = '1' THEN
         se <= S_IDLE; st_busy <= '0'; frame_cnt <= (OTHERS => '0');
-        go_pend <= '0';
+        go_pend <= '0'; aud_act <= '0'; tx_aud <= '0';
       END IF;
     END IF;
   END PROCESS;

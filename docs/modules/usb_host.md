@@ -91,7 +91,8 @@ port 1 substitute `0xA8`–`0xAF`.
 | | R | **FRAME** low 8 bits of the frame counter (index `0x00`), or the selected counter |
 
 Operations: `1` = SETUP (token + DATA0 + handshake), `2` = IN (token + receive + ACK),
-`3` = OUT (token + DATAx + handshake), `5` = one SOF.
+`3` = OUT (token + DATAx + handshake), `4` = ISO OUT (token + DATA0, **no
+handshake**), `5` = one SOF.
 
 **RXPID is the register to reach for when something is wrong.** It says what actually
 came back rather than how the status bits classified it.
@@ -132,6 +133,38 @@ and a hub driver; directly attached needs neither.
 48 MHz gives 4 samples per bit at full speed, 32 at low. See
 [clkgen / pll](clkgen-pll.md#pll48--48-mhz-for-usb) for why that number and why it is a
 second PLL.
+
+## Isochronous audio
+
+`CMD` operation **4 = ISO OUT** sends an OUT token and a DATA0 and then stops:
+no handshake, no retry, no status to wait for. That is the bargain isochronous
+makes -- guaranteed bandwidth in exchange for guaranteed delivery -- and it is
+why the op could not simply reuse `3`. Waiting for an ACK that never comes would
+time out every frame and hold `BUSY` for the whole 18-bit-time window, a
+thousand times a second.
+
+With the **`AUDIO` generic** true, the instance also gains a streamer that needs
+no CPU at all. On each frame, immediately behind the SOF, it sends one ISO OUT
+to the device and endpoint that [usb_audio](usb_audio.md) names, carrying 48
+stereo samples produced by [opl2_lite](opl2_lite.md)'s PCM tap. 192 bytes at
+12 Mbps is 128 us of a 1000 us frame, so a control or bulk transaction still has
+the rest of the frame. It goes *before* software gets a chance to start one,
+because it is the only traffic on the port with a deadline.
+
+Cost, measured: **+1,119 logic elements** across the whole design and **+4,096
+memory bits**. `usb1` sets the generic false and pays none of it -- the disk
+port cannot be an audio device.
+
+A **double buffer, not a FIFO.** The writer fills one 256-byte bank while the
+SIE transmits the other, and they swap on the frame boundary. The rates are
+exact: the 48 kHz sample strobe and the 1 kHz frame tick are both divided from
+`CLK48`, so every frame gets 48 samples and never 47 or 49. A FIFO would be
+machinery for absorbing a drift that cannot occur, and would replace a
+deterministic swap with a fill level to reason about.
+
+> Only ONE device fits on the hybrid port. There is no hub support, so USB1
+> carries a keyboard or a mouse or an audio device, not two of them. The disk on
+> USB0 is unaffected.
 
 ## The frame interrupt
 
