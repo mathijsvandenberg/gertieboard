@@ -43,10 +43,13 @@
 ;  pipe, and forgetting it is the single most common way to get a UAC device
 ;  that enumerates beautifully and plays nothing.
 ;
-;  Usage:  USBAUDIO [0|1] [Gn] [S]
+;  Usage:  USBAUDIO [0|1] [Gn] [T] [An] [F] [S]
 ;            0 / 1   which USB port (default 1, the hybrid port)
 ;            Gn      gain, n = 0..7, a right shift. 0 is loudest, default 1
 ;            S       stop: disable streaming and exit
+;            T       test tone: key a 440 Hz note on the OPL2, so there is
+;                    guaranteed signal regardless of what else is running
+;            An      use alternate setting n, overriding the search
 ;            F       force: accept a vendor-specific (class FF) interface whose
 ;                    isochronous OUT endpoint is 192 bytes, inferring the format
 ;                    from that size. See find_vendor.
@@ -144,6 +147,14 @@ start:
         je   .sforce
         cmp  al, 'f'
         je   .sforce
+        cmp  al, 'T'
+        je   .stone
+        cmp  al, 't'
+        je   .stone
+        cmp  al, 'A'
+        je   .salt
+        cmp  al, 'a'
+        je   .salt
         cmp  al, 'G'
         je   .sgain
         cmp  al, 'g'
@@ -157,6 +168,26 @@ start:
         cmp  al, 7
         ja   .snext
         mov  [gain], al
+        ; CONSUME the digit. Without this the scan reads it again on the next
+        ; pass, and since '0' is the port selector, "G0" -- ask for full volume
+        ; -- silently moved the whole operation to USB port 0, the disk.
+        inc  si
+        dec  cx
+        jmp  short .snext
+.salt:
+        cmp  cx, 1
+        jbe  .snext
+        mov  al, [si]
+        sub  al, '0'
+        cmp  al, 9
+        ja   .snext
+        mov  [altreq], al
+        mov  byte [althas], 1
+        inc  si
+        dec  cx
+        jmp  short .snext
+.stone:
+        mov  byte [tonereq], 1
         jmp  short .snext
 .sstop:
         mov  byte [stopreq], 1
@@ -173,6 +204,7 @@ start:
         mov  dx, A_CTL
         xor  al, al
         out  dx, al
+        call tone_off                   ; and key off, in case T left a note on
         mov  dx, msg_stopped
         call puts
         jmp  quit
@@ -258,6 +290,24 @@ start:
         SETDX O_ADDR
         out  dx, al
 
+; ---------------- who is it? ------------------------------------------------
+; The first read stopped at 8 bytes, which is short of idVendor -- it only
+; existed to learn bMaxPacketSize0. Read the whole thing now that the device
+; has an address, because a vendor-specific device can only be initialised by
+; knowing WHOSE vendor protocol it speaks.
+        mov  si, sp_getdev18
+        mov  di, devbuf
+        mov  cx, 18
+        call ctl_read
+        jc   .novid
+        cmp  cx, 12
+        jb   .novid
+        mov  ax, [devbuf+8]             ; idVendor, little-endian
+        mov  [vid], ax
+        mov  ax, [devbuf+10]            ; idProduct
+        mov  [pid], ax
+.novid:
+
 ; ---------------- configuration descriptor ----------------------------------
         mov  si, sp_getcfg9
         mov  di, cfgbuf
@@ -288,6 +338,22 @@ start:
         mov  dx, msg_forced
         call puts
 .gotalt:
+; An explicit A<n> overrides whichever alt the search settled on. The search
+; reads a format out of packet sizes, and on a vendor device that is inference
+; rather than fact -- Linux drives the TonePort at alt 2 (44.1 kHz), not the
+; alt 1 that its 192-byte endpoint makes look obviously right for us. Being
+; able to try the other one without a rebuild is worth a command letter.
+        cmp  byte [althas], 0
+        je   .noaltov
+        mov  al, [altreq]
+        mov  [altnum], al
+        mov  dx, msg_altov
+        call puts
+        mov  al, [altnum]
+        call putdec
+        mov  dx, msg_crlf
+        call puts
+.noaltov:
 
 ; ---------------- configure -------------------------------------------------
         mov  al, [cfgbuf+5]             ; bConfigurationValue
@@ -308,6 +374,25 @@ start:
         call ctl_read
         jc   .e_setif
         call delay_tick
+
+; ---------------- vendor wake-up, if we recognise the vendor ----------------
+; A vendor-specific device may need telling to start before it will emit
+; anything, and there is nothing in its descriptors that says so -- the pipe is
+; open, the packets are accepted, and it is silent. Line 6 hardware is the case
+; in hand: their driver sends one vendor request to enable the device before
+; audio works. Sending it only to Line 6 devices matters -- 0x67 means nothing
+; in particular to anyone else and could mean something unwelcome.
+        cmp  word [vid], 0x0E41         ; Line 6
+        jne  .novendor
+        mov  dx, msg_l6
+        call puts
+        mov  si, sp_l6en
+        xor  cx, cx
+        call ctl_read
+        jnc  .novendor
+        mov  dx, msg_l6fail
+        call puts
+.novendor:
 
 ; ---------------- ask for 48000 Hz ------------------------------------------
 ; Optional: a device with exactly one supported rate need not implement the
@@ -394,6 +479,12 @@ start:
         mov  dx, msg_under
         call puts
 .noerr:
+        cmp  byte [tonereq], 0
+        je   .notone
+        call tone_on
+        mov  dx, msg_tone
+        call puts
+.notone:
         mov  dx, msg_playing
         call puts
         jmp  quit
@@ -554,6 +645,73 @@ find_alt:
         pop  si
         pop  cx
         pop  bx
+        pop  ax
+        ret
+
+; ============================================================================
+;  tone_on / tone_off -- key a 440 Hz note on the OPL2 itself
+;
+;  This exists to take the synthesiser out of the argument. The PCM tap renders
+;  digital silence unless a channel is keyed on, so running this tool at a bare
+;  DOS prompt streams 192 bytes of zeroes per frame -- a perfectly working
+;  audio path that is inaudible. That is indistinguishable from a broken one,
+;  and it is the first thing to rule out, not the last.
+;
+;  With T there is guaranteed signal, so silence afterwards means the USB side,
+;  and a tone means the USB side is fine and the question is what was playing.
+;
+;  F-number: freq = fnum * 2^block * 49716 / 2^20, so for 440 Hz at block 4,
+;  fnum = 440 * 2^16 / 49716 = 580 = 0x244. opl2_lite ignores everything except
+;  0xA0-0xA8, 0xB0-0xB8 and register 4, but the operator registers are written
+;  anyway: they cost nothing here and they are what a real OPL2 would need, so
+;  this stays a valid test if the FM core is ever finished.
+; ============================================================================
+tone_on:
+        push ax
+        push bx
+        push cx
+        push si
+        mov  si, tonetab
+        mov  cx, tonetab_n
+.t_l:
+        lodsw                           ; AL = register, AH = value
+        call opl_wr
+        loop .t_l
+        pop  si
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+
+tone_off:
+        push ax
+        mov  al, 0xB0
+        mov  ah, 0x00                   ; key off, block 0
+        call opl_wr
+        pop  ax
+        ret
+
+; opl_wr: AL = register index, AH = value. The index and data ports need a
+;         settling delay on real hardware -- reading the status port is the
+;         conventional way to spend it and works at any CPU clock.
+opl_wr:
+        push ax
+        push cx
+        push dx
+        mov  dx, 0x0388
+        out  dx, al
+        mov  cx, 6
+.w1:    in   al, dx                     ; clobbers AL only; AH keeps the value
+        loop .w1
+        mov  dx, 0x0389
+        mov  al, ah
+        out  dx, al
+        mov  dx, 0x0388
+        mov  cx, 35
+.w2:    in   al, dx
+        loop .w2
+        pop  dx
+        pop  cx
         pop  ax
         ret
 
@@ -1113,6 +1271,11 @@ nbits   db 0
 cand    db 0
 fmtok   db 0
 forced  db 0
+tonereq db 0
+altreq  db 0
+althas  db 0
+vid     dw 0
+pid     dw 0
 curif   db 0
 curalt  db 0
 bestif  db 0
@@ -1124,6 +1287,7 @@ cfglen  dw 0
 ; ---- setup packets ----
 sp_getdev8   db 0x80, 6, 0x00, DT_DEVICE, 0, 0, 8, 0
 sp_setaddr   db 0x00, 5, 1, 0, 0, 0, 0, 0
+sp_getdev18  db 0x80, 6, 0x00, DT_DEVICE, 0, 0, 18, 0
 sp_getcfg9   db 0x80, 6, 0x00, DT_CONFIG, 0, 0, 9, 0
 sp_getcfgn   db 0x80, 6, 0x00, DT_CONFIG, 0, 0, 0, 0
 sp_setcfg    db 0x00, 9, 1, 0, 0, 0, 0, 0
@@ -1133,6 +1297,22 @@ sp_setif     db 0x01, 11, 0, 0, 0, 0, 0, 0
 ; (0x0100), wIndex = endpoint address, wLength = 3
 sp_setrate   db 0x22, 0x01, 0x00, 0x01, 0, 0, 3, 0
 rate48k      db 0x80, 0xBB, 0x00        ; 48000, 24-bit little-endian
+
+; Line 6 "enable device": vendor request to the device, no data stage. Taken
+; from toneport_setup() in the Linux driver (sound/usb/line6/toneport.c), which
+; sends bRequest 0x67 with wValue 0x0301 before any audio flows. The driver
+; also syncs a timestamp to register 0x80c6 and sets the capture source; both
+; are skipped here, the first because it looks like housekeeping and the second
+; because it selects an INPUT and this is playback only.
+sp_l6en      db 0x40, 0x67, 0x01, 0x03, 0x00, 0x00, 0, 0
+
+; 440 Hz on channel 0: register, value
+tonetab      db 0x20,0x01, 0x40,0x10, 0x60,0xF0, 0x80,0x77
+             db 0x23,0x01, 0x43,0x00, 0x63,0xF0, 0x83,0x77
+             db 0xC0,0x01
+             db 0xA0,0x44                ; F-number low  (0x244)
+             db 0xB0,0x32                ; key on, block 4, F-number high
+tonetab_n    equ 11             ; pairs above -- count them, do not guess
 
 msg_hdr      db 'USBAUDIO -- AdLib to a USB Audio Class device', 13, 10, '$'
 msg_nodev    db 'no device on the port', 13, 10, '$'
@@ -1156,6 +1336,10 @@ msg_ep       db '  ep ', '$'
 msg_mps      db '  maxpkt ', '$'
 msg_forced   db 'FORCED: vendor-specific interface, format INFERRED from the', 13, 10
              db 'packet size. It may need a vendor init sequence to make sound.', 13, 10, '$'
+msg_l6       db 'Line 6 device: sending the vendor enable (0x67/0x0301)', 13, 10, '$'
+msg_l6fail   db 'the vendor enable was refused', 13, 10, '$'
+msg_altov    db 'alternate setting overridden to ', '$'
+msg_tone     db 'test tone: 440 Hz keyed on channel 0', 13, 10, '$'
 msg_fmt      db 'format:     ', '$'
 msg_ch       db ' channels, ', '$'
 msg_bits     db ' bits, 48000 Hz', 13, 10, '$'
