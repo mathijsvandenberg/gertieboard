@@ -301,18 +301,36 @@ start:
         call puts
         mov  si, cmd_tur
         call ufi_nodata
+        pushf
+        mov  dx, msg_t1
+        call ufi_trace
+        popf
         jnc  .ready
 
         call ufi_sense                  ; clears UNIT ATTENTION
+        mov  dx, msg_t2
+        call ufi_trace
+        call dump_sense
+
         mov  si, cmd_tur
         call ufi_nodata
+        pushf
+        mov  dx, msg_t3
+        call ufi_trace
+        popf
         jnc  .ready
 
         ; still not ready: report what the drive actually said
-        call show_fail                  ; what the SECOND TUR actually did
         call ufi_sense
+        cmp  byte [stalled], 0
+        je   .nr_plain
+        mov  dx, msg_refused
+        call puts
+        jmp  short .nr_sense
+.nr_plain:
         mov  dx, msg_notready
         call puts
+.nr_sense:
         mov  dx, msg_sense
         call puts
         mov  al, [senbuf+2]             ; sense key
@@ -590,6 +608,16 @@ note_fail:
         SETDX O_CMD
         in   al, dx
         mov  [fail_st], al
+        ; A STALL on the ADSC request is the DEVICE REFUSING THE COMMAND, not
+        ; the transport breaking. This drive answers TEST UNIT READY with a
+        ; stall when there is no diskette in it -- the reason is then in the
+        ; sense data, and REQUEST SENSE still works because that command is
+        ; always answerable. Conflating "refused" with "broken" sent an hour
+        ; looking at the status endpoint when the drive was simply empty.
+        test al, ST_STALL
+        jz   .nf_nostall
+        mov  byte [stalled], 1
+.nf_nostall:
         SETDX O_ENDP
         in   al, dx
         mov  [fail_pid], al
@@ -652,6 +680,8 @@ cbi_send:
         push cx
         push dx
         push si
+        mov  byte [fail_ph], 0          ; 0 = got all the way through
+        mov  byte [stalled], 0
 
         mov  al, [ifnum]
         mov  [sp_adsc+4], al
@@ -841,6 +871,73 @@ cbi_status:
         ret
 
 ; ============================================================================
+; ufi_trace -- DX = label. One line per command: where it got to, and the
+;              evidence. Printing every step rather than only the last failure,
+;              because the interesting fact in the previous run was which
+;              command SUCCEEDED, and that was invisible.
+ufi_trace:
+        push ax
+        call puts
+        mov  dx, msg_tph
+        call puts
+        mov  al, [fail_ph]
+        call putdec8
+        mov  dx, msg_fst
+        call puts
+        mov  al, [fail_st]
+        call puthex
+        mov  dx, msg_fpid
+        call puts
+        mov  al, [fail_pid]
+        call puthex
+        mov  dx, msg_fasc
+        call puts
+        mov  al, [stat_len]
+        call putdec8
+        mov  dx, msg_fbytes
+        call puts
+        mov  al, [stat_asc]
+        call puthex
+        mov  dl, '/'
+        mov  ah, 2
+        int  0x21
+        mov  al, [stat_ascq]
+        call puthex
+        mov  dx, msg_crlf
+        call puts
+        pop  ax
+        ret
+
+; dump_sense -- the 14 bytes REQUEST SENSE returned, raw.
+;               Byte 2 low nibble is the sense key, 12 is ASC, 13 is ASCQ.
+;               Raw, because a decoded field that was never fetched is what
+;               made 00/00/00 look like a measurement last time.
+dump_sense:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov  dx, msg_senraw
+        call puts
+        mov  si, senbuf
+        mov  cx, 14
+.ds_l:
+        lodsb
+        call puthex
+        mov  dl, ' '
+        mov  ah, 2
+        int  0x21
+        loop .ds_l
+        mov  dx, msg_crlf
+        call puts
+        pop  si
+        pop  dx
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+
 ;  ufi_nodata -- a command with no data phase.   DS:SI = command block
 ;  ufi_in     -- a command that reads.  DS:SI = cmd, ES:DI = dest, CX = bytes
 ; ============================================================================
@@ -1339,6 +1436,7 @@ nsec    db 18
 seclo   dw 0
 pktlen  dw 0
 ctog    db 0
+stalled db 0
 fail_ph db 0
 fail_st db 0
 fail_pid db 0
@@ -1373,7 +1471,8 @@ msg_eps      db '  ep in/out/int ', '$'
 msg_tur      db 'unit ready  ', '$'
 msg_ok       db 'yes', 13, 10, '$'
 msg_notready db 'NO', 13, 10, '$'
-msg_nodisk   db 'no disk in the drive', 13, 10, '$'
+msg_refused  db 'refused (STALL) -- the drive said no, see the sense below', 13, 10, '$'
+msg_nodisk   db '>>> NO DISKETTE IN THE DRIVE. Put one in and run this again.', 13, 10, '$'
 msg_sense    db 'sense key/ASC/ASCQ = ', '$'
 msg_blocks   db 'capacity    ', '$'
 msg_x512     db ' blocks of 512 = ', '$'
@@ -1392,6 +1491,11 @@ msg_esetcfg  db 'SET_CONFIGURATION failed', 13, 10, '$'
 msg_ecap     db 'READ CAPACITY failed', 13, 10, '$'
 msg_eread    db 'READ(10) failed', 13, 10, '$'
 msg_fph      db 'failed at phase ', '$'
+msg_tph      db '  phase ', '$'
+msg_t1       db '  TUR#1   ', '$'
+msg_t2       db '  SENSE   ', '$'
+msg_t3       db '  TUR#2   ', '$'
+msg_senraw   db '  sense raw ', '$'
 msg_fst      db '  status ', '$'
 msg_fpid     db '  rxpid ', '$'
 msg_fasc     db '  intlen ', '$'
