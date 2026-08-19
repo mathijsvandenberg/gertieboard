@@ -811,6 +811,7 @@ cbi_send:
         push si
         mov  byte [fail_ph], 0          ; 0 = got all the way through
         mov  byte [stalled], 0
+        mov  byte [soft3], 0
 
         mov  al, [ifnum]
         mov  [sp_adsc+4], al
@@ -911,7 +912,22 @@ cbi_send:
         jnc  .allok
         mov  al, 3                      ; phase 3: control status stage
         call note_fail
-        jmp  short .bad
+        ; NOT FATAL, and this is the thing three runs have been hiding.
+        ;
+        ; The drive PHYSICALLY ACTS on these commands: it spins up and steps
+        ; the head twice. So the command block is arriving and being executed,
+        ; and a stall on the control transfer's STATUS stage afterwards is not
+        ; evidence that the command did not happen -- it is one device's way of
+        ; ending the control transfer. The authority in CBI is the INTERRUPT
+        ; status, not this.
+        ;
+        ; Abandoning here meant never issuing the data phase and never reading
+        ; the interrupt status, so every command looked identically dead while
+        ; the drive was doing exactly what it was told. Carry on and let the
+        ; real status say what happened.
+        mov  byte [soft3], 1
+        clc
+        jmp  short .out
 .allok:
         clc
         jmp  short .out
@@ -1036,6 +1052,11 @@ ufi_trace_body:
         int  0x21
         mov  al, [stat_ascq]
         call puthex
+        cmp  byte [soft3], 0
+        je   .ut_nos
+        mov  dx, msg_soft3
+        call puts
+.ut_nos:
         mov  dx, msg_crlf
         call puts
         pop  ax
@@ -1571,6 +1592,7 @@ pktlen  dw 0
 ctog    db 0
 tries   dw 0
 stalled db 0
+soft3   db 0
 fail_ph db 0
 fail_st db 0
 fail_pid db 0
@@ -1614,6 +1636,7 @@ msg_ok       db 'yes', 13, 10, '$'
 msg_notready db 'NO', 13, 10, '$'
 msg_spin     db 'spinning up ', '$'
 msg_anyway   db 'trying the data path anyway -- TUR is my gate, not the drive', 13, 10, '$'
+msg_soft3    db '  [ctl-status stalled, continued anyway]', '$'
 msg_inq      db 'inquiry     ', '$'
 msg_inqok    db 'OK  ', '$'
 msg_inqbad   db 'REFUSED  ', '$'
