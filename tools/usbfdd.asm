@@ -496,7 +496,17 @@ start:
         mov  di, capbuf
         mov  cx, 8
         call ufi_in
-        jc   .e_cap
+        jnc  .cap_ok
+        ; NOT FATAL EITHER. Same mistake as the TUR gate, one command further
+        ; along: READ CAPACITY refusing stopped the run before READ(10), which
+        ; is the only thing that answers the actual question -- can this drive
+        ; read this disk. Assume the 1.44MB geometry and go and find out.
+        mov  dx, msg_ecap
+        call puts
+        mov  word [nblocks], 2880
+        mov  byte [nsec], 18
+        jmp  .doread
+.cap_ok:
 
         ; READ CAPACITY returns the LAST LBA, big-endian, then the block size.
         ; Blocks = last + 1. Both fit in 16 bits for any floppy, so only the
@@ -539,6 +549,7 @@ start:
         call puts
 
 ; ---------------- read a sector ----------------------------------------------
+.doread:
         mov  dx, msg_reading
         call puts
         mov  ax, [seclo]
@@ -556,12 +567,25 @@ start:
         mov  byte [cmd_read10+7], 0
         mov  byte [cmd_read10+8], 1     ; one block
 
+        ; Try more than once. The first access after a spin-up is allowed to
+        ; fail on real hardware, and a single attempt would report a drive
+        ; fault where a second try would have succeeded.
+        mov  word [tries], 4
+.rd_try:
         mov  si, cmd_read10
         mov  di, secbuf
         mov  cx, 512
         call ufi_in
-        jc   .e_read
-
+        jnc  .rd_ok
+        mov  dx, msg_rdretry
+        call puts
+        call ufi_trace_bare
+        mov  cx, 2
+        call delay_ticks
+        dec  word [tries]
+        jnz  .rd_try
+        jmp  .e_read
+.rd_ok:
         call dump
         mov  dx, msg_done
         call puts
@@ -1636,6 +1660,7 @@ msg_ok       db 'yes', 13, 10, '$'
 msg_notready db 'NO', 13, 10, '$'
 msg_spin     db 'spinning up ', '$'
 msg_anyway   db 'trying the data path anyway -- TUR is my gate, not the drive', 13, 10, '$'
+msg_rdretry  db '  read attempt failed: ', '$'
 msg_soft3    db '  [ctl-status stalled, continued anyway]', '$'
 msg_inq      db 'inquiry     ', '$'
 msg_inqok    db 'OK  ', '$'
@@ -1664,7 +1689,7 @@ msg_eaddr    db 'SET_ADDRESS failed', 13, 10, '$'
 msg_ecfg     db 'failed reading the configuration descriptor', 13, 10, '$'
 msg_enoufi   db 'no UFI/CBI interface with bulk in, bulk out and interrupt in', 13, 10, '$'
 msg_esetcfg  db 'SET_CONFIGURATION failed', 13, 10, '$'
-msg_ecap     db 'READ CAPACITY failed', 13, 10, '$'
+msg_ecap     db 'READ CAPACITY refused -- assuming 1.44MB and reading anyway', 13, 10, '$'
 msg_eread    db 'READ(10) failed', 13, 10, '$'
 msg_fph      db 'failed at phase ', '$'
 msg_tph      db '  phase ', '$'
