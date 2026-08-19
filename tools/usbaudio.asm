@@ -47,6 +47,8 @@
 ;            0 / 1   which USB port (default 1, the hybrid port)
 ;            Gn      gain, n = 0..7, a right shift. 0 is loudest, default 1
 ;            S       stop: disable streaming and exit
+;            D       report the streamer's counters and exit, touching nothing
+;                    -- safe to run while audio is playing
 ;            T       test tone: key a 440 Hz note on the OPL2, so there is
 ;                    guaranteed signal regardless of what else is running
 ;            An      use alternate setting n, overriding the search
@@ -131,7 +133,9 @@ start:
         mov  si, 0x81
         mov  cl, [0x80]
         xor  ch, ch
-        jcxz .parsed
+        test cx, cx
+        jnz  .scan
+        jmp  .parsed            ; jcxz is short-only and .parsed outgrew it
 .scan:
         lodsb
         cmp  al, '0'
@@ -147,6 +151,10 @@ start:
         je   .sforce
         cmp  al, 'f'
         je   .sforce
+        cmp  al, 'D'
+        je   .sdiag
+        cmp  al, 'd'
+        je   .sdiag
         cmp  al, 'T'
         je   .stone
         cmp  al, 't'
@@ -186,6 +194,9 @@ start:
         inc  si
         dec  cx
         jmp  short .snext
+.sdiag:
+        mov  byte [diagreq], 1
+        jmp  short .snext
 .stone:
         mov  byte [tonereq], 1
         jmp  short .snext
@@ -195,8 +206,42 @@ start:
 .sforce:
         mov  byte [forced], 1
 .snext:
-        loop .scan
+        dec  cx                 ; not LOOP: short-only, and .scan is now too far
+        jz   .pdone
+        jmp  .scan
+.pdone:
 .parsed:
+
+; ---- D: report, and disturb nothing ----------------------------------------
+; This must run BEFORE the port is brought up, because bringing it up drives a
+; bus reset -- which would destroy the very stream we are trying to measure and
+; report a clean slate every time.
+        cmp  byte [diagreq], 0
+        je   .nodiag
+        mov  dx, msg_dctl
+        call puts
+        mov  dx, A_CTL
+        in   al, dx
+        call puthex
+        mov  dx, msg_dund
+        call puts
+        mov  dx, A_UNDN
+        in   al, dx
+        call putdec
+        mov  dx, msg_crlf
+        call puts
+        mov  dx, A_CTL
+        in   al, dx
+        test al, AS_UNDER
+        jnz  .dbad
+        mov  dx, msg_dclean
+        call puts
+        jmp  quit
+.dbad:
+        mov  dx, msg_ddirty
+        call puts
+        jmp  quit
+.nodiag:
 
         cmp  byte [stopreq], 0
         je   .go
@@ -457,6 +502,7 @@ start:
         mov  dx, msg_crlf
         call puts
 
+        call show_sync
         mov  dx, msg_fmt
         call puts
         mov  al, [nrch]
@@ -617,6 +663,7 @@ find_alt:
         cmp  byte [fmtok], 0
         je   .next
         mov  bl, [si+3]                 ; bmAttributes
+        mov  [epattr], bl               ; keep it ALL: bits 3:2 are the sync type
         and  bl, 0x03
         cmp  bl, 0x01                   ; transfer type 01 = isochronous
         jne  .next
@@ -644,6 +691,76 @@ find_alt:
 .out:
         pop  si
         pop  cx
+        pop  bx
+        pop  ax
+        ret
+
+; ============================================================================
+;  show_sync -- decode the isochronous endpoint's synchronisation type
+;
+;  bmAttributes for an isochronous endpoint, and the two fields that matter are
+;  NOT the ones people reach for first:
+;      bits 1:0  transfer type (01 = isochronous)
+;      bits 3:2  SYNCHRONISATION type
+;      bits 5:4  usage type
+;
+;  This decides whether occasional glitches on an otherwise steady tone are our
+;  fault or nobody's. Our 48 kHz is divided from the board's 50 MHz oscillator;
+;  the device has its own crystal. If the endpoint is ASYNCHRONOUS its converter
+;  runs from that crystal and the two rates differ by some ppm, so its buffer
+;  slowly fills or empties until it over- or underruns -- one glitch, then
+;  steady again, indefinitely. No amount of care on this side prevents it: the
+;  cure is a feedback endpoint telling the host to send 47 or 49 samples now and
+;  then, which is what "asynchronous" is asking for.
+;
+;  If it says ADAPTIVE or SYNCHRONOUS the device is tracking us, drift is not
+;  the explanation, and the glitches are something else.
+; ============================================================================
+show_sync:
+        push ax
+        push bx
+        push dx
+        mov  dx, msg_sync
+        call puts
+        mov  bl, [epattr]
+        mov  al, bl
+        shr  al, 1
+        shr  al, 1
+        and  al, 0x03
+        mov  dx, msg_s_none
+        cmp  al, 0
+        je   .pr
+        mov  dx, msg_s_async
+        cmp  al, 1
+        je   .pr
+        mov  dx, msg_s_adapt
+        cmp  al, 2
+        je   .pr
+        mov  dx, msg_s_sync
+.pr:
+        call puts
+
+        mov  dx, msg_use
+        call puts
+        mov  al, bl
+        shr  al, 1
+        shr  al, 1
+        shr  al, 1
+        shr  al, 1
+        and  al, 0x03
+        mov  dx, msg_u_data
+        cmp  al, 0
+        je   .pr2
+        mov  dx, msg_u_fb
+        cmp  al, 1
+        je   .pr2
+        mov  dx, msg_u_impl
+        cmp  al, 2
+        je   .pr2
+        mov  dx, msg_u_rsv
+.pr2:
+        call puts
+        pop  dx
         pop  bx
         pop  ax
         ret
@@ -785,6 +902,7 @@ find_vendor:
         cmp  byte [cand], 0
         je   .next
         mov  bl, [si+3]                 ; bmAttributes
+        mov  [epattr], bl
         and  bl, 0x03
         cmp  bl, 0x01                   ; isochronous
         jne  .next
@@ -1272,6 +1390,8 @@ cand    db 0
 fmtok   db 0
 forced  db 0
 tonereq db 0
+diagreq db 0
+epattr  db 0
 altreq  db 0
 althas  db 0
 vid     dw 0
@@ -1340,6 +1460,22 @@ msg_l6       db 'Line 6 device: sending the vendor enable (0x67/0x0301)', 13, 10
 msg_l6fail   db 'the vendor enable was refused', 13, 10, '$'
 msg_altov    db 'alternate setting overridden to ', '$'
 msg_tone     db 'test tone: 440 Hz keyed on channel 0', 13, 10, '$'
+msg_sync     db 'sync:       ', '$'
+msg_s_none   db 'none (open loop -- expect drift)', 13, 10, '$'
+msg_s_async  db 'ASYNCHRONOUS -- device runs its own clock,', 13, 10
+             db '            it should offer a feedback endpoint', 13, 10, '$'
+msg_s_adapt  db 'adaptive -- device follows our data rate', 13, 10, '$'
+msg_s_sync   db 'synchronous -- device locks to SOF, no drift', 13, 10, '$'
+msg_use      db 'usage:      ', '$'
+msg_u_data   db 'data', 13, 10, '$'
+msg_u_fb     db 'FEEDBACK endpoint', 13, 10, '$'
+msg_u_impl   db 'implicit feedback data', 13, 10, '$'
+msg_u_rsv    db 'reserved', 13, 10, '$'
+msg_dctl     db 'A0 status  = 0x', '$'
+msg_dund     db '   short frames = ', '$'
+msg_dclean   db 'our side is clean: every frame was full. Glitches are the', 13, 10
+             db 'device or the link, not the streamer.', 13, 10, '$'
+msg_ddirty   db 'OUR SIDE UNDERRAN -- the streamer did not fill a frame.', 13, 10, '$'
 msg_fmt      db 'format:     ', '$'
 msg_ch       db ' channels, ', '$'
 msg_bits     db ' bits, 48000 Hz', 13, 10, '$'
