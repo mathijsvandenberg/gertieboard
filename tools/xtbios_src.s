@@ -5432,13 +5432,28 @@ u_busreset:
     mov dx, U_CTRL
     mov al, UC_RESET
     out dx, al
-    mov cx, 30
+    # u_delay is a SPIN LOOP, so this hold is a function of the CPU clock --
+    # and the board now boots at 10 MHz instead of 5. At 30 iterations that is
+    # roughly 9 ms at the new default, against a 10 ms MINIMUM in the spec:
+    # doubling the clock quietly took the bus reset out of spec. It was ~18 ms
+    # and legal at 5 MHz.
+    #
+    # This is the same trap the FDC's baud rate had, and it was fixed there by
+    # moving the UART to c3 so the link stopped being a function of the speed
+    # step. There is no spare clock to hang this off, so instead it is made
+    # generous enough that the FASTEST step on the ladder is still comfortably
+    # legal. A bus reset happens once at POST; spending 100 ms on it costs
+    # nothing, and there is no upper limit on how long SE0 may be held.
+    mov cx, 120                  # >= 36 ms at 10 MHz, ~72 ms at 5
 .ubr_hold:
     call u_delay
     loop .ubr_hold
     mov al, UC_SOFEN
     out dx, al
-    mov cx, 60                   # devices are allowed 10 ms; be generous
+    # Recovery. A flash stick is ready almost at once; a floppy drive is a
+    # microcontroller with a motor and runs a self-test first, NAKing until it
+    # is done -- which is the device working correctly, not failing.
+    mov cx, 240
 .ubr_rec:
     call u_delay
     loop .ubr_rec
