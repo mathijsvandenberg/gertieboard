@@ -229,6 +229,10 @@ start:
         int  0x21
         mov  ax, [devbuf+10]
         call puthex16
+        mov  dx, msg_ep0
+        call puts
+        mov  al, [ep0max]
+        call putdec8
         mov  dx, msg_crlf
         call puts
 
@@ -680,26 +684,60 @@ cbi_send:
         jmp  .bad
 .setup_ok:
 
-        ; data stage: the 12-byte command block, always DATA1 for the first
+        ; ---- data stage: the 12-byte command block ----
+        ; SPLIT INTO bMaxPacketSize0 CHUNKS. This drive reports an 8-byte
+        ; control endpoint, so a 12-byte command has to go out as 8 then 4,
+        ; with the toggle alternating DATA1, DATA0. Sending all twelve as one
+        ; packet is a protocol violation -- a packet larger than the endpoint
+        ; -- and the device answers it with a STALL, which is exactly what it
+        ; did: phase 2, status 48, rxpid 1E.
+        ;
+        ; ctl_read already loops for the IN direction; this stage was written
+        ; by hand and did not, which is the same 64-byte EP0 assumption the
+        ; BIOS had to be fixed for. It only shows on a device whose EP0 is
+        ; smaller than the payload -- an 8-byte command block would have
+        ; sailed through and taught us nothing.
+        mov  bx, 12                     ; bytes of command block left to send
+        mov  byte [ctog], 1             ; first data packet of a control
+                                        ; transfer is always DATA1
+.cs_dloop:
+        test bx, bx
+        jz   .cmd_ok
+        mov  al, [ep0max]
+        xor  ah, ah
+        cmp  ax, bx
+        jbe  .cs_have
+        mov  ax, bx
+.cs_have:
+        mov  cx, ax                     ; this packet's size
+        push cx
         call setptr
-        mov  cx, 12
         SETDX O_DATA
-.cs_cmd:
-        lodsb
+.cs_fill:
+        lodsb                           ; si walks the command block
         out  dx, al
-        loop .cs_cmd
-        mov  al, 12
+        loop .cs_fill
+        pop  cx
+        mov  al, cl
         SETDX O_LEN
         out  dx, al
-        mov  al, OP_OUT | GO | DATA1
+        mov  al, OP_OUT | GO
+        cmp  byte [ctog], 0
+        je   .cs_t0
+        or   al, DATA1
+.cs_t0:
         call txn
         jc   .bad2
         test al, ST_ACK
-        jnz  .cmd_ok
+        jnz  .cs_sent
 .bad2:
-        mov  al, 2                      ; phase 2: the 12-byte command block
+        mov  al, 2                      ; phase 2: the command block
         call note_fail
         jmp  .bad
+.cs_sent:
+        xor  byte [ctog], 1
+        sub  bx, cx
+        jmp  short .cs_dloop
 .cmd_ok:
 
         ; status stage of the CONTROL transfer -- IN, because this was a
@@ -1300,6 +1338,7 @@ nblocks dw 0
 nsec    db 18
 seclo   dw 0
 pktlen  dw 0
+ctog    db 0
 fail_ph db 0
 fail_st db 0
 fail_pid db 0
@@ -1328,6 +1367,7 @@ msg_hdr      db 'USBFDD -- read a diskette through a USB floppy drive', 13, 10, 
 msg_nodev    db 'no device on the port', 13, 10, '$'
 msg_islow    db 'low-speed device: not a floppy drive', 13, 10, '$'
 msg_vid      db 'device      ', '$'
+msg_ep0      db 'EP0 max     ', '$'
 msg_found    db 'UFI/CBI     iface ', '$'
 msg_eps      db '  ep in/out/int ', '$'
 msg_tur      db 'unit ready  ', '$'
