@@ -305,6 +305,7 @@ start:
         jnc  .ready
 
         ; still not ready: report what the drive actually said
+        call show_fail                  ; what the SECOND TUR actually did
         call ufi_sense
         mov  dx, msg_notready
         call puts
@@ -324,6 +325,8 @@ start:
         mov  al, [senbuf+13]            ; ASCQ
         call puthex
         mov  dx, msg_crlf
+        call puts
+        mov  dx, msg_phkey
         call puts
         ; 3A is "medium not present", which is worth saying in English because
         ; it is the one failure that is not a fault at all.
@@ -568,6 +571,71 @@ find_ufi:
         ret
 
 ; ============================================================================
+;  note_fail -- AL = phase code. Latches the engine's raw STATUS and RXPID.
+;
+;  "It failed" is not a diagnosis. RXPID says what actually came back off the
+;  wire rather than how the status bits classified it, and it is what turned
+;  the last dead-device mystery into a one-line fix -- a NAK reads as 5A and
+;  means the device is fine and asking for more time, which is the opposite of
+;  what "FAILED" suggests.
+; ============================================================================
+note_fail:
+        push ax
+        push dx
+        mov  [fail_ph], al
+        SETDX O_CMD
+        in   al, dx
+        mov  [fail_st], al
+        SETDX O_ENDP
+        in   al, dx
+        mov  [fail_pid], al
+        pop  dx
+        pop  ax
+        ret
+
+; show_fail -- print whatever note_fail last caught, plus the CBI status bytes
+show_fail:
+        push ax
+        push dx
+        mov  dx, msg_fph
+        call puts
+        mov  al, [fail_ph]
+        call putdec8
+        mov  dx, msg_fst
+        call puts
+        mov  al, [fail_st]
+        call puthex
+        mov  dx, msg_fpid
+        call puts
+        mov  al, [fail_pid]
+        call puthex
+        mov  dx, msg_fasc
+        call puts
+        mov  al, [stat_len]
+        call putdec8
+        mov  dx, msg_fbytes
+        call puts
+        mov  al, [stat_asc]
+        call puthex
+        mov  dl, '/'
+        mov  ah, 2
+        int  0x21
+        mov  al, [stat_ascq]
+        call puthex
+        mov  dx, msg_crlf
+        call puts
+        pop  dx
+        pop  ax
+        ret
+
+putdec8:
+        push ax
+        xor  ah, ah
+        call putdec16
+        pop  ax
+        ret
+
+; ============================================================================
 ;  cbi_send -- the command phase: 12 bytes out through a CONTROL transfer
 ;    DS:SI = 12-byte UFI command block
 ;  This is what makes CBI different from Bulk-Only. bRequest 0x00 is ADSC,
@@ -603,9 +671,14 @@ cbi_send:
         out  dx, al
         mov  al, OP_SETUP | GO
         call txn
-        jc   .bad
+        jc   .bad1
         test al, ST_ACK
-        jz   .bad
+        jnz  .setup_ok
+.bad1:
+        mov  al, 1                      ; phase 1: ADSC SETUP
+        call note_fail
+        jmp  .bad
+.setup_ok:
 
         ; data stage: the 12-byte command block, always DATA1 for the first
         call setptr
@@ -620,9 +693,14 @@ cbi_send:
         out  dx, al
         mov  al, OP_OUT | GO | DATA1
         call txn
-        jc   .bad
+        jc   .bad2
         test al, ST_ACK
-        jz   .bad
+        jnz  .cmd_ok
+.bad2:
+        mov  al, 2                      ; phase 2: the 12-byte command block
+        call note_fail
+        jmp  .bad
+.cmd_ok:
 
         ; status stage of the CONTROL transfer -- IN, because this was a
         ; host-to-device request. Not to be confused with the CBI status,
@@ -633,7 +711,11 @@ cbi_send:
         out  dx, al
         mov  al, OP_IN | GO | DATA1
         call txn
-        jc   .bad
+        jnc  .allok
+        mov  al, 3                      ; phase 3: control status stage
+        call note_fail
+        jmp  short .bad
+.allok:
         clc
         jmp  short .out
 .bad:
@@ -667,19 +749,31 @@ cbi_status:
         SETDX O_ENDP
         out  dx, al
 
+        mov  byte [stat_len], 0
+        mov  byte [stat_asc], 0
+        mov  byte [stat_ascq], 0
+
         call setptr
         mov  al, OP_IN | GO
         call txn
-        jc   .bad
+        jc   .bad5
         test al, ST_RXV
-        jz   .bad
-
+        jnz  .gotit
+.bad5:
+        mov  al, 5                      ; phase 5: interrupt status never came
+        call note_fail
+        jmp  short .bad
+.gotit:
         SETDX O_LEN
         in   al, dx
         xor  ah, ah
+        mov  [stat_len], al
         cmp  ax, 2
-        jb   .bad
-
+        jae  .len_ok
+        mov  al, 6                      ; phase 6: status shorter than 2 bytes
+        call note_fail
+        jmp  short .bad
+.len_ok:
         call setptr
         SETDX O_DATA
         in   al, dx
@@ -687,9 +781,16 @@ cbi_status:
         in   al, dx
         mov  [stat_ascq], al
 
+        ; Non-zero here is the DEVICE reporting a fault, and it is a completely
+        ; different situation from not getting a status at all -- phase 7 says
+        ; the transport worked and the command was refused.
         mov  al, [stat_asc]
         or   al, [stat_ascq]
-        jnz  .bad
+        jz   .good
+        mov  al, 7
+        call note_fail
+        jmp  short .bad
+.good:
         clc
         jmp  short .out
 .bad:
@@ -1199,6 +1300,10 @@ nblocks dw 0
 nsec    db 18
 seclo   dw 0
 pktlen  dw 0
+fail_ph db 0
+fail_st db 0
+fail_pid db 0
+stat_len db 0
 stat_asc  db 0
 stat_ascq db 0
 
@@ -1246,6 +1351,13 @@ msg_enoufi   db 'no UFI/CBI interface with bulk in, bulk out and interrupt in', 
 msg_esetcfg  db 'SET_CONFIGURATION failed', 13, 10, '$'
 msg_ecap     db 'READ CAPACITY failed', 13, 10, '$'
 msg_eread    db 'READ(10) failed', 13, 10, '$'
+msg_fph      db 'failed at phase ', '$'
+msg_fst      db '  status ', '$'
+msg_fpid     db '  rxpid ', '$'
+msg_fasc     db '  intlen ', '$'
+msg_fbytes   db '  asc/ascq ', '$'
+msg_phkey    db 'phases: 1 ADSC setup  2 command block  3 ctl status', 13, 10
+             db '        4 data  5 no interrupt status  6 short  7 device refused', 13, 10, '$'
 msg_crlf     db 13, 10, '$'
 
 CFGMAX  equ 256
