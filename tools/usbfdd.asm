@@ -382,10 +382,67 @@ start:
         mov  dx, msg_nodisk
         call puts
 .quit2:
-        jmp  quit
+        ; DO NOT STOP HERE. TEST UNIT READY is a gate I chose, not one the
+        ; drive imposed -- it may well answer READ FORMAT CAPACITIES and
+        ; READ(10) perfectly well while refusing TUR. Stopping at the gate
+        ; tells us nothing about the data path, and the data path is the thing
+        ; being built. Carry on and let the drive refuse for itself.
+        mov  dx, msg_anyway
+        call puts
+        jmp  short .probe
 .ready:
         mov  dx, msg_ok
         call puts
+.probe:
+
+; ---------------- what does it say about the medium? -------------------------
+; READ FORMAT CAPACITIES is the command that actually reports media state, and
+; it is the one Windows always issues -- so it is the path these drives are
+; tested on, and the one a TEAC mechanism is least likely to be odd about.
+;
+; The response is a 4-byte header then 8-byte descriptors. In the first
+; descriptor, byte 4 bits 1:0 are the code:  01 unformatted, 10 formatted,
+; 11 no cartridge. That is a direct answer, not an inference from a stall.
+        mov  dx, msg_rfc
+        call puts
+        mov  si, cmd_rdfmt
+        mov  di, fmtbuf
+        mov  cx, 64
+        call ufi_in
+        jc   .rfc_bad
+        mov  dx, msg_rfcraw
+        call puts
+        mov  si, fmtbuf
+        mov  cx, 16
+.rfc_l:
+        lodsb
+        call puthex
+        mov  dl, ' '
+        mov  ah, 2
+        int  0x21
+        loop .rfc_l
+        mov  dx, msg_crlf
+        call puts
+        mov  al, [fmtbuf+8]             ; first descriptor's code byte
+        and  al, 0x03
+        mov  dx, msg_fmt_un
+        cmp  al, 1
+        je   .rfc_pr
+        mov  dx, msg_fmt_fm
+        cmp  al, 2
+        je   .rfc_pr
+        mov  dx, msg_fmt_no
+        cmp  al, 3
+        je   .rfc_pr
+        mov  dx, msg_fmt_rs
+.rfc_pr:
+        call puts
+        jmp  short .rfc_done
+.rfc_bad:
+        mov  dx, msg_rfcfail
+        call puts
+        call ufi_trace_bare
+.rfc_done:
 
 ; ---------------- what is in it? ---------------------------------------------
         mov  si, cmd_readcap
@@ -903,6 +960,10 @@ cbi_status:
 ufi_trace:
         push ax
         call puts
+        jmp short ufi_trace_body
+ufi_trace_bare:
+        push ax
+ufi_trace_body:
         mov  dx, msg_tph
         call puts
         mov  al, [fail_ph]
@@ -1487,6 +1548,8 @@ cmd_readcap  db 0x25, 0,0,0,0,0, 0,0,0,0,0,0
 ; START STOP UNIT: byte 4 bit 0 = START. Spins the motor so the drive can
 ; sense whether there is a diskette in it.
 cmd_start    db 0x1B, 0, 0,0, 0x01, 0, 0,0,0,0,0,0
+; READ FORMAT CAPACITIES. Allocation length is bytes 7-8, big-endian.
+cmd_rdfmt    db 0x23, 0, 0,0,0,0, 0, 0x00, 0x40, 0,0,0
 ; READ(10): opcode, flags, LBA big-endian (4), reserved, length big-endian (2)
 cmd_read10   db 0x28, 0, 0,0,0,0, 0, 0,1, 0,0,0
 
@@ -1501,6 +1564,14 @@ msg_tur      db 'unit ready  ', '$'
 msg_ok       db 'yes', 13, 10, '$'
 msg_notready db 'NO', 13, 10, '$'
 msg_spin     db 'spinning up ', '$'
+msg_anyway   db 'trying the data path anyway -- TUR is my gate, not the drive', 13, 10, '$'
+msg_rfc      db 'format cap  ', '$'
+msg_rfcraw   db 13, 10, '  raw ', '$'
+msg_rfcfail  db 'REFUSED  ', '$'
+msg_fmt_un   db '  -> media present, UNFORMATTED', 13, 10, '$'
+msg_fmt_fm   db '  -> MEDIA PRESENT AND FORMATTED', 13, 10, '$'
+msg_fmt_no   db '  -> drive says no cartridge', 13, 10, '$'
+msg_fmt_rs   db '  -> reserved/unknown descriptor code', 13, 10, '$'
 msg_refused  db 'refused (STALL) -- the drive said no, see the sense below', 13, 10, '$'
 msg_nodisk   db '>>> NO DISKETTE IN THE DRIVE. Put one in and run this again.', 13, 10, '$'
 msg_sense    db 'sense key/ASC/ASCQ = ', '$'
@@ -1539,4 +1610,5 @@ cfgbuf  times CFGMAX db 0
 devbuf  times 32 db 0
 capbuf  times 8 db 0
 senbuf  times 20 db 0
+fmtbuf  times 64 db 0
 secbuf  times 512 db 0
