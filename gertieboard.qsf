@@ -155,10 +155,35 @@ set_location_assignment PIN_C11 -to UART_CTS
 set_location_assignment PIN_B11 -to UART_RXD
 set_location_assignment PIN_D11 -to UART_TXD
 set_location_assignment PIN_A12 -to UART_RTS
+# ---- USB drive strength -----------------------------------------------------
+# 4 mA, not the 8 mA default, and it is standing in for a part that is not on
+# the board. USB full speed wants a driver output impedance of 28-44 ohms; the
+# normal way to get there is a low-impedance CMOS driver plus a 22-33 ohm
+# series resistor. This board has no series resistors -- D+/D- run straight
+# from the pins, through the GPIO headers, to the top board -- so the driver IS
+# the whole source impedance. At 8 mA that is roughly 25 ohms and every edge
+# reflects off the unterminated far end; at 4 mA it is about double, which is
+# inside the range the spec is asking for.
+#
+# It matters more now than it ever did. A mouse sends 3 bytes and a keyboard 8,
+# so a corrupted packet was a dropped report nobody noticed. Isochronous audio
+# has no retry at all -- a bad CRC16 is silently discarded by the device, which
+# is one 1 ms click -- and a floppy will be the first thing here to push
+# continuous 512-byte bulk packets.
+#
+# Not 2 mA: USB wants 4-20 ns edges, and too weak a driver on a long cable
+# fails rise time instead, which trades one marginal thing for another.
+#
+# This is a bitstream change, so it applies to unmodified hardware. The series
+# resistors are still the real fix and belong on the v1.1 board.
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to USB0_DM
+set_instance_assignment -name CURRENT_STRENGTH_NEW "4MA" -to USB0_DM
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to USB0_DP
+set_instance_assignment -name CURRENT_STRENGTH_NEW "4MA" -to USB0_DP
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to USB1_DM
+set_instance_assignment -name CURRENT_STRENGTH_NEW "4MA" -to USB1_DM
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to USB1_DP
+set_instance_assignment -name CURRENT_STRENGTH_NEW "4MA" -to USB1_DP
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to PS2DAT
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to PS2CLK
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to UART_RXD
