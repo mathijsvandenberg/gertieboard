@@ -377,7 +377,7 @@ start:
         mov  word [tries], 40           ; ~2.2 s, well past a real spin-up
 .poll:
         mov  si, cmd_tur
-        call ufi_nodata
+        call ufi_nodata_ua
         jnc  .ready
         mov  dl, '.'
         mov  ah, 2
@@ -455,7 +455,7 @@ start:
         mov  si, cmd_rdfmt
         mov  di, fmtbuf
         mov  cx, 64
-        call ufi_in
+        call ufi_in_ua
         jc   .rfc_bad
         mov  dx, msg_rfcraw
         call puts
@@ -495,7 +495,7 @@ start:
         mov  si, cmd_readcap
         mov  di, capbuf
         mov  cx, 8
-        call ufi_in
+        call ufi_in_ua
         jnc  .cap_ok
         ; NOT FATAL EITHER. Same mistake as the TUR gate, one command further
         ; along: READ CAPACITY refusing stopped the run before READ(10), which
@@ -575,7 +575,7 @@ start:
         mov  si, cmd_read10
         mov  di, secbuf
         mov  cx, 512
-        call ufi_in
+        call ufi_in_ua
         jnc  .rd_ok
         mov  dx, msg_rdretry
         call puts
@@ -1171,6 +1171,60 @@ ufi_sense:
         ret
 
 ; ============================================================================
+;  ufi_in_ua / ufi_nodata_ua -- a UNIT ATTENTION is a RETRY, not a failure.
+;
+;  Removable media reports 06/28 (not ready to ready, medium may have changed)
+;  or 06/29 (power on or reset) by ABORTING the command in progress. The
+;  condition is announced exactly once, is cleared by reading the sense, and
+;  the command then has to be REISSUED. A host that does not reissue sees every
+;  first access after the disk is noticed fail -- which is precisely what has
+;  been happening: the drive spun up, found the diskette, raised 28/00 to say
+;  so, and four READ(10) retries were each aborted by the same pending notice
+;  because none of them cleared it.
+;
+;  So the drive was ready and saying so, and it read as a fault.
+; ============================================================================
+ufi_in_ua:
+        mov  word [uatries], 8
+.ua_l:
+        call ufi_in
+        jnc  .ua_ok
+        call ufi_sense
+        mov  al, [senbuf+2]
+        and  al, 0x0F
+        cmp  al, 6                      ; UNIT ATTENTION
+        jne  .ua_fail
+        mov  dx, msg_uaretry
+        call puts
+        dec  word [uatries]
+        jnz  .ua_l
+.ua_fail:
+        stc
+        ret
+.ua_ok:
+        clc
+        ret
+
+ufi_nodata_ua:
+        mov  word [uatries], 8
+.un_l:
+        call ufi_nodata
+        jnc  .un_ok
+        call ufi_sense
+        mov  al, [senbuf+2]
+        and  al, 0x0F
+        cmp  al, 6
+        jne  .un_fail
+        dec  word [uatries]
+        jnz  .un_l
+.un_fail:
+        stc
+        ret
+.un_ok:
+        clc
+        ret
+
+; ============================================================================
 ;  bulk_in -- receive CX bytes into ES:DI on the bulk IN endpoint.
 ;
 ;  The data toggle is the whole difficulty. A packet arriving with the toggle
@@ -1615,6 +1669,7 @@ seclo   dw 0
 pktlen  dw 0
 ctog    db 0
 tries   dw 0
+uatries dw 0
 stalled db 0
 soft3   db 0
 fail_ph db 0
@@ -1660,6 +1715,7 @@ msg_ok       db 'yes', 13, 10, '$'
 msg_notready db 'NO', 13, 10, '$'
 msg_spin     db 'spinning up ', '$'
 msg_anyway   db 'trying the data path anyway -- TUR is my gate, not the drive', 13, 10, '$'
+msg_uaretry  db '  [unit attention cleared, reissuing]', 13, 10, '$'
 msg_rdretry  db '  read attempt failed: ', '$'
 msg_soft3    db '  [ctl-status stalled, continued anyway]', '$'
 msg_inq      db 'inquiry     ', '$'
