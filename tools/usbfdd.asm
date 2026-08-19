@@ -291,6 +291,53 @@ start:
         mov  byte [tog_in], 0
         mov  byte [tog_out], 0
 
+; ---------------- INQUIRY: the control experiment -----------------------------
+; REQUEST SENSE succeeding proves less than it looks. It is the one command a
+; device must ALWAYS accept -- even while refusing everything else -- so it can
+; succeed through a command path that is subtly wrong, and it is exactly the
+; command a drive answers when it is refusing on account of media.
+;
+; INQUIRY is the control: media-INDEPENDENT like sense, but an ordinary command
+; with an ordinary data phase. It splits the remaining question in one shot.
+;
+;   INQUIRY works  -> the transport is right, and only media-dependent commands
+;                     fail, so the problem is the diskette or the head
+;   INQUIRY stalls -> the command path is wrong in some way REQUEST SENSE
+;                     tolerates, and the media is a red herring
+        mov  dx, msg_inq
+        call puts
+        mov  si, cmd_inquiry
+        mov  di, inqbuf
+        mov  cx, 36
+        call ufi_in
+        jc   .inq_bad
+        mov  dx, msg_inqok
+        call puts
+        ; vendor (8) and product (16) are plain ASCII at offsets 8 and 16
+        mov  si, inqbuf+8
+        mov  cx, 24
+.inq_pr:
+        lodsb
+        cmp  al, 0x20
+        jb   .inq_sp
+        cmp  al, 0x7E
+        jbe  .inq_ch
+.inq_sp:
+        mov  al, ' '
+.inq_ch:
+        mov  dl, al
+        mov  ah, 2
+        int  0x21
+        loop .inq_pr
+        mov  dx, msg_crlf
+        call puts
+        jmp  short .inq_done
+.inq_bad:
+        mov  dx, msg_inqbad
+        call puts
+        call ufi_trace_bare
+.inq_done:
+
 ; ---------------- is there a disk in it? -------------------------------------
 ; TEST UNIT READY is expected to FAIL the first time, and that is not a fault.
 ; Removable media always reports UNIT ATTENTION ("the medium may have changed")
@@ -1550,6 +1597,8 @@ cmd_readcap  db 0x25, 0,0,0,0,0, 0,0,0,0,0,0
 cmd_start    db 0x1B, 0, 0,0, 0x01, 0, 0,0,0,0,0,0
 ; READ FORMAT CAPACITIES. Allocation length is bytes 7-8, big-endian.
 cmd_rdfmt    db 0x23, 0, 0,0,0,0, 0, 0x00, 0x40, 0,0,0
+; INQUIRY. Allocation length is byte 4 on this one, not bytes 7-8.
+cmd_inquiry  db 0x12, 0, 0,0, 36, 0, 0,0,0,0,0,0
 ; READ(10): opcode, flags, LBA big-endian (4), reserved, length big-endian (2)
 cmd_read10   db 0x28, 0, 0,0,0,0, 0, 0,1, 0,0,0
 
@@ -1565,6 +1614,9 @@ msg_ok       db 'yes', 13, 10, '$'
 msg_notready db 'NO', 13, 10, '$'
 msg_spin     db 'spinning up ', '$'
 msg_anyway   db 'trying the data path anyway -- TUR is my gate, not the drive', 13, 10, '$'
+msg_inq      db 'inquiry     ', '$'
+msg_inqok    db 'OK  ', '$'
+msg_inqbad   db 'REFUSED  ', '$'
 msg_rfc      db 'format cap  ', '$'
 msg_rfcraw   db 13, 10, '  raw ', '$'
 msg_rfcfail  db 'REFUSED  ', '$'
@@ -1611,4 +1663,5 @@ devbuf  times 32 db 0
 capbuf  times 8 db 0
 senbuf  times 20 db 0
 fmtbuf  times 64 db 0
+inqbuf  times 40 db 0
 secbuf  times 512 db 0
