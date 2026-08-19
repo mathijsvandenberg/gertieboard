@@ -312,13 +312,38 @@ start:
         call ufi_trace
         call dump_sense
 
+        ; ---- spin it up, then WAIT FOR IT ----
+        ; A floppy is a mechanism. The first TUR after a reset was answered in
+        ; milliseconds and could not have been anything but "no": the motor had
+        ; not turned yet, so the drive had not sensed a medium. Asking twice in
+        ; the same tens of milliseconds and concluding the drive is empty is
+        ; the same impatience that made enumeration fail an hour ago.
+        ;
+        ; START STOP UNIT with the START bit asks for spin-up explicitly. It is
+        ; allowed to fail -- not every drive implements it, and the poll below
+        ; covers the ones that spin up on their own.
+        mov  si, cmd_start
+        call ufi_nodata
+        mov  dx, msg_spin
+        call puts
+
+        mov  word [tries], 40           ; ~2.2 s, well past a real spin-up
+.poll:
         mov  si, cmd_tur
         call ufi_nodata
-        pushf
+        jnc  .ready
+        mov  dl, '.'
+        mov  ah, 2
+        int  0x21
+        mov  cx, 2
+        call delay_ticks
+        dec  word [tries]
+        jnz  .poll
+        mov  dx, msg_crlf
+        call puts
+
         mov  dx, msg_t3
         call ufi_trace
-        popf
-        jnc  .ready
 
         ; still not ready: report what the drive actually said
         call ufi_sense
@@ -1436,6 +1461,7 @@ nsec    db 18
 seclo   dw 0
 pktlen  dw 0
 ctog    db 0
+tries   dw 0
 stalled db 0
 fail_ph db 0
 fail_st db 0
@@ -1458,6 +1484,9 @@ sp_adsc      db 0x21, 0x00, 0, 0, 0, 0, 12, 0
 cmd_tur      db 0x00, 0,0,0,0,0, 0,0,0,0,0,0
 cmd_sense    db 0x03, 0,0,0, 18, 0, 0,0,0,0,0,0
 cmd_readcap  db 0x25, 0,0,0,0,0, 0,0,0,0,0,0
+; START STOP UNIT: byte 4 bit 0 = START. Spins the motor so the drive can
+; sense whether there is a diskette in it.
+cmd_start    db 0x1B, 0, 0,0, 0x01, 0, 0,0,0,0,0,0
 ; READ(10): opcode, flags, LBA big-endian (4), reserved, length big-endian (2)
 cmd_read10   db 0x28, 0, 0,0,0,0, 0, 0,1, 0,0,0
 
@@ -1471,6 +1500,7 @@ msg_eps      db '  ep in/out/int ', '$'
 msg_tur      db 'unit ready  ', '$'
 msg_ok       db 'yes', 13, 10, '$'
 msg_notready db 'NO', 13, 10, '$'
+msg_spin     db 'spinning up ', '$'
 msg_refused  db 'refused (STALL) -- the drive said no, see the sense below', 13, 10, '$'
 msg_nodisk   db '>>> NO DISKETTE IN THE DRIVE. Put one in and run this again.', 13, 10, '$'
 msg_sense    db 'sense key/ASC/ASCQ = ', '$'
