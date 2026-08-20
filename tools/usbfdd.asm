@@ -48,6 +48,8 @@
 ;  Usage:  USBFDD [0|1] [Snnn]
 ;            0 / 1   which USB port (default 1)
 ;            Snnn    dump logical sector nnn instead of 0
+;            W       write test on that sector -- writes a pattern, verifies
+;                    it, then restores the original and verifies that too
 ; ============================================================================
 
         CPU 8086
@@ -119,10 +121,17 @@ start:
         mov  word [ubase], BASE_P0
         jmp  short .snext
 .s1:
+        cmp  al, 'W'
+        je   .swr
+        cmp  al, 'w'
+        je   .swr
         cmp  al, 'S'
         je   .ssec
         cmp  al, 's'
         jne  .snext
+.swr:
+        mov  byte [wtest], 1
+        jmp  short .snext
 .ssec:
         ; decimal sector number follows
         xor  bx, bx
@@ -587,6 +596,88 @@ start:
         jmp  .e_read
 .rd_ok:
         call dump
+
+; ---------------- write test, if asked ---------------------------------------
+; SELF-RESTORING, because this writes to somebody's diskette. The original
+; sector is kept, a pattern is written, read back and compared, and then the
+; original is put back and verified. A plain "write a pattern" test leaves the
+; disk altered even when it passes, which is not a reasonable thing to do to
+; media somebody may have no second copy of.
+        cmp  byte [wtest], 0
+        je   .nowrite
+        ; Refuse sector 0 without being told twice. It is the BOOT SECTOR and
+        ; the default, so "USBFDD 1 W" would pattern-write it -- and while the
+        ; test restores what it took, a power cut or a failed restore between
+        ; the two writes leaves the diskette unbootable. Naming a sector is a
+        ; small price for not doing that by accident.
+        cmp  word [seclo], 0
+        jne  .wt_go
+        mov  dx, msg_wtsec0
+        call puts
+        jmp  .nowrite                   ; near: the write test sits between
+.wt_go:
+        mov  dx, msg_wt
+        call puts
+
+        ; secbuf holds the sector just read -- keep it
+        mov  si, secbuf
+        mov  di, savebuf
+        mov  cx, 512
+        cld
+        rep  movsb
+
+        call mkpattern
+        call wr_sector
+        jc   .wt_wfail
+        call rd_sector
+        jc   .wt_rfail
+        call ckpattern
+        jc   .wt_mismatch
+        mov  dx, msg_wtok
+        call puts
+
+.wt_restore:
+        mov  si, savebuf
+        mov  di, secbuf
+        mov  cx, 512
+        cld
+        rep  movsb
+        call wr_sector
+        jc   .wt_rstfail
+        call rd_sector
+        jc   .wt_rstfail
+        mov  si, secbuf
+        mov  di, savebuf
+        mov  cx, 512
+        repe cmpsb
+        jne  .wt_rstfail
+        mov  dx, msg_wtrst
+        call puts
+        jmp  short .nowrite
+.wt_rstfail:
+        mov  dx, msg_wtrstbad
+        call puts
+        jmp  short .nowrite
+.wt_wfail:
+        mov  dx, msg_wtwbad
+        call puts
+        call ufi_sense
+        call show_sense
+        cmp  byte [senbuf+12], 0x27
+        jne  .wt_restore
+        mov  dx, msg_wprot
+        call puts
+        jmp  short .nowrite     ; nothing was written, nothing to restore
+.wt_rfail:
+        mov  dx, msg_wtrbad
+        call puts
+        jmp  short .wt_restore
+.wt_mismatch:
+        mov  dx, msg_wtcmp
+        call puts
+        jmp  short .wt_restore
+.nowrite:
+
         mov  dx, msg_done
         call puts
         jmp  quit
@@ -1318,6 +1409,221 @@ bulk_in:
         pop  ax
         ret
 
+; mkpattern -- a recognisable, sector-dependent 512 bytes in secbuf. Sector
+;              dependent on purpose: a write that lands on the WRONG sector
+;              then shows up as a mismatch instead of passing.
+mkpattern:
+        push ax
+        push cx
+        push di
+        mov  di, secbuf
+        mov  ax, [seclo]
+        mov  cx, 256
+.mk_l:
+        mov  [di], al
+        mov  [di+1], ah
+        inc  ax
+        add  di, 2
+        loop .mk_l
+        pop  di
+        pop  cx
+        pop  ax
+        ret
+
+; ckpattern -- CF set if secbuf is not what mkpattern would have made
+ckpattern:
+        push ax
+        push cx
+        push si
+        mov  si, secbuf
+        mov  ax, [seclo]
+        mov  cx, 256
+.ck_l:
+        cmp  [si], al
+        jne  .ck_bad
+        cmp  [si+1], ah
+        jne  .ck_bad
+        inc  ax
+        add  si, 2
+        loop .ck_l
+        clc
+        jmp  short .ck_out
+.ck_bad:
+        stc
+.ck_out:
+        pop  si
+        pop  cx
+        pop  ax
+        ret
+
+; wr_sector / rd_sector -- one 512-byte sector at [seclo], to/from secbuf
+wr_sector:
+        push ax
+        push bx
+        push cx
+        push si
+        mov  ax, [seclo]
+        mov  [cmd_write10+5], al
+        mov  [cmd_write10+4], ah
+        mov  si, cmd_write10
+        mov  bx, secbuf
+        mov  cx, 512
+        call ufi_out_ua
+        pop  si
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+
+rd_sector:
+        push ax
+        push cx
+        push di
+        push si
+        mov  ax, [seclo]
+        mov  [cmd_read10+5], al
+        mov  [cmd_read10+4], ah
+        mov  si, cmd_read10
+        mov  di, secbuf
+        mov  cx, 512
+        call ufi_in_ua
+        pop  si
+        pop  di
+        pop  cx
+        pop  ax
+        ret
+
+; show_sense -- key/ASC/ASCQ on one line
+show_sense:
+        push ax
+        push dx
+        mov  dx, msg_sense
+        call puts
+        mov  al, [senbuf+2]
+        and  al, 0x0F
+        call puthex
+        mov  dl, '/'
+        mov  ah, 2
+        int  0x21
+        mov  al, [senbuf+12]
+        call puthex
+        mov  dl, '/'
+        mov  ah, 2
+        int  0x21
+        mov  al, [senbuf+13]
+        call puthex
+        mov  dx, msg_crlf
+        call puts
+        pop  dx
+        pop  ax
+        ret
+
+; ============================================================================
+;  bulk_out -- send CX bytes from DS:SI on the bulk OUT endpoint.
+;
+;  Simpler than bulk_in in one respect: the HOST chooses the toggle, so there
+;  is no duplicate-packet case to detect. It still has to alternate per packet,
+;  and a wrong toggle makes the device silently discard everything after the
+;  first -- which on a write is far worse than an error, because the command
+;  reports success and the sector is quietly wrong.
+; ============================================================================
+bulk_out:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+.bo_pkt:
+        jcxz .bo_done
+        mov  bx, cx
+        cmp  bx, 64
+        jbe  .bo_sz
+        mov  bx, 64
+.bo_sz:
+        push cx
+        call setptr
+        mov  cx, bx
+        SETDX O_DATA
+.bo_fill:
+        lodsb
+        out  dx, al
+        loop .bo_fill
+        mov  al, bl
+        SETDX O_LEN
+        out  dx, al
+        mov  al, [ep_out]
+        and  al, 0x0F
+        SETDX O_ENDP
+        out  dx, al
+        mov  al, OP_OUT | GO
+        cmp  byte [tog_out], 0
+        je   .bo_t0
+        or   al, DATA1
+.bo_t0:
+        call txn
+        pop  cx
+        jc   .bo_bad
+        test al, ST_ACK
+        jz   .bo_bad
+        xor  byte [tog_out], 1
+        sub  cx, bx
+        jmp  short .bo_pkt
+.bo_done:
+        clc
+        jmp  short .bo_out
+.bo_bad:
+        stc
+.bo_out:
+        pop  si
+        pop  dx
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+
+; ufi_out -- a command that writes.  DS:SI = cmd, DS:BX = data, CX = bytes
+ufi_out:
+        push cx
+        push si
+        call cbi_send
+        jc   .uo_bad
+        push si
+        mov  si, bx
+        call bulk_out
+        pop  si
+        jc   .uo_bad
+        call cbi_status
+        pop  si
+        pop  cx
+        ret
+.uo_bad:
+        pop  si
+        pop  cx
+        stc
+        ret
+
+; ufi_out_ua -- ufi_out, obeying the UNIT ATTENTION reissue rule
+ufi_out_ua:
+        mov  word [uatries], 8
+.uo_l:
+        call ufi_out
+        jnc  .uo_ok
+        call ufi_sense
+        mov  al, [senbuf+2]
+        and  al, 0x0F
+        cmp  al, 6
+        jne  .uo_fail
+        mov  dx, msg_uaretry
+        call puts
+        dec  word [uatries]
+        jnz  .uo_l
+.uo_fail:
+        stc
+        ret
+.uo_ok:
+        clc
+        ret
+
 ; ============================================================================
 ;  ctl_read / txn / wait_done / setptr / delay_ticks -- as in usbenum
 ; ============================================================================
@@ -1670,6 +1976,7 @@ pktlen  dw 0
 ctog    db 0
 tries   dw 0
 uatries dw 0
+wtest   db 0
 stalled db 0
 soft3   db 0
 fail_ph db 0
@@ -1702,6 +2009,7 @@ cmd_rdfmt    db 0x23, 0, 0,0,0,0, 0, 0x00, 0x40, 0,0,0
 cmd_inquiry  db 0x12, 0, 0,0, 36, 0, 0,0,0,0,0,0
 ; READ(10): opcode, flags, LBA big-endian (4), reserved, length big-endian (2)
 cmd_read10   db 0x28, 0, 0,0,0,0, 0, 0,1, 0,0,0
+cmd_write10  db 0x2A, 0, 0,0,0,0, 0, 0,1, 0,0,0
 
 msg_hdr      db 'USBFDD -- read a diskette through a USB floppy drive', 13, 10, '$'
 msg_nodev    db 'no device on the port', 13, 10, '$'
@@ -1715,6 +2023,16 @@ msg_ok       db 'yes', 13, 10, '$'
 msg_notready db 'NO', 13, 10, '$'
 msg_spin     db 'spinning up ', '$'
 msg_anyway   db 'trying the data path anyway -- TUR is my gate, not the drive', 13, 10, '$'
+msg_wtsec0   db '  write test refused on sector 0 (the boot sector).', 13, 10
+             db '  pick a data sector, e.g.  USBFDD 1 S2000 W', 13, 10, '$'
+msg_wt       db 'write test  (self-restoring)', 13, 10, '$'
+msg_wtok     db '  pattern written and verified', 13, 10, '$'
+msg_wtrst    db '  original restored and verified', 13, 10, '$'
+msg_wtrstbad db '  *** RESTORE FAILED -- this sector is now wrong ***', 13, 10, '$'
+msg_wtwbad   db '  write refused', 13, 10, '$'
+msg_wtrbad   db '  read-back refused', 13, 10, '$'
+msg_wtcmp    db '  read back but CONTENTS DIFFER', 13, 10, '$'
+msg_wprot    db '  diskette is WRITE PROTECTED (27/00)', 13, 10, '$'
 msg_uaretry  db '  [unit attention cleared, reissuing]', 13, 10, '$'
 msg_rdretry  db '  read attempt failed: ', '$'
 msg_soft3    db '  [ctl-status stalled, continued anyway]', '$'
@@ -1769,3 +2087,4 @@ senbuf  times 20 db 0
 fmtbuf  times 64 db 0
 inqbuf  times 40 db 0
 secbuf  times 512 db 0
+savebuf times 512 db 0
