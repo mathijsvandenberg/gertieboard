@@ -897,3 +897,93 @@ before it emits anything; the UX1's lives in Line 6's protocol, which Linux
 implements in `sound/usb/line6/toneport.c`. `F` costs one `SET_INTERFACE` to
 find out, which is worth trying before writing any of that.
 
+## USBFDD
+
+`USBFDD [0|1] [Snnn]` -- read a real diskette through a USB floppy drive.
+`Snnn` dumps logical sector nnn instead of 0.
+
+Verified on hardware with a **TEAC FD-05PUB** (`0644:0000`, class `08/04/00`)
+reading sector 0 of a 1.44MB diskette, boot signature `AA55` intact.
+
+This is the prototype for BIOS drive B:. It is a DOS tool first because a wrong
+guess costs a re-assemble rather than a BIOS reflash and a power cycle.
+
+### The transport is not the one the BIOS already has
+
+The fixed disk on USB0 uses Bulk-Only Transport. A USB floppy is
+**UFI over CBI**, which is the same command set under a different wrapper:
+
+| phase | Bulk-Only | CBI |
+|---|---|---|
+| command | 31-byte CBW on bulk OUT | **control transfer** — `0x21`/`0x00` (ADSC), wIndex = *interface* |
+| data | bulk | bulk — unchanged |
+| status | 13-byte CSW on bulk IN | **2 bytes on an interrupt IN endpoint** |
+
+For UFI those two status bytes are ASC/ASCQ — the same codes `REQUEST SENSE`
+gives. Reading them the generic CBI way (a type byte plus a two-bit code) turns
+a clear "medium not present" into gibberish.
+
+### Removable media has a state machine, and it must be obeyed
+
+Everything that went wrong bringing this up was one rule, applied in one place
+and not the others:
+
+> A **UNIT ATTENTION** (sense key 6) *aborts the command in progress*, is
+> reported exactly once, is cleared by reading the sense, and the command must
+> then be **reissued**.
+
+The observed sequence on every fresh run is:
+
+| stage | sense | meaning |
+|---|---|---|
+| after bus reset | `06/29/00` | power on / reset occurred |
+| before spin-up | `02/3A/00` | no medium — **true at the time** |
+| after spin-up | `06/28/00` | **medium found**, not-ready→ready |
+
+`28/00` is the drive announcing it has the disk. Retrying a read without
+clearing it means every attempt is aborted by the same pending notice, which
+looks exactly like a drive that cannot read. `ufi_in_ua` / `ufi_nodata_ua`
+wrap the rule so it applies to every media command, not just `TEST UNIT READY`.
+
+A floppy is also a mechanism: it needs `START STOP UNIT` and seconds of
+polling, not two commands forty milliseconds apart.
+
+### Diagnostics, because guessing cost several rounds
+
+Every failure prints the **phase**, the raw `STATUS`, and `RXPID`:
+
+| phase | meaning |
+|---|---|
+| 1 | ADSC setup | 
+| 2 | the 12-byte command block |
+| 3 | control status stage — **tolerated**, see below |
+| 4 | data | 
+| 5 | no interrupt status arrived |
+| 6 | status shorter than 2 bytes |
+| 7 | transport fine, **device refused** with a real ASC/ASCQ |
+
+`RXPID` says what came off the wire rather than how the status bits classified
+it: `1E` is STALL, `5A` is NAK, `4B` is DATA1. A NAK means the device is
+healthy and asking for time — the opposite of what "FAILED" suggests.
+
+> **A stalled control status stage is not a dead command.** This drive stalls
+> phase 3 while still executing the command — it spins up and steps the head.
+> Abandoning there means never issuing the data phase or reading the interrupt
+> status, so every command looks identically dead. It is recorded and stepped
+> over.
+
+### Two things worth knowing about EP0
+
+`bMaxPacketSize0` is **8** on this drive, so the 12-byte command block goes out
+as 8 bytes then 4, toggling DATA1 then DATA0. One 12-byte packet is a protocol
+violation and earns a STALL — the same EP0 assumption the BIOS had to be fixed
+for, in a place that had not been swept.
+
+`READ(10)` takes LBA and transfer length **big-endian**, backwards from
+everything else an 8086 touches.
+
+### Not done yet
+
+Writes, media-change detection (`INT 13h` AH=16h), and the move into the BIOS
+as drive B:, overriding the SPI flash when a drive is present. Media change is
+not optional: without it a disk swap writes a stale FAT onto the new diskette.
