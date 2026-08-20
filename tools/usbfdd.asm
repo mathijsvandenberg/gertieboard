@@ -128,7 +128,17 @@ start:
         cmp  al, 'S'
         je   .ssec
         cmp  al, 's'
-        jne  .snext
+        je   .ssec
+        jmp  short .snext
+; .swr must NOT sit between the 's' test and .ssec. It did, so a LOWERCASE
+; "s2000" fell straight into the write flag and never consumed its digits --
+; and the loose '0's then hit the port selector above, sending the whole run
+; at USB0. The tool then reported, entirely correctly, that the flash disk on
+; port 0 has no UFI/CBI interface.
+;
+; This is the same shape as the "G0" bug in usbaudio -- a digit belonging to
+; one option being re-read as another option -- which I fixed there and did
+; not sweep for here.
 .swr:
         mov  byte [wtest], 1
         jmp  short .snext
