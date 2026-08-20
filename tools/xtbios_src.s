@@ -6442,6 +6442,8 @@ uf_ctlin:
     push cs
     pop ds                       # lodsb below reads DS:SI, and the setup
     mov bp, cx                   # packet is in the F-segment
+    mov al, byte ptr [si]        # bmRequestType, for the status stage below
+    mov byte ptr cs:[uf_rqt], al
     xor al, al
     mov dx, UF_ENDP
     out dx, al
@@ -6495,7 +6497,22 @@ uf_ctlin:
     xor al, al
     mov dx, UF_LEN
     out dx, al
-    mov al, 0x8B                 # OUT | GO | DATA1 (status of a device->host)
+    ## THE STATUS STAGE RUNS THE OPPOSITE WAY TO THE DATA STAGE.
+    ## A device-to-host request -- every GET_DESCRIPTOR here, bmRequestType
+    ## bit 7 set -- ends with a zero-length OUT. A host-to-device one --
+    ## SET_ADDRESS, SET_CONFIGURATION -- ends with an IN.
+    ##
+    ## This sent OUT for both. GET_DESCRIPTOR therefore worked and SET_ADDRESS
+    ## was quietly malformed, so the device never completed the address change
+    ## and stayed at 0 while we began addressing it as 1. Every transfer after
+    ## that went to an address nothing answers on, and the first one to do so
+    ## was the configuration read -- which is why the stage marker pointed one
+    ## step past the actual fault.
+    mov al, 0x8A                 # IN | GO | DATA1
+    test byte ptr cs:[uf_rqt], 0x80
+    jz .ufc_stgo
+    mov al, 0x8B                 # OUT | GO | DATA1
+.ufc_stgo:
     call uf_txn
     jc .ufc_bad
     clc
@@ -7807,6 +7824,7 @@ uf_err:     .byte 0
 uf_chg:     .byte 0
 uf_nsec:    .byte 18
 uf_stage:   .byte 0
+uf_rqt:     .byte 0
 uf_asc:     .byte 0
 uf_ascq:    .byte 0
 uf_blocks:  .word 0
