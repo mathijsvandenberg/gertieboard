@@ -406,10 +406,6 @@ _post:
     call uf_report
     jmp short .post_ufdone
 .post_nouf:
-    ## No floppy: leave the flash's own B: line intact and put the stage it
-    ## reached out at column 60, where it cannot collide with it. A silent
-    ## absence is exactly what made this hard to diagnose the first time.
-    call uf_stagerep
 .post_ufdone:
 
 ## ---- USB mass storage: enumerate, and advertise C: only if it worked ----
@@ -6894,33 +6890,6 @@ uf_reqsense:
     clc
     ret
 
-## uf_stagerep -- "U:nn" at row 9 column 60, saying how far uf_enum got.
-##   1 entered   2 LINE read   3 bus reset   4 device descriptor
-##   5 addressed 6 config read 7 interface found   8 configured
-##  Anything below 8 is where it stopped; 2 means no full-speed device was
-##  seen on the port at all.
-uf_stagerep:
-    push ax
-    push di
-    push si
-    push ds
-    push es
-    mov ax, VID
-    mov es, ax
-    mov di, 9*160 + 60*2
-    push cs
-    pop ds
-    mov si, offset b_ufstage
-    call dbg_str
-    mov al, byte ptr cs:[uf_stage]
-    call dbg_byte
-    pop es
-    pop ds
-    pop si
-    pop di
-    pop ax
-    ret
-
 ## uf_report -- repaint the B: line for a USB floppy. Reuses hd_detect's own
 ##              strings so the two lines stay in the same 21 columns.
 uf_report:
@@ -6993,6 +6962,14 @@ uf_wait:
     pop cx
     ret
 
+## The F-segment is full: .text had grown into .rtdata, and .font_rom cannot
+## move because F000:FA6E is where every piece of software expects the 8x8 font
+## to be. But 386 bytes sit unused between the end of that font and the reset
+## vector -- M9K that shows through once POST clears ROM_EN.
+##
+## uf_enum and uf_find run ONCE, at POST, long after ROM_EN is cleared, so they
+## are the right things to put there. Calls across the boundary are ordinary
+## near calls within the same segment; only the link address differs.
 ## uf_enum -- bring up USB1 and find a UFI/CBI floppy. Sets uf_pres on success.
 ##            Every failure is silent and simply leaves uf_pres 0: a machine
 ##            with no USB floppy must behave exactly like one that never had
@@ -7112,6 +7089,8 @@ uf_enum:
     pop ax
     ret
 
+.section .ufaux, "ax"
+
 ## uf_find -- walk the configuration for class 08 / subclass 04 / protocol 00
 ##            and its three endpoints. Walking by bLength, not by assuming a
 ##            layout, is what makes it safe to step over blocks we do not know.
@@ -7206,6 +7185,8 @@ uf_find:
     pop ax
     ret
 
+.section .text
+
 ## uf_ready -- spin the drive up, wait for it, and learn the geometry.
 ##             Returns CF set if there is no usable medium.
 ##
@@ -7223,10 +7204,12 @@ uf_ready:
     push cs
     pop es
 
+    mov byte ptr cs:[uf_rstage], 1
     mov si, offset uf_cdb_start  # START STOP UNIT -- allowed to fail
     xor ah, ah
     call uf_do
 
+    mov byte ptr cs:[uf_rstage], 2
     mov bx, 60                   # a MECHANISM, not a memory: it has to spin
                                  # up and find a medium before it can answer
 .ufr_poll:
@@ -7242,6 +7225,7 @@ uf_ready:
     jnz .ufr_poll
     jmp .ufr_bad
 .ufr_up:
+    mov byte ptr cs:[uf_rstage], 3      # the drive answered TEST UNIT READY
     mov si, offset uf_cdb_cap
     mov di, offset uf_buf
     mov cx, 8
@@ -7256,6 +7240,7 @@ uf_ready:
     mov ah, byte ptr cs:[uf_buf+3]
     xchg al, ah
     inc ax
+    mov byte ptr cs:[uf_rstage], 4      # capacity read
     mov word ptr cs:[uf_blocks], ax
     mov byte ptr cs:[uf_nsec], 18
     cmp ax, 2880
@@ -7304,7 +7289,29 @@ uf_int13:
     je .u13_type
     cmp ah, 0x16
     je .u13_chg
+    cmp ah, 0xFE
+    je .u13_diag
     jmp .u13_bad
+
+.u13_diag:
+    ## Vendor-specific, and DOS never calls it. The transport works at POST
+    ## and fails from here, and nothing on the screen or in a BIOS error code
+    ## says WHERE -- AH=20 only says the sense held nothing, which is the
+    ## absence of evidence rather than any. B13 reads this.
+    ##   AL = how far uf_ready got     AH = 0
+    ##   BL = sense key   BH = sense ASC
+    ##   CL = last CBI status ASC      CH = its ASCQ
+    ##   DL = enumeration stage
+    mov al, byte ptr cs:[uf_rstage]
+    mov bl, byte ptr cs:[uf_sense+2]
+    and bl, 0x0F
+    mov bh, byte ptr cs:[uf_sense+12]
+    mov cl, byte ptr cs:[uf_asc]
+    mov ch, byte ptr cs:[uf_ascq]
+    mov dl, byte ptr cs:[uf_stage]
+    xor ah, ah
+    clc
+    retf 2
 
 .u13_reset:
     call uf_ready
@@ -7742,7 +7749,6 @@ b_usb_st:  .asciz "  txseq/flags "
 b_usb_old: .asciz "FPGA image is older than this BIOS - reprogram it"
 b_fd2:     .asciz "Diskette Drive B:  : "   # same 21 columns, so the two lines align
 b_usbfd:   .asciz "  USB floppy"
-b_ufstage: .asciz "U:"
 b_hd_ready:.asciz "Ready"
 b_hd_no:   .asciz "NOT READY"
 b_hd_kb:   .asciz " KB"
@@ -7832,6 +7838,7 @@ uf_chg:     .byte 0
 uf_nsec:    .byte 18
 uf_stage:   .byte 0
 uf_rqt:     .byte 0
+uf_rstage:  .byte 0
 uf_asc:     .byte 0
 uf_ascq:    .byte 0
 uf_blocks:  .word 0

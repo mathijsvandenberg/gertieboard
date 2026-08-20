@@ -62,6 +62,7 @@ wsl bash -c "cd /mnt/c/altera/gertieboard/tools && \
   as --32 '$SRC' -o /tmp/$BASE.o && \
   ld -m elf_i386 -Ttext=$ROMOFF --section-start=.reset=0xFFF0 \
      --section-start=.font_rom=0xFA6E \
+     --section-start=.ufaux=0xFE70 \
      --section-start=.rtdata=0xF880 \
      --oformat=binary -e _post /tmp/$BASE.o -o '$BIN'"
 

@@ -104,6 +104,42 @@ start:
         int  0x13
         call report
 
+; ---- AH=FEh: the BIOS's own view, which no error code carries --------------
+; Vendor-specific and DOS never calls it. AH=20 from a read only says the sense
+; held nothing, which is the absence of evidence rather than any.
+        mov  dx, msg_tfe
+        call puts
+        mov  ah, 0xFE
+        mov  dl, [drive]
+        int  0x13
+        jc   .nofe
+        mov  dx, msg_rst
+        call puts
+        call puthex                     ; AL = how far uf_ready got
+        mov  dx, msg_sns
+        call puts
+        mov  al, bl
+        call puthex
+        mov  al, bh
+        call puthex
+        mov  dx, msg_cbi
+        call puts
+        mov  al, cl
+        call puthex
+        mov  al, ch
+        call puthex
+        mov  dx, msg_enu
+        call puts
+        mov  al, dl
+        call puthex
+        mov  dx, msg_crlf
+        call puts
+        jmp  short .fedone
+.nofe:
+        mov  dx, msg_nofe
+        call puts
+.fedone:
+
 ; ---- AH=02h: read cylinder 0, head 0, sector 1 -----------------------------
         mov  dx, msg_t02
         call puts
@@ -244,6 +280,12 @@ msg_hds  db ' heads ', '$'
 msg_tot  db ' total ', '$'
 msg_med  db ' media ', '$'
 msg_sig  db ' sig ', '$'
+msg_tfe  db 'AH=FE diag  ', '$'
+msg_rst  db 'ready-stage ', '$'
+msg_sns  db '  sense ', '$'
+msg_cbi  db '  cbi ', '$'
+msg_enu  db '  enum ', '$'
+msg_nofe db 'not supported by this BIOS', 13, 10, '$'
 msg_crlf db 13, 10, '$'
 
 secbuf  times 512 db 0
