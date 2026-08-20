@@ -7449,43 +7449,49 @@ uf_int13:
     dec bx
     add ax, bx
     mov word ptr cs:[uf_lba], ax
-    xor bx, bx                          # sectors done
 
-.u13_loop:
-    mov al, byte ptr cs:[uf_cnt]
-    cmp bl, al
-    jae .u13_done
-
-    ## LBA and length are BIG-endian in READ(10)/WRITE(10), backwards from
-    ## everything else an 8086 touches.
-    mov ax, word ptr cs:[uf_lba]
+    ## ONE COMMAND FOR EVERY SECTOR ASKED FOR, not one command per sector.
+    ##
+    ## A separate READ(10) each time meant waiting a WHOLE REVOLUTION for
+    ## every sector: the drive hands one over, and by the time the next
+    ## command has crossed the bus the following sector has already gone past
+    ## the head. At 300 RPM that is 200 ms apiece, so an 18-sector cylinder
+    ## took nearly four seconds -- which is precisely the "5 seconds per
+    ## cylinder" a copy showed.
+    ##
+    ## Asking for all of them in one command lets the drive read the track in
+    ## a single pass, and costs one command and one bulk transfer instead of
+    ## eighteen of each. It also removes seventeen chances per cylinder for a
+    ## retry to desynchronise the endpoint.
     mov si, offset uf_cdb_rd
     cmp byte ptr cs:[uf_wr], 0
     je .u13_isrd
     mov si, offset uf_cdb_wr
 .u13_isrd:
+    ## LBA and length are BIG-endian in READ(10)/WRITE(10), backwards from
+    ## everything else an 8086 touches.
+    mov ax, word ptr cs:[uf_lba]
     mov byte ptr cs:[si+5], al
     mov byte ptr cs:[si+4], ah
-
-    mov cx, 512
+    mov al, byte ptr cs:[uf_cnt]
+    mov byte ptr cs:[si+8], al          # transfer length, in BLOCKS
+    mov byte ptr cs:[si+7], 0
+    xor ah, ah
+    mov cl, 9
+    shl ax, cl                          # bytes = sectors x 512
+    mov cx, ax
+    mov di, bp
     cmp byte ptr cs:[uf_wr], 0
     jne .u13_dowr
-    mov di, bp
     mov ah, 1
     call uf_do
     jmp .u13_after
 .u13_dowr:
-    push bx
     mov bx, bp
     mov ah, 2
     call uf_do
-    pop bx
 .u13_after:
     jc .u13_err
-    inc word ptr cs:[uf_lba]
-    add bp, 512
-    inc bl
-    jmp .u13_loop
 
 .u13_done:
     mov byte ptr cs:[uf_err], 0
@@ -7528,7 +7534,7 @@ uf_int13:
     pop dx
     pop cx
     pop bx
-    mov al, bl
+    xor al, al                          # one command now, so none completed
     stc
     retf 2
 
