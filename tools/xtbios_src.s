@@ -6850,9 +6850,18 @@ uf_once:
 ##   exactly how the first attempt at this driver failed.
 uf_do:
     push bp
-    mov bp, 8
+    ## KEEP THE DIRECTION. uf_once takes it in AH and returns whatever AH it
+    ## last handed uf_bulk -- 0 for a read, 1 for a write -- so a retry ran
+    ## with the WRONG direction: a read (1) came back 0 and was reissued with
+    ## no data phase at all, leaving the device to send 512 bytes nobody
+    ## collected and the bulk endpoint stuffed. Every transfer after that is a
+    ## toggle out of step, which is the hang after the directory listing.
+    ## A write (2) came back 1 and would have been reissued as a READ.
+    mov byte ptr cs:[uf_dsave], ah
+    mov bp, 4                    # bounded: each try can cost a revolution
 .ufd_l:
     push bp
+    mov ah, byte ptr cs:[uf_dsave]
     call uf_once
     pop bp
     jnc .ufd_ok
@@ -7882,6 +7891,7 @@ uf_lastst:  .byte 0
 uf_bleft:   .word 0
 uf_bsave:   .word 0
 uf_stsave:  .byte 0
+uf_dsave:   .byte 0
 uf_asc:     .byte 0
 uf_ascq:    .byte 0
 uf_blocks:  .word 0
