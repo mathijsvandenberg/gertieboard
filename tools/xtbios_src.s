@@ -6914,19 +6914,6 @@ uf_stagerep:
     call dbg_str
     mov al, byte ptr cs:[uf_stage]
     call dbg_byte
-    call dbg_spc
-    ## A configuration descriptor header starts 09 02. These two bytes say
-    ## whether the header read returned a descriptor or returned nothing, and
-    ## the length after them says what the device claimed its total was.
-    mov al, byte ptr cs:[uf_buf]
-    call dbg_byte
-    mov al, byte ptr cs:[uf_buf+1]
-    call dbg_byte
-    call dbg_spc
-    mov al, byte ptr cs:[uf_cfglen+1]
-    call dbg_byte
-    mov al, byte ptr cs:[uf_cfglen]
-    call dbg_byte
     pop es
     pop ds
     pop si
@@ -6965,9 +6952,28 @@ uf_report:
 .ufp_nomedia:
     mov si, offset b_hd_no
     call dbg_str
+    call dbg_spc
+    ## The sense the drive gave for refusing. 3A is no medium, 27 is write
+    ## protect, 28 is a medium change it has already announced. Without this
+    ## "NOT READY" is the same silent absence the stage byte existed to fix.
+    mov al, byte ptr cs:[uf_sense+2]
+    and al, 0x0F
+    call dbg_byte
+    mov al, byte ptr cs:[uf_sense+12]
+    call dbg_byte
+    mov al, byte ptr cs:[uf_sense+13]
+    call dbg_byte
 .ufp_tag:
     mov si, offset b_usbfd
     call dbg_str
+.ufp_pad:
+    cmp di, 9*160 + 74*2         # blank the flash line's tail, which is
+    jae .ufp_padded              # longer than this one and showed through
+    mov al, 0x20
+    mov ah, DBG_ATTR
+    stosw
+    jmp short .ufp_pad
+.ufp_padded:
     pop es
     pop ds
     pop di
@@ -7221,14 +7227,15 @@ uf_ready:
     xor ah, ah
     call uf_do
 
-    mov bx, 40                   # ~2 s: a mechanism, not a memory
+    mov bx, 60                   # a MECHANISM, not a memory: it has to spin
+                                 # up and find a medium before it can answer
 .ufr_poll:
     mov si, offset uf_cdb_tur
     xor ah, ah
     call uf_do
     jnc .ufr_up
     push bx
-    mov cx, 50
+    mov cx, 200                  # ~54 ms a try, so ~3.2 s in total
     call uf_wait
     pop bx
     dec bx
