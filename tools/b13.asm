@@ -107,39 +107,12 @@ start:
 ; ---- AH=FEh: the BIOS's own view, which no error code carries --------------
 ; Vendor-specific and DOS never calls it. AH=20 from a read only says the sense
 ; held nothing, which is the absence of evidence rather than any.
-        mov  dx, msg_tfe
-        call puts
-        mov  ah, 0xFE
-        mov  dl, [drive]
-        int  0x13
-        jc   .nofe
-        mov  dx, msg_rst
-        call puts
-        call puthex                     ; AL = how far uf_ready got
-        mov  dx, msg_sns
-        call puts
-        mov  al, bl
-        call puthex
-        mov  al, bh
-        call puthex
-        mov  dx, msg_cbi
-        call puts
-        mov  al, cl
-        call puthex
-        mov  al, ch
-        call puthex
-        mov  dx, msg_enu
-        call puts
-        mov  al, dl
-        call puthex
-        mov  dx, msg_crlf
-        call puts
-        jmp  short .fedone
-.nofe:
-        mov  dx, msg_nofe
-        call puts
-.fedone:
-
+        call fediag
+        ; CAPTURE DX FIRST. DL is the diagnostic byte, and every "mov dx,
+        ; msg_*" below destroys it -- so the enum value printed was the low
+        ; byte of a string address, not the BIOS's answer. BX and CX survive
+        ; because puthex saves CX and nothing here touches BX.
+        mov  [r_dx], dx
 ; ---- AH=02h: read cylinder 0, head 0, sector 1 -----------------------------
         mov  dx, msg_t02
         call puts
@@ -184,7 +157,50 @@ start:
         mov  dx, msg_crlf
         call puts
 .noread:
+        ; AGAIN, now that the read has failed. The first call ran BEFORE it and
+        ; reported the reset's sense, which said nothing about the read.
+        call fediag
         jmp  quit
+
+; fediag -- AH=FE and print it
+fediag:
+        mov  dx, msg_tfe
+        call puts
+        mov  ah, 0xFE
+        mov  dl, [drive]
+        int  0x13
+        jc   .fd_no
+        mov  [r_dx], dx                 ; DL is the diagnostic: capture it
+        mov  [r_bx], bx                 ; before any message load
+        mov  [r_cx], cx
+        mov  [r_al], al
+        mov  dx, msg_rst
+        call puts
+        mov  al, [r_al]
+        call puthex
+        mov  dx, msg_sns
+        call puts
+        mov  al, [r_bx]
+        call puthex
+        mov  al, [r_bx+1]
+        call puthex
+        mov  dx, msg_cbi
+        call puts
+        mov  al, [r_cx]
+        call puthex
+        mov  al, [r_cx+1]
+        call puthex
+        mov  dx, msg_enu
+        call puts
+        mov  al, [r_dx]
+        call puthex
+        mov  dx, msg_crlf
+        call puts
+        ret
+.fd_no:
+        mov  dx, msg_nofe
+        call puts
+        ret
 
 ; report -- CF and AH from the call that just returned
 report:
@@ -261,6 +277,8 @@ lastah  db 0
 r_cx    dw 0
 r_dx    dw 0
 r_bl    db 0
+r_bx    dw 0
+r_al    db 0
 
 msg_hdr  db 'B13 -- what INT 13h actually returns for a drive', 13, 10, '$'
 msg_drv  db 'drive       ', '$'

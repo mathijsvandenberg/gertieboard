@@ -7071,7 +7071,14 @@ uf_enum:
     xor cx, cx
     call uf_ctlin
     jc .ufe_no
-    mov cx, 60
+    ## A device is allowed to take its time over SET_CONFIGURATION, and this
+    ## one does. 60 delays is about 16 ms; usbfdd waits a whole BIOS tick, at
+    ## least 55 ms, and works every run. At 16 ms this succeeded on one boot
+    ## and left the drive deaf on the next -- enumeration reporting success
+    ## while every command after it returned no sense and no CBI status at
+    ## all, which is what silence from a device that is not listening yet
+    ## looks like.
+    mov cx, 400                  # ~108 ms
     call uf_wait
     ## SET_CONFIGURATION resets every endpoint toggle to DATA0. Ours must
     ## match or the first bulk packet of the first read is discarded.
