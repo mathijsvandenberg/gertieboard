@@ -62,7 +62,7 @@ wsl bash -c "cd /mnt/c/altera/gertieboard/tools && \
   as --32 '$SRC' -o /tmp/$BASE.o && \
   ld -m elf_i386 -Ttext=$ROMOFF --section-start=.reset=0xFFF0 \
      --section-start=.font_rom=0xFA6E \
-     --section-start=.rtdata=0xF200 \
+     --section-start=.rtdata=0xF880 \
      --oformat=binary -e _post /tmp/$BASE.o -o '$BIN'"
 
 sz=$(wc -c < "$BIN")
@@ -104,7 +104,7 @@ if d[0xFA6E:0xFA6E+1024] != font:         fails.append("8x8 font (chars 0..127) 
 # u_cdb_sense, u_cdb_cap and u_rq_dev8 are distinctive and their offsets within
 # .rtdata are fixed by the declarations above them. If the section moves or the
 # --section-start is dropped, these stop matching and the build stops.
-RTDATA = 0xF200
+RTDATA = 0xF880
 if not (0xEF00 <= RTDATA and RTDATA + 0x100 < 0xFA6E):
     fails.append(f"rtdata at 0x{RTDATA:04X} is not clear of the checksum range and the font")
 if d[RTDATA+0x88:RTDATA+0x8D] != b'\x03\x00\x00\x00\x12':
