@@ -6375,8 +6375,20 @@ uf_txn:
     mov bl, al
     mov bh, 3
 .uft_att:
-    mov cx, 8000                 # a floppy NAKs for a long time while it
-.uft_try:                        # thinks; 400 was tuned on flash sticks
+    ## NAK BUDGET, AND IT IS MEASURED IN THE WRONG UNITS ON PURPOSE.
+    ## A NAK means "not ready, ask again", and READ(10) is the first command
+    ## here that needs PHYSICAL DISK ACCESS -- TEST UNIT READY, INQUIRY and
+    ## READ CAPACITY all answer out of the drive's own memory and reply at
+    ## once. A sector has to come round under the head: at 300 RPM that is up
+    ## to 200 ms of rotational latency before the first byte exists, plus the
+    ## seek.
+    ##
+    ## 8000 retries at roughly 10 us each is about 80 ms, so the read gave up
+    ## while the disk was still turning and reported a controller failure for
+    ## a drive that was working exactly as intended. 0 means 65536, around
+    ## 650 ms, which covers three full revolutions.
+    mov cx, 0
+.uft_try:
     push cx
     mov al, bl
     mov dx, UF_CMD
