@@ -49,6 +49,8 @@ _post:
     mov ss, ax
     mov sp, 0x7C00          # stack just under the boot area
 
+    call hw_quiesce         # known device state before anything reads one
+
 ## ---- video up + draw banner with INTERRUPTS OFF (first light) -------
 ##      done before any PIC/PIT/sti so the screen appears even if the
 ##      interrupt controller or timer is misbehaving.
@@ -6330,6 +6332,70 @@ u_delay:
 ## =====================================================================
 
 ## =====================================================================
+##  hw_quiesce -- put the peripherals into a known state, first thing.
+##
+##  A RESET line is not a state machine's reset. ega_regs has NO RESET PORT AT
+##  ALL: its graphics-controller, sequencer and attribute registers keep
+##  whatever they held straight through a CPU reset, so Ctrl+Alt+Del reboots
+##  into DOS with the machine still in EGA mode 0Dh and the display wrong. The
+##  FPGA's power-on defaults only apply on the very first configuration, which
+##  is once per power cycle at best and never on a warm boot.
+##
+##  The same is true of the USB engines. Their CTRL registers hold SOF enable,
+##  low-speed select and bus-reset across a reboot, so a tool that left the
+##  port in low speed hands the next boot a full-speed device that reads as
+##  low speed -- which has already cost an evening once.
+##
+##  So: the BIOS states what it wants rather than inheriting it. This runs
+##  before anything reads a register, and it is deliberately unconditional --
+##  a quiesce that only runs when it thinks it is needed is one more thing
+##  that can be wrong.
+## =====================================================================
+hw_quiesce:
+    push ax
+    push dx
+
+    ## ---- EGA back to text ----
+    ## Read the status port first: that is what resets the attribute
+    ## controller's index/data flip-flop. Without it the writes below are
+    ## taken in the wrong halves and leave the palette scrambled instead of
+    ## fixing it -- the trap ega_regs' own header warns about.
+    mov dx, 0x3DA
+    in al, dx
+    ## sequencer: map mask, all four planes writable
+    mov dx, 0x3C4
+    mov al, 2
+    out dx, al
+    inc dx
+    mov al, 0x0F
+    out dx, al
+    ## graphics controller register 6: EGA_ON is gc(6) bit 0 with bits 3:2 =
+    ## 01, so clearing the register turns mode 0Dh off and hands 0xA0000 back.
+    mov dx, 0x3CE
+    mov al, 6
+    out dx, al
+    inc dx
+    xor al, al
+    out dx, al
+
+    ## ---- both USB engines idle ----
+    ## Not merely SOF off: bus reset and low speed live here too, and a stale
+    ## low-speed bit makes LINE report the engine's swapped view of the pins.
+    mov dx, 0xEE                 # USB0 CTRL
+    xor al, al
+    out dx, al
+    mov dx, 0xAE                 # USB1 CTRL
+    out dx, al
+    ## and the audio streamer, which would otherwise keep sending isochronous
+    ## packets to whatever address it was left pointing at
+    mov dx, 0xA0
+    out dx, al
+
+    pop dx
+    pop ax
+    ret
+
+## =====================================================================
 ##  USB FLOPPY -- UFI over CBI on USB1, presented as drive B:
 ##
 ##  A USB floppy drive is mass storage, but NOT the transport the fixed disk
@@ -7145,6 +7211,21 @@ uf_enum:
     ## match or the first bulk packet of the first read is discarded.
     mov byte ptr cs:[uf_tin], 0
     mov byte ptr cs:[uf_tout], 0
+
+    ## CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints.
+    ##
+    ## Not because they are halted -- because it RESETS THE DEVICE'S DATA
+    ## TOGGLE to DATA0. Our own toggles are zeroed above, and until now that
+    ## was an assumption about the drive rather than an agreement with it: a
+    ## drive left mid-transfer by a previous boot comes up expecting DATA1 and
+    ## every bulk packet is discarded as a duplicate. This makes the two ends
+    ## agree instead of hoping they do, which is the whole point of quiescing
+    ## at POST rather than trusting whatever survived.
+    mov al, byte ptr cs:[uf_epin]
+    call uf_unhalt
+    mov al, byte ptr cs:[uf_epout]
+    call uf_unhalt
+
     mov byte ptr cs:[uf_stage], 9   # configured
     mov byte ptr cs:[uf_pres], 1
 .ufe_no:
@@ -7158,6 +7239,22 @@ uf_enum:
     ret
 
 .section .ufaux, "ax"
+
+## uf_unhalt -- CLEAR_FEATURE(ENDPOINT_HALT) on the endpoint in AL.
+##              Failure is ignored: a device that refuses it was not halted,
+##              and there is nothing better to do about it here.
+uf_unhalt:
+    push ax
+    push cx
+    push si
+    mov byte ptr cs:[uf_sp_clrhlt+4], al
+    mov si, offset uf_sp_clrhlt
+    xor cx, cx
+    call uf_ctlin
+    pop si
+    pop cx
+    pop ax
+    ret
 
 ## uf_find -- walk the configuration for class 08 / subclass 04 / protocol 00
 ##            and its three endpoints. Walking by bLength, not by assuming a
@@ -7936,6 +8033,9 @@ uf_sp_cfg9:    .byte 0x80,6,0x00,2,0,0,9,0
 uf_sp_cfgn:    .byte 0x80,6,0x00,2,0,0,0,0
 uf_sp_setcfg:  .byte 0x00,9,1,0,0,0,0,0
 uf_sp_adsc:    .byte 0x21,0x00,0,0,0,0,12,0
+## CLEAR_FEATURE to an ENDPOINT: recipient 02, request 01, feature
+## ENDPOINT_HALT (0), wIndex patched with the endpoint address.
+uf_sp_clrhlt:  .byte 0x02,0x01,0,0,0,0,0,0
 uf_cdb_tur:    .byte 0x00,0,0,0,0,0,0,0,0,0,0,0
 uf_cdb_sense:  .byte 0x03,0,0,0,18,0,0,0,0,0,0,0
 uf_cdb_cap:    .byte 0x25,0,0,0,0,0,0,0,0,0,0,0
