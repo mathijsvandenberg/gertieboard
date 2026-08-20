@@ -27,6 +27,14 @@
 ## unconditionally, on every call. Days of "impossible" behaviour came from that.
 .arch i8086
 .intel_syntax noprefix
+
+## Where the ROM image begins, and the base of the POST checksum. It was a
+## bare 0xC000 written out in three places, so growing the ROM to 24 KB
+## would have left the checksum summing from the wrong address -- which
+## POST reports as a corrupt ROM rather than as a size it was not told
+## about.
+.equ ROM_START, 0xA000
+
 .text
 
 ## ---- equates -------------------------------------------------------
@@ -121,9 +129,9 @@ _post:
     pop ds
     mov si, offset b_sum
     call dbg_str
-    mov si, 0xC000
+    mov si, ROM_START
     mov cx, offset _rt_start
-    sub cx, 0xC000
+    sub cx, ROM_START
     xor ax, ax
     xor bx, bx
 .psum:
@@ -136,7 +144,7 @@ _post:
     mov ds, bx
     mov [0xB8], ax               # published for BIOSFLASH's pre-write check
     mov bx, offset _rt_start
-    sub bx, 0xC000
+    sub bx, ROM_START
     mov [0xBA], bx
     mov bx, offset u_fast        # where 186BOOST.COM finds the boost flag
     mov [0xBC], bx
@@ -7089,14 +7097,6 @@ uf_wait:
     pop cx
     ret
 
-## The F-segment is full: .text had grown into .rtdata, and .font_rom cannot
-## move because F000:FA6E is where every piece of software expects the 8x8 font
-## to be. But 386 bytes sit unused between the end of that font and the reset
-## vector -- M9K that shows through once POST clears ROM_EN.
-##
-## uf_enum and uf_find run ONCE, at POST, long after ROM_EN is cleared, so they
-## are the right things to put there. Calls across the boundary are ordinary
-## near calls within the same segment; only the link address differs.
 ## uf_enum -- bring up USB1 and find a UFI/CBI floppy. Sets uf_pres on success.
 ##            Every failure is silent and simply leaves uf_pres 0: a machine
 ##            with no USB floppy must behave exactly like one that never had
@@ -7238,8 +7238,6 @@ uf_enum:
     pop ax
     ret
 
-.section .ufaux, "ax"
-
 ## uf_unhalt -- CLEAR_FEATURE(ENDPOINT_HALT) on the endpoint in AL.
 ##              Failure is ignored: a device that refuses it was not halted,
 ##              and there is nothing better to do about it here.
@@ -7349,8 +7347,6 @@ uf_find:
     pop bx
     pop ax
     ret
-
-.section .text
 
 ## uf_ready -- spin the drive up, wait for it, and learn the geometry.
 ##             Returns CF set if there is no usable medium.

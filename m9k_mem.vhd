@@ -43,7 +43,7 @@ ARCHITECTURE m9k OF m9k_mem IS
   -- The BIOS image, not low RAM. Conventional memory is now uniformly PSRAM
   -- (see mem_hybrid) so that the 640 KB has ONE speed; M9K is spent instead on
   -- the code that runs on every interrupt.
-  CONSTANT BIOS_DEPTH : integer := 16#4000#;  -- 16 KB BIOS image     0xFC000..0xFFFFF
+  CONSTANT BIOS_DEPTH : integer := 16#6000#;  -- 24 KB BIOS image     0xFA000..0xFFFFF
   CONSTANT BUF_DEPTH  : integer := 16#1000#;  -- 4 KB disk buffer     0xE0000..0xE0FFF
   CONSTANT DEPTH      : integer := BIOS_DEPTH + BUF_DEPTH;
 
@@ -70,8 +70,13 @@ BEGIN
   in_buf  <= owned_by_diskbuf(ADDR);
   in_win  <= in_bios OR in_buf;
 
-  -- The BIOS maps 1:1 from 0xFC000; the 4 KB buffer is packed above it.
-  midx   <= conv_integer(ADDR(13 DOWNTO 0)) WHEN in_bios = '1'
+  -- The BIOS maps 1:1 from 0xF8000; the 4 KB buffer is packed above it.
+  -- FIFTEEN address bits now, not fourteen: a 32 KB window needs 0..0x7FFF,
+  -- and leaving this at 13 DOWNTO 0 would have mirrored the top half of the
+  -- BIOS onto the bottom -- the machine would boot, because the reset vector
+  -- and everything near it live in the top 16 KB, and then fail somewhere in
+  -- the newly added code with no clue as to why.
+  midx   <= conv_integer(ADDR(14 DOWNTO 0)) WHEN in_bios = '1'
        ELSE BIOS_DEPTH + conv_integer(ADDR(11 DOWNTO 0));
 
   cpu_rd <= in_win AND (NOT RD);

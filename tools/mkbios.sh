@@ -31,8 +31,8 @@ K64="$BASE.64k"
 # 8192 bytes, one byte spare. 16 KB at 0xC000 is the next step up: make64k.py
 # already top-aligns a 16 KB image there, and the reset vector needs no change
 # because it jumps to the _post SYMBOL, not a hardcoded address.
-ROMSZ=16384
-ROMOFF=0xC000
+ROMSZ=24576
+ROMOFF=0xA000
 
 # ---------------------------------------------------------------------------
 # Stamp the image with the commit it was built from. "Which BIOS is running?"
@@ -62,7 +62,6 @@ wsl bash -c "cd /mnt/c/altera/gertieboard/tools && \
   as --32 '$SRC' -o /tmp/$BASE.o && \
   ld -m elf_i386 -Ttext=$ROMOFF --section-start=.reset=0xFFF0 \
      --section-start=.font_rom=0xFA6E \
-     --section-start=.ufaux=0xFE70 \
      --section-start=.rtdata=0xF880 \
      --oformat=binary -e _post /tmp/$BASE.o -o '$BIN'"
 

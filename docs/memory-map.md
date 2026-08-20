@@ -11,8 +11,8 @@
 | `0xBC000`–`0xDFFFF` | — | unmapped | |
 | `0xE0000`–`0xE0FFF` | 4 KB | on-chip **M9K** (`m9k_mem`) | fixed-disk block buffer; **invisible to DOS** |
 | `0xE1000`–`0xEFFFF` | — | unmapped | |
-| `0xF0000`–`0xFBFFF` | 48 KB | **SDRAM** | `0xFF` fill. Kept backed because `BIOSFLSH` reads the whole F-segment |
-| `0xFC000`–`0xFFFFF` | 16 KB | on-chip **M9K** (`m9k_mem`) | the BIOS image — **zero wait states** |
+| `0xF0000`–`0xF9FFF` | 40 KB | **SDRAM** | `0xFF` fill. Kept backed because `BIOSFLSH` reads the whole F-segment |
+| `0xFA000`–`0xFFFFF` | 24 KB | on-chip **M9K** (`m9k_mem`) | the BIOS image — **zero wait states** |
 | `0xFF800`–`0xFFFFF` | 2 KB | **boot ROM overlay** | *reads only*, while `ROM_EN = '1'` |
 
 Total conventional memory reported to DOS: **640 KB** — all of it.

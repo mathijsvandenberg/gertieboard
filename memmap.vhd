@@ -50,7 +50,11 @@ PACKAGE memmap IS
   CONSTANT BUF_BASE : std_logic_vector(19 DOWNTO 0) := x"E0000";  -- disk buffer
   CONSTANT BUF_END  : std_logic_vector(19 DOWNTO 0) := x"E1000";
   CONSTANT FSEG_BASE: std_logic_vector(19 DOWNTO 0) := x"F0000";  -- F-segment
-  CONSTANT BIOS_BASE: std_logic_vector(19 DOWNTO 0) := x"FC000";  -- BIOS image
+  -- 24 KB, grown from 16. The BIOS ran out of room: .text had reached
+  -- .rtdata with the USB floppy driver in it, and the only space left was
+  -- 386 bytes above the font. M9K is what backs this, and the part had
+  -- room -- see m9k_mem for the cost.
+  CONSTANT BIOS_BASE: std_logic_vector(19 DOWNTO 0) := x"FA000";  -- BIOS image
 
   -- WHICH CHIP BACKS CONVENTIONAL MEMORY.
   --
@@ -102,9 +106,15 @@ END PACKAGE memmap;
 
 PACKAGE BODY memmap IS
 
+  -- The F-segment half is the complement of owned_by_bios within 0xF0000, and
+  -- is spelled out in bits for the same reason: it shares the CPU_RDY path.
+  --   0xF0000..0xF9FFF  =  a(19 DOWNTO 16) = "1111"  and NOT in the BIOS
   FUNCTION owned_by_cpuram (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
   BEGIN
-    IF (a < CONV_END) OR ((a >= FSEG_BASE) AND (a < BIOS_BASE)) THEN
+    IF a < CONV_END THEN
+      RETURN '1';
+    ELSIF (a(19 DOWNTO 16) = "1111")
+      AND ((a(15) = '0') OR ((a(14) = '0') AND (a(13) = '0'))) THEN
       RETURN '1';
     ELSE
       RETURN '0';
@@ -116,9 +126,24 @@ PACKAGE BODY memmap IS
     RETURN owned_by_cpuram(a);
   END FUNCTION;
 
+  -- WRITTEN AS BIT TESTS, NOT AS A COMPARISON, AND THAT IS THE WHOLE POINT.
+  --
+  -- 0xFC000 was a lucky boundary: "a >= 0xFC000" is just a(19 DOWNTO 14) all
+  -- ones, six inputs and one gate. 0xFA000 is not, so the same expression
+  -- became a real 20-bit magnitude comparator -- and this decode feeds
+  -- CPU_RDY, whose whole budget is 10.35 ns from busdecode's latched address.
+  -- Growing the BIOS to 24 KB cost -0.371 ns there and the build was refused.
+  --
+  -- The region is still expressible cheaply, just not as a comparison:
+  -- 0xFA000..0xFFFFF is a(19 DOWNTO 15) = "11111" with the bottom quarter of
+  -- that 32 KB window, where a(14 DOWNTO 13) = "00", taken back out.
   FUNCTION owned_by_bios (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
   BEGIN
-    IF a >= BIOS_BASE THEN RETURN '1'; ELSE RETURN '0'; END IF;
+    IF (a(19 DOWNTO 15) = "11111") AND ((a(14) OR a(13)) = '1') THEN
+      RETURN '1';
+    ELSE
+      RETURN '0';
+    END IF;
   END FUNCTION;
 
   FUNCTION owned_by_diskbuf (a : std_logic_vector(19 DOWNTO 0)) RETURN std_logic IS
