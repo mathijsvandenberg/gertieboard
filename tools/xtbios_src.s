@@ -404,7 +404,13 @@ _post:
     je .post_nouf
     call uf_ready
     call uf_report
+    jmp short .post_ufdone
 .post_nouf:
+    ## No floppy: leave the flash's own B: line intact and put the stage it
+    ## reached out at column 60, where it cannot collide with it. A silent
+    ## absence is exactly what made this hard to diagnose the first time.
+    call uf_stagerep
+.post_ufdone:
 
 ## ---- USB mass storage: enumerate, and advertise C: only if it worked ----
 ##  Enumeration is allowed to fail. If it does, BDA 40:75 stays 0, INT 13h
@@ -6871,6 +6877,33 @@ uf_reqsense:
     clc
     ret
 
+## uf_stagerep -- "U:nn" at row 9 column 60, saying how far uf_enum got.
+##   1 entered   2 LINE read   3 bus reset   4 device descriptor
+##   5 addressed 6 config read 7 interface found   8 configured
+##  Anything below 8 is where it stopped; 2 means no full-speed device was
+##  seen on the port at all.
+uf_stagerep:
+    push ax
+    push di
+    push si
+    push ds
+    push es
+    mov ax, VID
+    mov es, ax
+    mov di, 9*160 + 60*2
+    push cs
+    pop ds
+    mov si, offset b_ufstage
+    call dbg_str
+    mov al, byte ptr cs:[uf_stage]
+    call dbg_byte
+    pop es
+    pop ds
+    pop si
+    pop di
+    pop ax
+    ret
+
 ## uf_report -- repaint the B: line for a USB floppy. Reuses hd_detect's own
 ##              strings so the two lines stay in the same 21 columns.
 uf_report:
@@ -6939,6 +6972,7 @@ uf_enum:
     push cs
     pop es
     mov byte ptr cs:[uf_pres], 0
+    mov byte ptr cs:[uf_stage], 1
     mov byte ptr cs:[uf_ep0], 8
 
     ## CTRL persists across resets and LINE reports the engine's SWAPPED view
@@ -6950,6 +6984,7 @@ uf_enum:
     call uf_wait
     mov dx, UF_CTRL
     in al, dx
+    mov byte ptr cs:[uf_stage], 2   # LINE read
     test al, 0x04                # full-speed device idle J
     jz .ufe_no
 
@@ -6970,6 +7005,7 @@ uf_enum:
     mov dx, UF_ADDR
     out dx, al
 
+    mov byte ptr cs:[uf_stage], 3   # bus reset done
     mov si, offset uf_sp_dev8
     mov di, offset uf_buf
     mov cx, 8
@@ -6980,6 +7016,7 @@ uf_enum:
     jz .ufe_no
     mov byte ptr cs:[uf_ep0], al
 
+    mov byte ptr cs:[uf_stage], 4   # device descriptor read
     mov si, offset uf_sp_setaddr
     xor cx, cx
     call uf_ctlin
@@ -6990,6 +7027,7 @@ uf_enum:
     mov dx, UF_ADDR
     out dx, al
 
+    mov byte ptr cs:[uf_stage], 5   # address assigned
     mov si, offset uf_sp_cfg9
     mov di, offset uf_buf
     mov cx, 9
@@ -7008,9 +7046,11 @@ uf_enum:
     call uf_ctlin
     jc .ufe_no
 
+    mov byte ptr cs:[uf_stage], 6   # configuration read
     call uf_find
     jc .ufe_no
 
+    mov byte ptr cs:[uf_stage], 7   # UFI/CBI interface + 3 endpoints found
     mov al, byte ptr cs:[uf_buf+5]      # bConfigurationValue
     mov byte ptr cs:[uf_sp_setcfg+2], al
     mov si, offset uf_sp_setcfg
@@ -7023,6 +7063,7 @@ uf_enum:
     ## match or the first bulk packet of the first read is discarded.
     mov byte ptr cs:[uf_tin], 0
     mov byte ptr cs:[uf_tout], 0
+    mov byte ptr cs:[uf_stage], 8   # configured
     mov byte ptr cs:[uf_pres], 1
 .ufe_no:
     pop es
@@ -7663,6 +7704,7 @@ b_usb_st:  .asciz "  txseq/flags "
 b_usb_old: .asciz "FPGA image is older than this BIOS - reprogram it"
 b_fd2:     .asciz "Diskette Drive B:  : "   # same 21 columns, so the two lines align
 b_usbfd:   .asciz "  USB floppy"
+b_ufstage: .asciz "U:"
 b_hd_ready:.asciz "Ready"
 b_hd_no:   .asciz "NOT READY"
 b_hd_kb:   .asciz " KB"
@@ -7750,6 +7792,7 @@ uf_cnt:     .byte 0
 uf_err:     .byte 0
 uf_chg:     .byte 0
 uf_nsec:    .byte 18
+uf_stage:   .byte 0
 uf_asc:     .byte 0
 uf_ascq:    .byte 0
 uf_blocks:  .word 0
