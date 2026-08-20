@@ -6897,6 +6897,19 @@ uf_stagerep:
     call dbg_str
     mov al, byte ptr cs:[uf_stage]
     call dbg_byte
+    call dbg_spc
+    ## A configuration descriptor header starts 09 02. These two bytes say
+    ## whether the header read returned a descriptor or returned nothing, and
+    ## the length after them says what the device claimed its total was.
+    mov al, byte ptr cs:[uf_buf]
+    call dbg_byte
+    mov al, byte ptr cs:[uf_buf+1]
+    call dbg_byte
+    call dbg_spc
+    mov al, byte ptr cs:[uf_cfglen+1]
+    call dbg_byte
+    mov al, byte ptr cs:[uf_cfglen]
+    call dbg_byte
     pop es
     pop ds
     pop si
@@ -7033,6 +7046,7 @@ uf_enum:
     mov cx, 9
     call uf_ctlin
     jc .ufe_no
+    mov byte ptr cs:[uf_stage], 6       # 9-byte config header read OK
     mov ax, word ptr cs:[uf_buf+2]      # wTotalLength
     cmp ax, UF_BUFSZ
     jbe .ufe_fits
@@ -7046,11 +7060,11 @@ uf_enum:
     call uf_ctlin
     jc .ufe_no
 
-    mov byte ptr cs:[uf_stage], 6   # configuration read
+    mov byte ptr cs:[uf_stage], 7   # configuration read
     call uf_find
     jc .ufe_no
 
-    mov byte ptr cs:[uf_stage], 7   # UFI/CBI interface + 3 endpoints found
+    mov byte ptr cs:[uf_stage], 8   # UFI/CBI interface + 3 endpoints found
     mov al, byte ptr cs:[uf_buf+5]      # bConfigurationValue
     mov byte ptr cs:[uf_sp_setcfg+2], al
     mov si, offset uf_sp_setcfg
@@ -7063,7 +7077,7 @@ uf_enum:
     ## match or the first bulk packet of the first read is discarded.
     mov byte ptr cs:[uf_tin], 0
     mov byte ptr cs:[uf_tout], 0
-    mov byte ptr cs:[uf_stage], 8   # configured
+    mov byte ptr cs:[uf_stage], 9   # configured
     mov byte ptr cs:[uf_pres], 1
 .ufe_no:
     pop es
