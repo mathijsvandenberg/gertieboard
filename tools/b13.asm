@@ -174,6 +174,8 @@ fediag:
         mov  [r_bx], bx                 ; before any message load
         mov  [r_cx], cx
         mov  [r_al], al
+        mov  [r_si], si
+        mov  [r_di], di
         mov  dx, msg_rst
         call puts
         mov  al, [r_al]
@@ -193,6 +195,14 @@ fediag:
         mov  dx, msg_enu
         call puts
         mov  al, [r_dx]
+        call puthex
+        mov  dx, msg_blk
+        call puts
+        mov  ax, [r_si]
+        call puthex16
+        mov  dx, msg_lst
+        call puts
+        mov  al, [r_di]
         call puthex
         mov  dx, msg_crlf
         call puts
@@ -279,6 +289,8 @@ r_dx    dw 0
 r_bl    db 0
 r_bx    dw 0
 r_al    db 0
+r_si    dw 0
+r_di    dw 0
 
 msg_hdr  db 'B13 -- what INT 13h actually returns for a drive', 13, 10, '$'
 msg_drv  db 'drive       ', '$'
@@ -303,6 +315,8 @@ msg_rst  db 'ready-stage ', '$'
 msg_sns  db '  sense ', '$'
 msg_cbi  db '  cbi ', '$'
 msg_enu  db '  enum ', '$'
+msg_blk  db '  bulk-left ', '$'
+msg_lst  db '  st ', '$'
 msg_nofe db 'not supported by this BIOS', 13, 10, '$'
 msg_crlf db 13, 10, '$'
 

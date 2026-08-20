@@ -6699,6 +6699,7 @@ uf_bulk:
     mov al, 0x82
     call uf_txn
     pop cx
+    mov byte ptr cs:[uf_lastst], al     # the status, whatever it was
     jc .ufb_bad
     test al, 0x80
     jz .ufb_bad
@@ -6775,9 +6776,11 @@ uf_bulk:
     jmp .ufb_pkt
 
 .ufb_done:
+    mov word ptr cs:[uf_bleft], 0
     clc
     jmp .ufb_o
 .ufb_bad:
+    mov word ptr cs:[uf_bleft], cx      # bytes still owed when it gave up
     stc
 .ufb_o:
     pop bp
@@ -7277,6 +7280,7 @@ uf_ready:
 ## =====================================================================
 uf_int13:
     sti
+    cld                          # STOSB/LODSB below; DF belongs to the caller
     cmp byte ptr cs:[uf_pres], 0
     je .u13_nodrv
 
@@ -7316,6 +7320,8 @@ uf_int13:
     mov cl, byte ptr cs:[uf_asc]
     mov ch, byte ptr cs:[uf_ascq]
     mov dl, byte ptr cs:[uf_stage]
+    mov si, word ptr cs:[uf_bleft]      # bytes the last bulk did NOT move
+    mov di, word ptr cs:[uf_lastst]     # and the status it stopped on
     xor ah, ah
     clc
     retf 2
@@ -7846,6 +7852,8 @@ uf_nsec:    .byte 18
 uf_stage:   .byte 0
 uf_rqt:     .byte 0
 uf_rstage:  .byte 0
+uf_lastst:  .byte 0
+uf_bleft:   .word 0
 uf_asc:     .byte 0
 uf_ascq:    .byte 0
 uf_blocks:  .word 0
