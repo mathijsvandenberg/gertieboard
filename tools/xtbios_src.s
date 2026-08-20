@@ -6877,6 +6877,16 @@ uf_reqsense:
     push es
     push cs
     pop es
+    ## PRESERVE THE EVIDENCE. This routine runs BECAUSE a command failed, and
+    ## its own bulk transfer would otherwise overwrite the numbers that
+    ## describe that failure -- which it did: the read reported "18 bytes
+    ## outstanding", 18 being the length of REQUEST SENSE, not of a 512-byte
+    ## sector. A diagnostic that reports on its own cleanup is worse than none,
+    ## because it looks like a measurement of the thing that went wrong.
+    mov ax, word ptr cs:[uf_bleft]
+    mov word ptr cs:[uf_bsave], ax
+    mov al, byte ptr cs:[uf_lastst]
+    mov byte ptr cs:[uf_stsave], al
     mov word ptr cs:[uf_sense+2], 0
     mov word ptr cs:[uf_sense+12], 0
     mov si, offset uf_cdb_sense
@@ -6884,6 +6894,10 @@ uf_reqsense:
     mov cx, 18
     mov ah, 1
     call uf_once
+    mov ax, word ptr cs:[uf_bsave]
+    mov word ptr cs:[uf_bleft], ax
+    mov al, byte ptr cs:[uf_stsave]
+    mov byte ptr cs:[uf_lastst], al
     pop es
     pop si
     pop di
@@ -7854,6 +7868,8 @@ uf_rqt:     .byte 0
 uf_rstage:  .byte 0
 uf_lastst:  .byte 0
 uf_bleft:   .word 0
+uf_bsave:   .word 0
+uf_stsave:  .byte 0
 uf_asc:     .byte 0
 uf_ascq:    .byte 0
 uf_blocks:  .word 0
