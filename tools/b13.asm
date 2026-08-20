@@ -202,8 +202,12 @@ fediag:
         call puthex16
         mov  dx, msg_lst
         call puts
-        mov  al, [r_di]
+        mov  al, [r_dx+1]
         call puthex
+        mov  dx, msg_lba
+        call puts
+        mov  ax, [r_di]
+        call puthex16
         mov  dx, msg_crlf
         call puts
         ret
@@ -317,6 +321,7 @@ msg_cbi  db '  cbi ', '$'
 msg_enu  db '  enum ', '$'
 msg_blk  db '  bulk-left ', '$'
 msg_lst  db '  st ', '$'
+msg_lba  db '  lba ', '$'
 msg_nofe db 'not supported by this BIOS', 13, 10, '$'
 msg_crlf db 13, 10, '$'
 

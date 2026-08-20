@@ -6819,7 +6819,7 @@ uf_once:
     jne .ufo_wr
     mov ah, 0
     call uf_bulk
-    jc .ufo_bad
+    jc .ufo_dfail
     jmp .ufo_stat
 .ufo_wr:
     push si
@@ -6827,14 +6827,37 @@ uf_once:
     mov ah, 1
     call uf_bulk
     pop si
-    jc .ufo_bad
+    jc .ufo_dfail
 .ufo_stat:
     call uf_istat
     pop di
     pop si
     pop cx
     ret
+
+.ufo_dfail:
+    ## THE STATUS MUST BE COLLECTED EVEN WHEN THE DATA PHASE FAILED.
+    ##
+    ## In CBI the interrupt status is what ENDS a command. Walking away from a
+    ## failed data phase without reading it leaves the drive holding a status
+    ## nobody took, and it will not accept another command until someone does.
+    ## That is why a single failure cascaded into every later transfer failing,
+    ## and why the drive had to be UNPLUGGED rather than warm-rebooted: a bus
+    ## reset does not clear a CBI state machine that is waiting on the host to
+    ## finish the previous command.
+    ##
+    ## Its own result is discarded -- we already know the command failed, and
+    ## the point of the read is to let the device move on.
+    call uf_istat
+    pop di
+    pop si
+    pop cx
+    stc
+    ret
+
 .ufo_bad:
+    ## ADSC itself failed, so no command was ever accepted and there is no
+    ## status waiting to be collected.
     pop di
     pop si
     pop cx
@@ -7355,8 +7378,9 @@ uf_int13:
     mov cl, byte ptr cs:[uf_asc]
     mov ch, byte ptr cs:[uf_ascq]
     mov dl, byte ptr cs:[uf_stage]
+    mov dh, byte ptr cs:[uf_lastst]     # the status it stopped on
     mov si, word ptr cs:[uf_bleft]      # bytes the last bulk did NOT move
-    mov di, word ptr cs:[uf_lastst]     # and the status it stopped on
+    mov di, word ptr cs:[uf_lba]        # and WHICH sector was being asked for
     xor ah, ah
     clc
     retf 2
