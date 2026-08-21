@@ -4522,6 +4522,9 @@ scancode_uc:
 ##  with the buffers, it was a forward reference, and GNU as turns those into
 ##  memory operands: "cmp bx, U_BUFSZ" assembled as "cmp bx, [0x0040]", i.e. a
 ##  compare against the BDA's floppy motor counter. Same trap as HD_DRIVE.
+## A control transfer or an interrupt status answers immediately; only a
+## sector has to wait for the disk to come round. ~20 ms against ~650.
+.equ UF_NAK_FAST, 2000
 .equ UF_BUFSZ, 64            # USB floppy descriptor buffer
 .equ U_BUFSZ,  64            # size of u_buf, and the descriptor request length
 
@@ -6459,9 +6462,17 @@ uf_txn:
     ##
     ## 8000 retries at roughly 10 us each is about 80 ms, so the read gave up
     ## while the disk was still turning and reported a controller failure for
-    ## a drive that was working exactly as intended. 0 means 65536, around
-    ## 650 ms, which covers three full revolutions.
-    mov cx, 0
+    ## a drive that was working exactly as intended. 65536 is around 650 ms,
+    ## three full revolutions.
+    ##
+    ## BUT ONLY THE DATA PHASE NEEDS THAT. A control transfer, an interrupt
+    ## status and REQUEST SENSE all answer out of the drive's controller and
+    ## reply at once, so giving them 650 ms each buys nothing and costs
+    ## everything: a failing command was paying the rotational budget four or
+    ## five times over, and DOS then retried the lot. That is the spin-stop-
+    ## spin with no end to it. uf_bulk raises the budget around the data
+    ## transaction and puts it back afterwards.
+    mov cx, word ptr cs:[uf_nakbud]
 .uft_try:
     push cx
     mov al, bl
@@ -6757,6 +6768,7 @@ uf_istat:
 uf_bulk:
     push ax
     mov byte ptr cs:[uf_dup], 8
+    mov word ptr cs:[uf_nakbud], 0      # 65536: a sector has to come round
     push bx
     push cx
     push dx
@@ -6869,6 +6881,7 @@ uf_bulk:
     mov word ptr cs:[uf_bleft], cx      # bytes still owed when it gave up
     stc
 .ufb_o:
+    mov word ptr cs:[uf_nakbud], UF_NAK_FAST
     pop bp
     pop dx
     pop cx
@@ -7479,6 +7492,25 @@ uf_int13:
     retf 2
 
 .u13_reset:
+    ## AH=00 is "reset the disk system", NOT "go and find out what is in the
+    ## drive". DOS calls it between every retry, and calling uf_ready here
+    ## meant every retry sent START STOP UNIT and then polled for 3.2 seconds --
+    ## so a disk that could not be read spun up, waited, failed and span up
+    ## again, with no end in sight. That is the loop, and it was ours.
+    ##
+    ## The geometry only has to be found when it is not already known, which
+    ## is once per medium. Otherwise a single TEST UNIT READY is the whole of
+    ## what a reset owes the caller.
+    cmp word ptr cs:[uf_blocks], 0
+    je .u13_full
+    push si
+    mov si, offset uf_cdb_tur
+    xor ah, ah
+    call uf_do
+    pop si
+    jc .u13_notready
+    jmp .u13_ok
+.u13_full:
     call uf_ready
     jc .u13_notready
 .u13_ok:
@@ -8015,6 +8047,7 @@ uf_bleft:   .word 0
 uf_bsave:   .word 0
 uf_stsave:  .byte 0
 uf_dsave:   .byte 0
+uf_nakbud:  .word UF_NAK_FAST
 uf_asc:     .byte 0
 uf_ascq:    .byte 0
 uf_blocks:  .word 0
