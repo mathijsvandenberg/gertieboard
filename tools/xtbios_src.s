@@ -425,11 +425,8 @@ _post:
     push cs
     pop ds
     mov al, byte ptr cs:[uf_stage]
-    push ax
     mov si, offset m_ufd
-    call ser_msg
-    pop ax
-    call ser_hex
+    call ser_msg_al
     pop ds
     cmp byte ptr cs:[uf_pres], 0
     je .post_nouf
@@ -460,11 +457,8 @@ _post:
     mov al, es:[0xC0]
     push cs
     pop ds
-    push ax
     mov si, offset m_stage
-    call ser_msg
-    pop ax
-    call ser_hex
+    call ser_msg_al
     pop es
     pop ds
     call usb_report
@@ -6475,7 +6469,73 @@ ser_msg:
     pop ax
     ret
 
-## ser_hex -- AL as two hex digits, appended to a frame of its own
+## ser_msg_al -- DS:SI = string, AL = a byte to append as two hex digits,
+##               all in ONE frame.
+##
+## ser_hex sent its own frame, so "POST: USB0 stage=" and "FF" arrived as two
+## separate messages and the host printed them on two lines. The value was
+## divorced from the thing it was a value OF, which is most of what a
+## diagnostic is for.
+ser_msg_al:
+    push ax
+    push bx
+    push cx
+    push si
+    mov bh, al                   # the byte, safe from everything below
+    xor cx, cx
+    push si
+.sma_len:
+    lodsb
+    test al, al
+    jz .sma_got
+    inc cx
+    cmp cx, 250
+    jb .sma_len
+.sma_got:
+    pop si
+    mov bl, cl                   # text length; the frame carries text + 2
+    mov al, 0x33
+    call ser_byte
+    mov al, 0x03
+    call ser_byte
+    mov al, bl
+    add al, 2
+    call ser_byte
+    xor al, al
+    call ser_byte
+    call ser_byte
+    mov cl, bl
+    xor ch, ch
+    jcxz .sma_hex
+.sma_body:
+    lodsb
+    call ser_byte
+    loop .sma_body
+.sma_hex:
+    mov al, bh
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    call .sma_nyb
+    mov al, bh
+    call .sma_nyb
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+.sma_nyb:
+    and al, 0x0F
+    add al, 0x30
+    cmp al, 0x39
+    jbe .sma_e
+    add al, 7
+.sma_e:
+    jmp ser_byte
+
+## ser_hex -- AL as two hex digits, in a frame of its own. Kept for a value
+##            that genuinely stands alone; prefer ser_msg_al.
 ser_hex:
     push ax
     push bx
