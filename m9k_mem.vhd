@@ -53,6 +53,7 @@ ARCHITECTURE m9k OF m9k_mem IS
   SIGNAL in_bios : std_logic;
   SIGNAL in_buf  : std_logic;
   SIGNAL in_win  : std_logic;
+  SIGNAL in_win_q : std_logic := '0';   -- registered, for the READY path only
   SIGNAL midx    : integer RANGE 0 TO DEPTH-1;
   SIGNAL cpu_rd  : std_logic;
   SIGNAL cpu_wr  : std_logic;
@@ -79,8 +80,27 @@ BEGIN
   midx   <= conv_integer(ADDR(14 DOWNTO 0)) WHEN in_bios = '1'
        ELSE BIOS_DEPTH + conv_integer(ADDR(11 DOWNTO 0));
 
-  cpu_rd <= in_win AND (NOT RD);
-  cpu_wr <= in_win AND (NOT WR);
+  -- THE ADDRESS DECODE IS REGISTERED, AND THAT IS A TIMING FIX.
+  --
+  -- ownership is a 20-bit range decode, and it fed cpu_op, which feeds READY,
+  -- which is CPU_RDY -- the tightest external path on the board at 10.35 ns.
+  -- mem_hybrid's own comment describes removing exactly this decode from the
+  -- READY path; it removed it one level up and left it here, where it does
+  -- the same damage. Every build was landing between +0.1 and -0.6 ns
+  -- depending on where the fitter happened to put these gates, which is not a
+  -- margin, it is a coin toss.
+  --
+  -- Registering it is free because the address is LATCHED at ALE and holds for
+  -- the whole bus cycle, while RD/WR do not assert until the following
+  -- T-state -- roughly 100 ns later at 10 MHz against one 20 ns clock of
+  -- pipeline. So the registered copy is settled long before anything asks.
+  -- Same argument, and same wording, as busdecode's memaddr_q.
+  --
+  -- Only the READY path uses the registered copy. The RAM's own write guard
+  -- keeps the live decode, because by the time a write fires the access has
+  -- already been accepted and the two agree.
+  cpu_rd <= in_win_q AND (NOT RD);
+  cpu_wr <= in_win_q AND (NOT WR);
   cpu_op <= cpu_rd OR cpu_wr;
 
   DATAOUT <= dout WHEN cpu_rd = '1' ELSE "ZZZZZZZZ";
@@ -89,6 +109,7 @@ BEGIN
   PROCESS (CLK_RAM)
   BEGIN
     IF rising_edge(CLK_RAM) THEN
+      in_win_q <= in_win;
       IF (we = '1' AND in_win = '1') THEN
         mem(midx) <= DATAIN;
       END IF;

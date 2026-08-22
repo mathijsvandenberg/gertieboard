@@ -1,0 +1,210 @@
+[
+ {
+  "file": "01-prince-of-persia-cga-gameplay.jpg",
+  "game": "Prince of Persia",
+  "date": "2026-08-02",
+  "caption": "now prince runs! yeah! but very slow like 4 a 5 fps",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\102dc7dd-1000134715.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "02-keen4-setup-screen-cga.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-02",
+  "caption": "keen4c does not seems to get running. its placed in the tools directory, so you can read it",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\f6a46ebf-1000134600.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "03-keen4-title-screen-cga.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-04",
+  "caption": "regression. there is overlap",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\7e1f9ef5-1000135052.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "04-keen4-demo-cga.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-04",
+  "caption": "regression. there is overlap",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\5c9dd00b-20260804_2317128280944326760510320.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "05-keen4-id-software-intro-glitch.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-05",
+  "caption": "getting closer now!",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\e469a884-1000135062.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "06-keen4-demo-ega-glitch.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-05",
+  "caption": "getting closer now!",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\2467dc06-1000135067.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "07-keen4-main-menu-glitch.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-05",
+  "caption": "getting closer now!",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\d9ddaff7-1000135065.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "08-keen4-setup-screen-ega.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-05",
+  "caption": "something is not ok yet, see diagonal lines, but underneath there is keen running on ega",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\d0e1f99c-1000135058.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "09-keen4-title-screen-ega.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-05",
+  "caption": "getting closer now!",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\211d01e1-1000135063.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "10-keen4-border-village-story-a.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-06",
+  "caption": "great! i will test it. so the 16kb plane wasnt the problem at all. now keen4e has issues",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\6a2f799b-1000135246.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "11-keen4-border-village-story-b.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-06",
+  "caption": "great! i will test it. so the 16kb plane wasnt the problem at all. now keen4e has issues",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\41df1e82-1000135245.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "12-keen4-ega-gameplay-vines.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-11",
+  "caption": "I want to work on Keen4 EGA. The colors are nice and the game runs, but there is a flickering vertical glitch",
+  "source": "embedded\\ac767ffa9c59ba17.bin",
+  "px": "2000x1500"
+ },
+ {
+  "file": "13-keen4-menu-ega-vertical-glitch.jpg",
+  "game": "Commander Keen 4",
+  "date": "2026-08-11",
+  "caption": "I want to work on Keen4 EGA. The colors are nice and the game runs, but there is a flickering vertical glitch",
+  "source": "embedded\\ce8a6460aee7181a.bin",
+  "px": "2000x1500"
+ },
+ {
+  "file": "14-kq1-title-mono.jpg",
+  "game": "King's Quest I",
+  "date": "2026-07-29",
+  "caption": "kings quest 1 is running real slow and looks garbage. the music is heard but also waaaay to slow",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\791abe29-20260729_1404407980240908820093207.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "15-kq1-title-glitch-a.jpg",
+  "game": "King's Quest I",
+  "date": "2026-07-30",
+  "caption": "yes the first scrolling text is fixed noe, but there are still modes missing. besides that, i will give you kq1.com, hold on",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\bc6d28a3-1000134014.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "16-kq1-title-glitch-b.jpg",
+  "game": "King's Quest I",
+  "date": "2026-07-30",
+  "caption": "yes the first scrolling text is fixed noe, but there are still modes missing. besides that, i will give you kq1.com, hold on",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\44c97cdc-1000134015.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "17-kq1-credits-screen.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-06",
+  "caption": "still corruption",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\1922ff56-1000135225.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "18-kq1-castle-ega-a.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-05",
+  "caption": "kingsquest runs but also some weird garbage in the screen. i noticed the same in the cga version yesterday. but almost there! looks promising",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\7eb137ae-1000135069.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "19-kq1-castle-ega-b.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-05",
+  "caption": "kingsquest runs but also some weird garbage in the screen. i noticed the same in the cga version yesterday. but almost there! looks promising",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\3a9feacf-1000135068.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "20-kq1-castle-ega-c.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-06",
+  "caption": "yeah there is some distortion",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\c319bca9-1000135195.jpg",
+  "px": "3840x2160"
+ },
+ {
+  "file": "21-kq1-castle-text-window-blank.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-06",
+  "caption": "There is no Score or menu/title bar readable. The text overlays are non readable, just a white box with a red border",
+  "source": "embedded\\126acc4a61217d16.bin",
+  "px": "2000x1500"
+ },
+ {
+  "file": "22-kq1-castle-ega-d.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-05",
+  "caption": "black on white (the score, etc) is not working on the gertieboard",
+  "source": "embedded\\217efeabbc42f4a2.bin",
+  "px": "2000x1500"
+ },
+ {
+  "file": "23-kq1-text-window-blank.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-05",
+  "caption": "kingsquest runs but also some weird garbage in the screen. i noticed the same in the cga version yesterday. but almost there! looks promising",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\4084b610-1000135070.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "24-kq1-castle-mono-glitch.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-05",
+  "caption": "kingsquest runs but also some weird garbage in the screen. i noticed the same in the cga version yesterday. but almost there! looks promising",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\24c82645-1000134956.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "25-kq1-restore-game-dialog.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-05",
+  "caption": "much better. text is visible. only non selected text is rendered as Ç which is odd",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\e9ae6c77-30fc-44bb-a6bd-c6a5ca1c0e8a\\38161d29-1000135071.jpg",
+  "px": "4032x3024"
+ },
+ {
+  "file": "26-kq1-interior-save-game.jpg",
+  "game": "King's Quest I",
+  "date": "2026-08-07",
+  "caption": "still not good. some text is visible like it was before, but others are empty",
+  "source": "C:\\Users\\Mathijs\\.claude\\uploads\\244f84be-f144-4c21-888b-4a1afd74b6aa\\4fd80bb2-20260807_0908235109283484510226062.jpg",
+  "px": "4032x3024"
+ }
+]

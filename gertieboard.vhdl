@@ -943,7 +943,23 @@ BEGIN
   -- lock time. The hazard was always here; the reconfiguration made the window
   -- wide enough to land in. Proved by an A/B of two builds three minutes apart:
   -- cpuclk removed boots from flash, cpuclk present stops on 02.
-  n_reset <= RESET AND NOT n_cad_rst AND n_pll_locked;
+  -- Was: n_reset <= RESET AND NOT n_cad_rst AND n_pll_locked;
+  --
+  -- That put the raw button pin into a combinational term sampled by TWO
+  -- clock domains -- clkgen on the CPU clock, and n_mem_rst on c3 -- with no
+  -- synchroniser between the contact and either of them. A mechanical button
+  -- bounces for milliseconds, so one press is tens of edges, and a transition
+  -- near a clock edge can leave the two domains disagreeing about whether a
+  -- reset happened at all. The CPU restarts and the memory controller does
+  -- not, or the reverse. See resetsync.vhd.
+  resetsync1 : ENTITY work.resetsync
+    PORT MAP (
+      CLK      => n_c3,
+      LOCKED   => n_pll_locked,
+      BTN_N    => RESET,
+      CAD_RST  => n_cad_rst,
+      RESET_N  => n_reset
+    );
   -- n_reset is active low; the memory controller wants active high, and must
   -- NOT be gated by clkgen's RST_OUT (see the mem_hybrid instantiation).
   n_mem_rst <= NOT n_reset;

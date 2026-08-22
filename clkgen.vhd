@@ -36,7 +36,16 @@ SIGNAL CNT : INTEGER RANGE 0 TO 16 := 0;
 -- this runs. Deliberately generous rather than minimal -- if it turns out to
 -- be the fix, the interesting number is which value stops working, and that
 -- is a later experiment.
-CONSTANT SETTLE_N : INTEGER := 8192;
+-- COUNTED IN BUS CLOCKS, WHICH ARE NOT A FIXED LENGTH. 8192 was about 1 ms at
+-- the 8.333 MHz this board used to boot at; the default is 10 MHz now, which
+-- made the same constant 819 us without anything in the source changing. The
+-- .jic path is the one that cannot afford it -- a cold start from
+-- configuration flash finds memory genuinely uninitialised, where a .sof
+-- reload finds it already up from the previous run, which is exactly why
+-- JTAG has never reproduced these faults.
+--
+-- 16384 is 1.6 ms at 10 MHz and 3.3 ms at 5. Reset happens once.
+CONSTANT SETTLE_N : INTEGER := 16384;
 SIGNAL SETTLE : INTEGER RANGE 0 TO SETTLE_N := 0;
 
 -- MEM_READY crosses from c3 (50 MHz) into this c0 domain. It is a level that
