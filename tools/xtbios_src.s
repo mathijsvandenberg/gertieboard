@@ -59,6 +59,11 @@ _post:
 
     call hw_quiesce         # known device state before anything reads one
 
+    push cs
+    pop ds
+    mov si, offset m_boot
+    call ser_msg
+
 ## ---- video up + draw banner with INTERRUPTS OFF (first light) -------
 ##      done before any PIC/PIT/sti so the screen appears even if the
 ##      interrupt controller or timer is misbehaving.
@@ -397,6 +402,12 @@ _post:
 ##  bounded ~2.5 s only when nothing is listening. The result is recorded so
 ##  INT 19h can skip A: instead of paying that wait a second time.
     call fd_detect
+    push ds
+    push cs
+    pop ds
+    mov si, offset m_fda
+    call ser_msg
+    pop ds
 
 ## ---- fixed disk: identify the SPI flash and report its size ---------
     mov ax, BDA
@@ -410,6 +421,16 @@ _post:
 ##  Failure is silent: uf_pres stays 0, B: remains the flash, and the machine
 ##  behaves exactly as it did before this code existed.
     call uf_enum
+    push ds
+    push cs
+    pop ds
+    mov al, byte ptr cs:[uf_stage]
+    push ax
+    mov si, offset m_ufd
+    call ser_msg
+    pop ax
+    call ser_hex
+    pop ds
     cmp byte ptr cs:[uf_pres], 0
     je .post_nouf
     call uf_ready
@@ -423,7 +444,29 @@ _post:
 ##  answers "invalid drive" for DL >= 0x80, INT 19h skips C: in the boot order,
 ##  and the machine behaves exactly like one with no fixed disk. BDA 0xC0 keeps
 ##  the stage it reached so USBHD.COM can say WHERE it stopped.
+    push ds
+    push cs
+    pop ds
+    mov si, offset m_usb
+    call ser_msg
+    pop ds
     call u_enum
+    ## the stage byte, which is the whole point: it says WHERE it stopped, and
+    ## on a board that fails here there is nothing else that will say so
+    push ds
+    push es
+    mov ax, BDA
+    mov es, ax
+    mov al, es:[0xC0]
+    push cs
+    pop ds
+    push ax
+    mov si, offset m_stage
+    call ser_msg
+    pop ax
+    call ser_hex
+    pop es
+    pop ds
     call usb_report
     mov ax, BDA
     mov es, ax
@@ -6342,6 +6385,130 @@ u_delay:
 ##  it lands below 0xEF00 or collides with the font at 0xFA6E.
 ## =====================================================================
 
+
+## =====================================================================
+##  ser_* -- narrate POST down the host link.
+##
+##  The screen is useless for this. Video is not up for the first part of
+##  POST, and a board that HANGS says nothing at all -- which is precisely
+##  the case that needs explaining, and precisely what a 7-segment code
+##  cannot do: E4 says where it stopped and nothing about why.
+##
+##  The link is the FDC's, already framed and already running at 1 Mbaud.
+##  One more frame type:
+##
+##      0x33 0x03 <len> 0 0   then <len> bytes
+##
+##  Bytes go out through 0x3F6 and the FDC only drains them from ST_IDLE, so
+##  a message cannot land inside a sector payload.
+##
+##  IT IS SAFE WITH NOTHING LISTENING. The bytes go down a wire; if no host
+##  is there they are lost and POST carries on. There is no handshake to
+##  hang on, deliberately -- a debug channel that can stall the boot it is
+##  reporting on is worse than none, and this machine has already been
+##  through one of those.
+## =====================================================================
+.equ FDC_DBG, 0x3F6
+
+## ser_byte -- AL out to the host link, waiting for room first.
+ser_byte:
+    push ax
+    push cx
+    push dx
+    mov ah, al
+    mov dx, FDC_DBG
+    mov cx, 0                    # bounded: never wait forever for a wire
+.sb_wait:
+    in al, dx
+    test al, 0x80
+    jz .sb_go
+    loop .sb_wait
+    jmp .sb_out                  # no room and no host: drop it and move on
+.sb_go:
+    mov al, ah
+    out dx, al
+.sb_out:
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+## ser_msg -- DS:SI = zero-terminated string. Emits a whole debug frame.
+ser_msg:
+    push ax
+    push bx
+    push cx
+    push si
+    ## length first: the frame header carries it, so the host knows how much
+    ## to read and stays in sync even through a message it does not expect
+    xor cx, cx
+    push si
+.sm_len:
+    lodsb
+    test al, al
+    jz .sm_got
+    inc cx
+    cmp cx, 250
+    jb .sm_len
+.sm_got:
+    pop si
+    mov bx, cx
+    mov al, 0x33
+    call ser_byte
+    mov al, 0x03
+    call ser_byte
+    mov al, bl
+    call ser_byte
+    xor al, al
+    call ser_byte
+    call ser_byte
+    mov cx, bx
+    jcxz .sm_done
+.sm_body:
+    lodsb
+    call ser_byte
+    loop .sm_body
+.sm_done:
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+## ser_hex -- AL as two hex digits, appended to a frame of its own
+ser_hex:
+    push ax
+    push bx
+    mov bl, al
+    mov al, 0x33
+    call ser_byte
+    mov al, 0x03
+    call ser_byte
+    mov al, 2
+    call ser_byte
+    xor al, al
+    call ser_byte
+    call ser_byte
+    mov al, bl
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    call .sh_nyb
+    mov al, bl
+    call .sh_nyb
+    pop bx
+    pop ax
+    ret
+.sh_nyb:
+    and al, 0x0F
+    add al, 0x30
+    cmp al, 0x39
+    jbe .sh_e
+    add al, 7
+.sh_e:
+    jmp ser_byte
+
 ## =====================================================================
 ##  hw_quiesce -- put the peripherals into a known state, first thing.
 ##
@@ -7952,6 +8119,11 @@ b_usb_st:  .asciz "  txseq/flags "
 b_usb_old: .asciz "FPGA image is older than this BIOS - reprogram it"
 b_fd2:     .asciz "Diskette Drive B:  : "   # same 21 columns, so the two lines align
 b_usbfd:   .asciz "  USB floppy"
+m_boot:    .asciz "POST: quiesced, video next"
+m_fda:     .asciz "POST: drive A: probed"
+m_usb:     .asciz "POST: enumerating USB0 (fixed disk)"
+m_stage:   .asciz "POST: USB0 stage="
+m_ufd:     .asciz "POST: USB1 floppy stage="
 b_hd_ready:.asciz "Ready"
 b_hd_no:   .asciz "NOT READY"
 b_hd_kb:   .asciz " KB"

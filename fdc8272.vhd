@@ -15,7 +15,19 @@
 --   READ :  FPGA -> host : 0x33 0x01 C H R          ; host -> FPGA : 512 bytes
 --   WRITE:  FPGA -> host : 0x33 0x02 C H R <512>     ; host -> FPGA : 0x06
 --
--- I/O map: 0x3F2 DOR(w) 0x3F4 MSR(r) 0x3F5 DATA(rw) 0x3F7 DIR(r)/CCR(w).
+-- I/O map: 0x3F2 DOR(w) 0x3F4 MSR(r) 0x3F5 DATA(rw) 0x3F7 DIR(r)/CCR(w),
+--          0x3F6 DEBUG(w: byte to the host link, r: bit 7 busy).
+--
+-- THE DEBUG CHANNEL. POST cannot say anything through the screen until video
+-- is up, and cannot say anything at all if it hangs before that -- which is
+-- exactly when a board that boots differently from its twin needs to be
+-- heard. The host link already exists and is already framed, so the debug
+-- channel is one more frame type on it:
+--
+--   DEBUG:  FPGA -> host : 0x33 0x03 <len> 0 0  followed by <len> bytes
+--
+-- Bytes written to 0x3F6 are queued one at a time and sent ONLY from ST_IDLE,
+-- so a message can never land inside a sector payload.
 -- Commands: Specify(03) SenseDrive(04) Write(05) Read(06) Recalibrate(07)
 --           SenseInterrupt(08) ReadID(0A) Seek(0F); others -> ST0=0x80.
 --------------------------------------------------------------------------------
@@ -147,6 +159,14 @@ ARCHITECTURE behavior OF fdc8272 IS
   -- Register decode + bus edge detect
   ----------------------------------------------------------------------------
   SIGNAL sel_dor, sel_msr, sel_data, sel_dir, sel_ccr : std_logic;
+  -- ---- CPU debug byte, sent down the host link between sector frames ------
+  -- POST has nothing to say through until video is up, and nothing at all to
+  -- say if it hangs before that. The host link is already there and already
+  -- framed, so one more frame type costs a port and a byte of state.
+  SIGNAL dbg_byte : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL dbg_pend : std_logic := '0';
+  SIGNAL sel_dbg  : std_logic;
+
   SIGNAL rd_prev, wr_prev : std_logic := '1';
   SIGNAL rd_done, wr_done : std_logic;
 
@@ -206,6 +226,9 @@ BEGIN
   sel_msr  <= '1' WHEN ADDR = x"03F4" ELSE '0';
   sel_data <= '1' WHEN ADDR = x"03F5" ELSE '0';
   sel_dir  <= '1' WHEN ADDR = x"03F7" ELSE '0';
+  -- 0x3F6 is unused by the 8272 (a real PC leaves it to the AT task file), so
+  -- it is free for the debug channel that shares this UART.
+  sel_dbg  <= '1' WHEN ADDR = x"03F6" ELSE '0';
   sel_ccr  <= '1' WHEN ADDR = x"03F7" ELSE '0';
 
   rd_done <= '1' WHEN (rd_prev = '0' AND RD = '1') ELSE '0';
@@ -229,9 +252,16 @@ BEGIN
   ----------------------------------------------------------------------------
   -- Read data path
   ----------------------------------------------------------------------------
-  PROCESS (sel_msr, sel_data, sel_dir, RD, msr, st, buf_dout, res, ridx)
+  PROCESS (sel_msr, sel_data, sel_dir, sel_dbg, RD, msr, st, buf_dout, res,
+           ridx, dbg_pend, tx_busy)
   BEGIN
-    IF (RD = '0' AND sel_msr = '1') THEN
+    IF (RD = '0' AND sel_dbg = '1') THEN
+      -- bit 7 = busy. The BIOS polls this before every byte; without it the
+      -- next write overwrites one still waiting and the message loses
+      -- characters, which is worse than no message because it looks like
+      -- corruption rather than an unfinished send.
+      DATAOUT <= (dbg_pend OR tx_busy) & "0000000";
+    ELSIF (RD = '0' AND sel_msr = '1') THEN
       DATAOUT <= msr;
     ELSIF (RD = '0' AND sel_data = '1') THEN
       IF st = ST_RESULT THEN
@@ -384,7 +414,7 @@ BEGIN
     IF rising_edge(CLK) THEN
       IF RESET = '1' THEN
         st <= ST_IDLE; dor <= (OTHERS => '0');
-        rd_prev <= '1'; wr_prev <= '1';
+        rd_prev <= '1'; wr_prev <= '1'; dbg_pend <= '0';
         irq_int <= '0'; seek_flag <= '0'; rst_poll <= 0; dor_rst_prev <= '0';
         pcn <= (OTHERS => '0'); buf_idx <= 0; u_cnt <= 0;
         tx_start <= '0';
@@ -400,6 +430,11 @@ BEGIN
         --------------------------------------------------------------------
         -- DOR writes: motor/drive/reset/irq-enable. Reset edge -> poll ints.
         --------------------------------------------------------------------
+        IF (wr_done = '1' AND sel_dbg = '1') THEN
+          dbg_byte <= DATAIN;
+          dbg_pend <= '1';
+        END IF;
+
         IF (wr_done = '1' AND sel_dor = '1') THEN
           dor <= DATAIN;
           IF (dor_rst_prev = '0' AND DATAIN(2) = '1') THEN
@@ -418,7 +453,17 @@ BEGIN
 
           ----------------------------------------------------------------
           WHEN ST_IDLE =>
-            IF (wr_done = '1' AND sel_data = '1') THEN
+            -- Drain a debug byte, but ONLY here. The command engine owns
+            -- tx_start and tx_data, and a debug byte injected mid-sector
+            -- would land inside a 512-byte payload and desynchronise the
+            -- host -- turning the one channel that explains failures into a
+            -- cause of them. ST_IDLE is the only state where the link is
+            -- guaranteed to be between frames.
+            IF (dbg_pend = '1' AND tx_busy = '0' AND tx_start = '0') THEN
+              tx_data  <= dbg_byte;
+              tx_start <= '1';
+              dbg_pend <= '0';
+            ELSIF (wr_done = '1' AND sel_data = '1') THEN
               cmd  <= DATAIN;
               pidx <= 0;
               op   := DATAIN(4 DOWNTO 0);
