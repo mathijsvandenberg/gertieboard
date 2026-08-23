@@ -1285,11 +1285,50 @@ ufi_sense:
 ;
 ;  So the drive was ready and saying so, and it read as a fault.
 ; ============================================================================
+; unhalt -- CLEAR_FEATURE(ENDPOINT_HALT) on the endpoint in AL.
+;
+; A stalled endpoint is LATCHED. Until the host clears it every transfer fails
+; identically, including the REQUEST SENSE meant to explain the first failure
+; -- which is exactly why a bad sector reported 00/00/00 and then killed the
+; drive until it was unplugged.
+unhalt:
+        push ax
+        push cx
+        push si
+        mov  [sp_clrhlt+4], al
+        mov  si, sp_clrhlt
+        xor  cx, cx
+        call ctl_read
+        pop  si
+        pop  cx
+        pop  ax
+        ret
+
+; clear_stall -- both bulk endpoints, and our toggles with them. CLEAR_FEATURE
+;                resets the DEVICE's toggle to DATA0, so ours must follow or
+;                every later packet is discarded as a duplicate.
+clear_stall:
+        push ax
+        mov  al, [ep_in]
+        call unhalt
+        mov  al, [ep_out]
+        call unhalt
+        mov  byte [tog_in], 0
+        mov  byte [tog_out], 0
+        mov  dx, msg_unhalt
+        call puts
+        pop  ax
+        ret
+
 ufi_in_ua:
         mov  word [uatries], 8
 .ua_l:
         call ufi_in
         jnc  .ua_ok
+        test byte [fail_st], 0x08       ; STALL: clear it before asking why
+        jz   .ua_sense
+        call clear_stall
+.ua_sense:
         call ufi_sense
         mov  al, [senbuf+2]
         and  al, 0x0F
@@ -1618,6 +1657,10 @@ ufi_out_ua:
 .uo_l:
         call ufi_out
         jnc  .uo_ok
+        test byte [fail_st], 0x08
+        jz   .uo_sense
+        call clear_stall
+.uo_sense:
         call ufi_sense
         mov  al, [senbuf+2]
         and  al, 0x0F
@@ -2002,6 +2045,9 @@ sp_setaddr   db 0x00, 5, 1, 0, 0, 0, 0, 0
 sp_getcfg9   db 0x80, 6, 0x00, DT_CONFIG, 0, 0, 9, 0
 sp_getcfgn   db 0x80, 6, 0x00, DT_CONFIG, 0, 0, 0, 0
 sp_setcfg    db 0x00, 9, 1, 0, 0, 0, 0, 0
+; CLEAR_FEATURE to an ENDPOINT: recipient 02, request 01, ENDPOINT_HALT 0,
+; wIndex patched with the endpoint address.
+sp_clrhlt    db 0x02, 0x01, 0, 0, 0, 0, 0, 0
 ; ADSC -- the CBI command wrapper. wIndex (offset 4) is patched with the
 ; interface number; wLength is 12, the UFI command block length.
 sp_adsc      db 0x21, 0x00, 0, 0, 0, 0, 12, 0
@@ -2043,6 +2089,7 @@ msg_wtwbad   db '  write refused', 13, 10, '$'
 msg_wtrbad   db '  read-back refused', 13, 10, '$'
 msg_wtcmp    db '  read back but CONTENTS DIFFER', 13, 10, '$'
 msg_wprot    db '  diskette is WRITE PROTECTED (27/00)', 13, 10, '$'
+msg_unhalt   db '  [endpoint was stalled, halt cleared]', 13, 10, '$'
 msg_uaretry  db '  [unit attention cleared, reissuing]', 13, 10, '$'
 msg_rdretry  db '  read attempt failed: ', '$'
 msg_soft3    db '  [ctl-status stalled, continued anyway]', '$'

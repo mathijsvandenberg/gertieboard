@@ -7440,6 +7440,33 @@ uf_do:
     call uf_once
     pop bp
     jnc .ufd_ok
+
+    ## A STALLED ENDPOINT STAYS STALLED UNTIL THE HOST CLEARS IT.
+    ##
+    ## When the drive cannot serve a command it HALTS the bulk endpoint. That
+    ## is a latched condition, not a one-off refusal: every transfer after it
+    ## fails the same way, INCLUDING the REQUEST SENSE meant to find out why,
+    ## which is why a failed read reported sense 00/00/00 and then took the
+    ## whole drive down until it was physically unplugged.
+    ##
+    ## So one bad sector was killing the device. Clearing the halt is the
+    ## standard recovery and it is what makes the difference between "this
+    ## sector is unreadable" and "this drive has stopped working".
+    ##
+    ## CLEAR_FEATURE also resets the DEVICE's data toggle to DATA0, so ours
+    ## have to go back to zero with it or every later packet is discarded as a
+    ## duplicate.
+    test byte ptr cs:[uf_lastst], 0x08      # STALL
+    jz .ufd_sense
+    push ax
+    mov al, byte ptr cs:[uf_epin]
+    call uf_unhalt
+    mov al, byte ptr cs:[uf_epout]
+    call uf_unhalt
+    pop ax
+    mov byte ptr cs:[uf_tin], 0
+    mov byte ptr cs:[uf_tout], 0
+.ufd_sense:
     call uf_reqsense
     mov al, byte ptr cs:[uf_sense+2]
     and al, 0x0F
