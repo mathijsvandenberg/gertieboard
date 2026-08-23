@@ -131,7 +131,24 @@ ENTITY opl2_lite IS
         --   T2_DIV     = CLK_HZ / 3125    timer 2, 320 us per tick
         SAMPLE_DIV : IN integer RANGE 1 TO 1023 := CLK_HZ / 49716;
         T1_DIV     : IN integer RANGE 1 TO 8191 := CLK_HZ / 12500;
-        T2_DIV     : IN integer RANGE 1 TO 8191 := CLK_HZ / 3125);
+        T2_DIV     : IN integer RANGE 1 TO 8191 := CLK_HZ / 3125;
+
+        -- ---- PCM tap, for USB audio -----------------------------------------
+        -- A SECOND rendering of the same nine channels, at exactly 48 kHz, for
+        -- streaming to a USB Audio Class device. The PWM buzzer above is
+        -- untouched by all of this and keeps working with CLK48 tied low.
+        --
+        -- Why a second bank of phase accumulators instead of resampling the
+        -- one that already exists: the existing one runs on CLK, the CPU bus
+        -- clock, which is 5 to 10 MHz and CHANGES AT RUN TIME (cpuclk's speed
+        -- ladder). Nothing derived from it can hold a stable sample rate, and
+        -- a USB frame is a hard 1 ms. Running this bank from CLK48 makes the
+        -- sample clock and the frame clock the same crystal, so 48 samples per
+        -- frame is exact forever -- no drift, no rate feedback, no FIFO slowly
+        -- filling over an evening. It costs nine 20-bit accumulators.
+        CLK48      : IN  std_logic := '0';
+        PCM        : OUT std_logic_vector(15 DOWNTO 0);  -- signed, CLK48 domain
+        PCM_STB    : OUT std_logic);                     -- one CLK48 tick, 48 kHz
 END opl2_lite;
 
 ARCHITECTURE behavior OF opl2_lite IS
@@ -144,6 +161,18 @@ ARCHITECTURE behavior OF opl2_lite IS
   SIGNAL blk    : blk_t   := (OTHERS => (OTHERS => '0'));
   SIGNAL keyon  : std_logic_vector(8 DOWNTO 0) := (OTHERS => '0');
   SIGNAL phase  : phase_t := (OTHERS => (OTHERS => '0'));
+
+  -- ---- PCM tap (CLK48 domain) ------------------------------------------------
+  CONSTANT PCM_DIV  : integer := 1000;   -- 48 MHz / 48 kHz, exact
+  -- Per-channel amplitude. Nine channels at +/-3000 peak at +/-27000, which
+  -- leaves headroom inside a 16-bit sample without needing a saturating adder
+  -- -- all nine can be high at once and it still cannot wrap. Fine gain is a
+  -- shift in usb_audio, where it can be changed without a rebuild.
+  CONSTANT PCM_AMPL : integer := 3000;
+  SIGNAL   pcm_pre  : integer RANGE 0 TO PCM_DIV-1 := 0;
+  SIGNAL   phase48  : phase_t := (OTHERS => (OTHERS => '0'));
+  SIGNAL   pcm_reg  : signed(15 DOWNTO 0) := (OTHERS => '0');
+  SIGNAL   pcm_st   : std_logic := '0';
 
   -- The address latch written through 0x388; data at 0x389 lands in this reg.
   SIGNAL reg_idx : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
@@ -333,5 +362,70 @@ BEGIN
   -- PWM the 0..9 mix. Silence is mix = 0, which holds SND at '0' and leaves
   -- the top-level OR with the PC speaker completely transparent.
   SND <= '1' WHEN pwm_cnt < mix ELSE '0';
+
+  ------------------------------------------------------------------------------
+  -- PCM tap: the same nine square waves, rendered at exactly 48 kHz for USB.
+  --
+  -- PITCH. A channel's output frequency is incr / 2^20 * Fs, so rendering at
+  -- 48000 instead of the OPL2's native 49716 would play everything 3.45% flat
+  -- -- better than half a semitone, which anyone would hear. The increment is
+  -- therefore scaled by 49716/48000 = 1.035750 on the way in.
+  --
+  -- That scaling is four shift-adds, not a multiplier:
+  --     1 + 1/32 + 1/256 + 1/2048 + 1/8192 = 1.0357666
+  -- which is 0.0016% sharp, about 0.0003 of a semitone. There are 132 unused
+  -- 9-bit multipliers on this part and nine of them would have done it exactly,
+  -- but they are worth more to a future SBC encoder than to an error three
+  -- orders of magnitude below audible.
+  --
+  -- CLOCK CROSSING. fnum, blk and keyon are written in the CLK domain and read
+  -- here, with no synchroniser. That is deliberate and it is safe for a reason
+  -- specific to this circuit: these values feed an INCREMENT, and the phase
+  -- accumulator integrates it. A bit caught mid-update perturbs one sample's
+  -- increment by a few parts in 2^20 and the phase carries on from wherever it
+  -- got to -- there is no discontinuity in the output, so no click. It is the
+  -- one place in this design where a metastable read cannot produce an audible
+  -- or logical fault, and paying for a 126-bit handshake would buy nothing.
+  -- (fnum is already written in two halves, 0xA0 then 0xB0, so even a
+  -- single-domain reader sees torn values during a note change.)
+  ------------------------------------------------------------------------------
+  PCMGEN : PROCESS (CLK48)
+    VARIABLE inc : unsigned(19 DOWNTO 0);
+    VARIABLE acc : integer RANGE -32768 TO 32767;
+  BEGIN
+    IF rising_edge(CLK48) THEN
+      pcm_st <= '0';
+      IF pcm_pre = PCM_DIV-1 THEN
+        pcm_pre <= 0;
+        acc := 0;
+        FOR i IN 0 TO 8 LOOP
+          IF keyon(i) = '1' THEN
+            inc := shift_left(resize(fnum(i), 20), to_integer(blk(i)));
+            phase48(i) <= phase48(i) + inc
+                          + shift_right(inc,  5) + shift_right(inc,  8)
+                          + shift_right(inc, 11) + shift_right(inc, 13);
+            -- Bipolar, unlike the PWM path: a DAC wants a signal centred on
+            -- zero, and summing +/-A per channel gives that for free. The
+            -- buzzer counts only the HIGH channels because PWM has no negative
+            -- half to work with.
+            IF phase48(i)(19) = '1' THEN
+              acc := acc + PCM_AMPL;
+            ELSE
+              acc := acc - PCM_AMPL;
+            END IF;
+          ELSE
+            phase48(i) <= (OTHERS => '0');
+          END IF;
+        END LOOP;
+        pcm_reg <= to_signed(acc, 16);
+        pcm_st  <= '1';
+      ELSE
+        pcm_pre <= pcm_pre + 1;
+      END IF;
+    END IF;
+  END PROCESS;
+
+  PCM     <= std_logic_vector(pcm_reg);
+  PCM_STB <= pcm_st;
 
 END behavior;

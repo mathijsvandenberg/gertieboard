@@ -839,3 +839,151 @@ Two rules, both learned the hard way:
 - [Fixed disk](fixed-disk.md), [BIOS](bios.md) — what they test
 - [Status and roadmap](status.md) — what is verified working
 - [Gotchas](gotchas.md)
+
+## USBAUDIO
+
+`USBAUDIO [0|1] [Gn] [S]` -- point the AdLib output at a **USB Audio Class**
+device on the hybrid port. `Gn` sets gain as a right shift (0 loudest, default
+1); `S` stops streaming.
+
+**It is not a TSR.** It enumerates the device, picks an alternate setting, tells
+the hardware where to send audio, and exits. Sound keeps playing afterwards, and
+keeps playing inside a game that has taken over the machine -- because the CPU
+was never in the audio path. See [usb_audio](modules/usb_audio.md).
+
+What it has to get right, and what each failure looks like:
+
+| Step | If it is skipped |
+|---|---|
+| Clear `CTRL` before reading `LINE` | a leftover low-speed bit from another tool makes a full-speed device read as low speed, and it is rejected |
+| `SET_INTERFACE` to a **non-zero** alternate setting | everything enumerates perfectly and there is **silence** -- see below |
+| `SET_CUR` sampling frequency | plays at whatever rate the device defaulted to, so the pitch is wrong |
+| Walk the descriptor by `bLength` | a parser assuming a fixed layout works on one dongle and no others |
+
+> **Alternate setting 0 has no endpoint.** The class *requires* it: alt 0 is the
+> idle setting, so an audio device nobody is using costs the bus no bandwidth.
+> Leave the interface there and the device is configured, the descriptors are
+> right, nothing reports an error anywhere, and nothing plays. This is the most
+> common way to get a UAC device that enumerates beautifully and is silent.
+
+It requires 2 channels, 16 bits, 48000 Hz and a packet of at least 192 bytes,
+and reports what it found. A low-speed device is refused with a reason: USB
+Audio Class is full speed only, and 1.5 Mbps could not carry the data anyway.
+
+### Devices that are not USB Audio Class
+
+`USBAUDIO F` accepts a **vendor-specific** (class `FF`) interface, inferring the
+format from the packet size instead of from a descriptor. A 1 ms frame means an
+isochronous OUT endpoint's `wMaxPacketSize` *is* the byte rate per millisecond,
+and 192 has one sensible reading: 48 samples of 16-bit stereo.
+
+The Line 6 TonePort UX1 is the case this was written for. It reports class
+`FF/00/00` on all five alternate settings and carries no class descriptors at
+all, but its packet sizes read straight off:
+
+| alt | OUT max | inferred |
+|---|---|---|
+| 1 | 192 | 48 kHz, 16-bit stereo |
+| 2 | 180 | 44.1 kHz, 16-bit |
+| 3 | 288 | 48 kHz, 24-bit |
+| 4 | 270 | 44.1 kHz, 24-bit |
+
+So `F` prefers an endpoint of **exactly 192** and takes it at once. A larger one
+is a fallback and a genuine guess — 288 would be 24-bit, and 16-bit samples sent
+into it come out as noise — which is why the mode is behind a flag and warns.
+
+It may still be silent. A vendor device may require an initialisation sequence
+before it emits anything; the UX1's lives in Line 6's protocol, which Linux
+implements in `sound/usb/line6/toneport.c`. `F` costs one `SET_INTERFACE` to
+find out, which is worth trying before writing any of that.
+
+## USBFDD
+
+`USBFDD [0|1] [Snnn]` -- read a real diskette through a USB floppy drive.
+`Snnn` dumps logical sector nnn instead of 0.
+
+Verified on hardware with a **TEAC FD-05PUB** (`0644:0000`, class `08/04/00`)
+reading sector 0 of a 1.44MB diskette, boot signature `AA55` intact.
+
+This is the prototype for BIOS drive B:. It is a DOS tool first because a wrong
+guess costs a re-assemble rather than a BIOS reflash and a power cycle.
+
+### The transport is not the one the BIOS already has
+
+The fixed disk on USB0 uses Bulk-Only Transport. A USB floppy is
+**UFI over CBI**, which is the same command set under a different wrapper:
+
+| phase | Bulk-Only | CBI |
+|---|---|---|
+| command | 31-byte CBW on bulk OUT | **control transfer** — `0x21`/`0x00` (ADSC), wIndex = *interface* |
+| data | bulk | bulk — unchanged |
+| status | 13-byte CSW on bulk IN | **2 bytes on an interrupt IN endpoint** |
+
+For UFI those two status bytes are ASC/ASCQ — the same codes `REQUEST SENSE`
+gives. Reading them the generic CBI way (a type byte plus a two-bit code) turns
+a clear "medium not present" into gibberish.
+
+### Removable media has a state machine, and it must be obeyed
+
+Everything that went wrong bringing this up was one rule, applied in one place
+and not the others:
+
+> A **UNIT ATTENTION** (sense key 6) *aborts the command in progress*, is
+> reported exactly once, is cleared by reading the sense, and the command must
+> then be **reissued**.
+
+The observed sequence on every fresh run is:
+
+| stage | sense | meaning |
+|---|---|---|
+| after bus reset | `06/29/00` | power on / reset occurred |
+| before spin-up | `02/3A/00` | no medium — **true at the time** |
+| after spin-up | `06/28/00` | **medium found**, not-ready→ready |
+
+`28/00` is the drive announcing it has the disk. Retrying a read without
+clearing it means every attempt is aborted by the same pending notice, which
+looks exactly like a drive that cannot read. `ufi_in_ua` / `ufi_nodata_ua`
+wrap the rule so it applies to every media command, not just `TEST UNIT READY`.
+
+A floppy is also a mechanism: it needs `START STOP UNIT` and seconds of
+polling, not two commands forty milliseconds apart.
+
+### Diagnostics, because guessing cost several rounds
+
+Every failure prints the **phase**, the raw `STATUS`, and `RXPID`:
+
+| phase | meaning |
+|---|---|
+| 1 | ADSC setup | 
+| 2 | the 12-byte command block |
+| 3 | control status stage — **tolerated**, see below |
+| 4 | data | 
+| 5 | no interrupt status arrived |
+| 6 | status shorter than 2 bytes |
+| 7 | transport fine, **device refused** with a real ASC/ASCQ |
+
+`RXPID` says what came off the wire rather than how the status bits classified
+it: `1E` is STALL, `5A` is NAK, `4B` is DATA1. A NAK means the device is
+healthy and asking for time — the opposite of what "FAILED" suggests.
+
+> **A stalled control status stage is not a dead command.** This drive stalls
+> phase 3 while still executing the command — it spins up and steps the head.
+> Abandoning there means never issuing the data phase or reading the interrupt
+> status, so every command looks identically dead. It is recorded and stepped
+> over.
+
+### Two things worth knowing about EP0
+
+`bMaxPacketSize0` is **8** on this drive, so the 12-byte command block goes out
+as 8 bytes then 4, toggling DATA1 then DATA0. One 12-byte packet is a protocol
+violation and earns a STALL — the same EP0 assumption the BIOS had to be fixed
+for, in a place that had not been swept.
+
+`READ(10)` takes LBA and transfer length **big-endian**, backwards from
+everything else an 8086 touches.
+
+### Not done yet
+
+Writes, media-change detection (`INT 13h` AH=16h), and the move into the BIOS
+as drive B:, overriding the SPI flash when a drive is present. Media change is
+not optional: without it a disk swap writes a stale FAT onto the new diskette.

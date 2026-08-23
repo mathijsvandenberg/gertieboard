@@ -112,6 +112,8 @@ ARCHITECTURE behavior OF sdram_mem IS
   SIGNAL lu_ok   : std_logic;
 
   SIGNAL is_ram    : std_logic;
+  SIGNAL is_ram_q  : std_logic := '0';  -- registered, for the READY path only
+  SIGNAL lu_ok_r   : std_logic := '0';  -- registered cache-hit test
   SIGNAL cpu_rd_op : std_logic;
   SIGNAL cpu_wr_op : std_logic;
   SIGNAL cpu_op    : std_logic;
@@ -197,13 +199,35 @@ BEGIN
   lookup : PROCESS (CLK_RAM)
   BEGIN
     IF rising_edge(CLK_RAM) THEN
+      is_ram_q <= is_ram;          -- see the note by cpu_rd_op
       lu_addr <= ADDR;
       lu_data <= cache_byte;
       lu_hit  <= hit;
+
+      -- THE HIT TEST, REGISTERED. It was a 20-bit equality against the LIVE
+      -- address feeding rd_hit, then READY, then CPU_RDY -- the widest piece
+      -- of logic on the tightest path in the machine, and the reason the
+      -- design's slack swung between +0.1 and -0.6 ns on nothing but fitter
+      -- placement.
+      --
+      -- The comparison does not need to be live. lu_addr IS the address from
+      -- one clock ago, so this asks whether the address is still what it was
+      -- last clock -- and the address is LATCHED at ALE and holds for the
+      -- whole bus cycle. It is therefore true for every clock of that cycle
+      -- after the first, and computing it one clock later changes nothing
+      -- except which side of a flip-flop the comparator sits on.
+      --
+      -- RD does not assert until the following T-state, about 100 ns at
+      -- 10 MHz against a 20 ns clock here, so the answer is settled several
+      -- clocks before anything reads it.
+      lu_ok_r <= '0';
+      IF (lu_hit = '1' AND lu_addr = ADDR) THEN
+        lu_ok_r <= '1';
+      END IF;
     END IF;
   END PROCESS;
 
-  lu_ok  <= '1' WHEN (lu_hit = '1' AND lu_addr = ADDR) ELSE '0';
+  lu_ok  <= lu_ok_r;             -- registered above; see the note there
   rd_hit <= cpu_rd_op AND lu_ok;
 
   -- SAME OWNERSHIP AS THE PSRAM IT REPLACES. Deliberately the same function:

@@ -93,6 +93,15 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_c2                   : std_logic;
   SIGNAL n_c3                   : std_logic;
   SIGNAL n_clk48       : std_logic;
+  -- OPL2 PCM tap -> usb2's isochronous streamer, both in the 48 MHz domain
+  SIGNAL n_opl_pcm     : std_logic_vector(15 DOWNTO 0);
+  SIGNAL n_opl_pcm_stb : std_logic;
+  SIGNAL n_aud_en      : std_logic;
+  SIGNAL n_aud_addr    : std_logic_vector(6 DOWNTO 0);
+  SIGNAL n_aud_endp    : std_logic_vector(3 DOWNTO 0);
+  SIGNAL n_aud_nsmp    : std_logic_vector(7 DOWNTO 0);
+  SIGNAL n_aud_gain    : std_logic_vector(2 DOWNTO 0);
+  SIGNAL n_aud_under   : std_logic;
   SIGNAL n_usb_locked  : std_logic;
   SIGNAL n_pll_locked  : std_logic;   -- pll1 has locked; nothing runs before it
   SIGNAL n_clock50              : std_logic;
@@ -459,7 +468,15 @@ BEGIN
   cpuclk1 : ENTITY work.cpuclk
     GENERIC MAP (
       MAX_IDX              => 6,          -- 16.667 MHz, the -16 parts' rating
-      DEF_IDX              => 3           -- 8.333 MHz on every reset
+      -- 10 MHz on every reset (idx 4). This is the top of what the -8 part in
+      -- this machine will do -- 12.5 fails -- so the board now BOOTS at its
+      -- ceiling rather than starting at 5 and being stepped up.
+      --
+      -- That is a different test from running at 10 MHz: reset, the memory
+      -- settle and the whole BIOS POST now happen at the fastest step, and
+      -- those are exactly the paths the cold-boot faults lived in. Keep a
+      -- 5 MHz .jic to fall back to.
+      DEF_IDX              => 4           -- 10 MHz on every reset
     )
     PORT MAP (
       CLK100               => n_c100,
@@ -722,7 +739,14 @@ BEGIN
       SND                  => n_opl_snd,
       SAMPLE_DIV           => n_opl_smp,
       T1_DIV               => n_opl_t1,
-      T2_DIV               => n_opl_t2
+      T2_DIV               => n_opl_t2,
+      -- The PCM tap runs from the USB PLL, not from the CPU bus clock. That is
+      -- the whole reason it can hold a sample rate: n_cpuclk is 5-10 MHz and
+      -- changes at run time with the speed ladder, while a USB frame is a hard
+      -- 1 ms. Sharing n_clk48 makes 48 samples per frame exact by construction.
+      CLK48                => n_clk48,
+      PCM                  => n_opl_pcm,
+      PCM_STB              => n_opl_pcm_stb
     );
 
   fdc1 : ENTITY work.fdc8272
@@ -811,7 +835,8 @@ BEGIN
   -- adjacent 0xF0..0xFF, is not the 8087 window that real software probes.
   usb2 : ENTITY work.usb_host
     GENERIC MAP (
-      IO_BASE              => x"00A8"
+      IO_BASE              => x"00A8",
+      AUDIO                => true
     )
     PORT MAP (
       CLK                  => n_cpuclk,
@@ -825,7 +850,38 @@ BEGIN
       DATAOUT              => n_periph_rdata,
       IRQ                  => n_irq2,
       USB_DP               => USB1_DP,
-      USB_DM               => USB1_DM
+      USB_DM               => USB1_DM,
+      AUD_PCM              => n_opl_pcm,
+      AUD_STB              => n_opl_pcm_stb,
+      AUD_EN               => n_aud_en,
+      AUD_ADDR             => n_aud_addr,
+      AUD_ENDP             => n_aud_endp,
+      AUD_NSMP             => n_aud_nsmp,
+      AUD_GAIN             => n_aud_gain,
+      AUD_UNDER            => n_aud_under
+    );
+
+  -- Audio streams on the hybrid port, so this is where the streamer is built.
+  -- usb1 leaves every AUD_* port open and its generic false: the disk port
+  -- cannot be an audio device, and unbuilt logic costs nothing.
+  usbaud1 : ENTITY work.usb_audio
+    GENERIC MAP (
+      IO_BASE              => x"00A0"
+    )
+    PORT MAP (
+      CLK                  => n_cpuclk,
+      RESET                => n_rst_out,
+      DATA                 => n_cpu_wdata,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAOUT              => n_periph_rdata,
+      AUD_EN               => n_aud_en,
+      AUD_ADDR             => n_aud_addr,
+      AUD_ENDP             => n_aud_endp,
+      AUD_NSMP             => n_aud_nsmp,
+      AUD_GAIN             => n_aud_gain,
+      AUD_UNDER            => n_aud_under
     );
 
   inst3 : ENTITY work.ps2_kbd_ppi
@@ -887,7 +943,23 @@ BEGIN
   -- lock time. The hazard was always here; the reconfiguration made the window
   -- wide enough to land in. Proved by an A/B of two builds three minutes apart:
   -- cpuclk removed boots from flash, cpuclk present stops on 02.
-  n_reset <= RESET AND NOT n_cad_rst AND n_pll_locked;
+  -- Was: n_reset <= RESET AND NOT n_cad_rst AND n_pll_locked;
+  --
+  -- That put the raw button pin into a combinational term sampled by TWO
+  -- clock domains -- clkgen on the CPU clock, and n_mem_rst on c3 -- with no
+  -- synchroniser between the contact and either of them. A mechanical button
+  -- bounces for milliseconds, so one press is tens of edges, and a transition
+  -- near a clock edge can leave the two domains disagreeing about whether a
+  -- reset happened at all. The CPU restarts and the memory controller does
+  -- not, or the reverse. See resetsync.vhd.
+  resetsync1 : ENTITY work.resetsync
+    PORT MAP (
+      CLK      => n_c3,
+      LOCKED   => n_pll_locked,
+      BTN_N    => RESET,
+      CAD_RST  => n_cad_rst,
+      RESET_N  => n_reset
+    );
   -- n_reset is active low; the memory controller wants active high, and must
   -- NOT be gated by clkgen's RST_OUT (see the mem_hybrid instantiation).
   n_mem_rst <= NOT n_reset;

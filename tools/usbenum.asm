@@ -283,11 +283,24 @@ start:
         mov  al, C_RESET
         or   al, [spdbit]
         out  dx, al
-        call delay_tick                 ; 55 ms of SE0, well over the 10 ms min
+        ; THE COMMENT HERE USED TO SAY "55 ms of SE0, well over the 10 ms min".
+        ; It was not true. delay_tick waits for the BIOS tick to CHANGE, so it
+        ; returns after whatever is left of the current tick -- anywhere from
+        ; 55 ms down to nearly nothing. The reset hold was a lottery, and a
+        ; mouse and a keyboard are forgiving enough that it never showed.
+        ; Two edges guarantee one whole period, so 55 ms is now a floor.
+        mov  cx, 2
+        call delay_ticks                ; >= 55 ms of SE0, guaranteed
         SETDX O_CTRL
         mov  al, [spdbit]               ; release, keeping the speed selection
         out  dx, al
-        call delay_tick                 ; and let the device come back up
+        ; And then be patient. A flash stick answers almost at once; a floppy
+        ; drive is a microcontroller with a motor and runs a self-test before it
+        ; will talk. The TEAC FD-05PUB NAKs its first descriptor request for
+        ; long enough that a short wait reads as a dead device -- and a NAK is
+        ; the device working correctly and saying "not yet".
+        mov  cx, 6
+        call delay_ticks                ; ~275 ms
         SETDX O_CTRL
         in   al, dx
         ; L_FS, at BOTH speeds, and that is not a bug. LINE reports the engine's
@@ -589,7 +602,11 @@ txn:
         mov  bl, al                     ; command, safe from DX
         mov  bh, 3                      ; attempts after a corrupted packet
 .tx_attempt:
-        mov  cx, 400                    ; NAK budget
+        ; NAK budget. A NAK is flow control, not an error: the device is
+        ; saying "ask again". 400 was tuned on devices that answer immediately
+        ; and is a few milliseconds -- far too short for a drive that is still
+        ; starting up, where it turns "busy" into "failed".
+        mov  cx, 8000                   ; NAK budget
 .tx_try:
         push cx
         mov  al, bl
@@ -653,6 +670,18 @@ setptr:
         out  dx, al
         pop  dx
         pop  ax
+        ret
+
+; delay_ticks: wait CX tick EDGES. A single edge is only the REMAINDER of the
+;              current tick, so it can be almost nothing; N edges guarantee
+;              (N-1) whole periods. Use this, not delay_tick, whenever a
+;              minimum is required rather than a nod in its direction.
+delay_ticks:
+        push cx
+.dts_l:
+        call delay_tick
+        loop .dts_l
+        pop  cx
         ret
 
 ; delay_tick: wait for the 18.2 Hz BIOS tick to change, i.e. up to 55 ms.

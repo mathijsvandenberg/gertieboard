@@ -55,8 +55,51 @@ if [ "$want" -ne 0 ]; then
     [ "$sz" -ge "$lo" ] || { echo "FAIL: expected roughly $want bytes for $DEV"; exit 1; }
 fi
 
+# ---------------------------------------------------------------------------
+#  Formats for programmers that are not Quartus.
+#
+#  .sof and .jic are Quartus's own containers and quartus_pgm is the only thing
+#  that reads them, which means a Mac or a Linux box cannot flash this board at
+#  all. openFPGALoader can, and it wants raw images:
+#
+#      .rbf   raw bitstream  -> configures the FPGA over JTAG, lost on power-off
+#      .rpd   raw EPCS image -> written to the config flash, survives a power cycle
+#
+#  .pof is Quartus's flash container and is kept because some third-party
+#  programmers read it and because it is what .rpd is derived from.
+#
+#  All four describe the SAME bitstream. They differ only in what the tool on
+#  the other end can open.
+# ---------------------------------------------------------------------------
+RBF="output_files/gertieboard.rbf"
+POF="output_files/gertieboard.pof"
+RPD="output_files/gertieboard.rpd"
+
+echo "== raw formats for non-Quartus programmers =="
+"$QDIR/quartus_cpf.exe" -c "$SOF" "$RBF" >/dev/null || { echo "FAIL: rbf"; exit 1; }
+echo "   $RBF = $(wc -c < "$RBF") bytes   (SRAM, openFPGALoader)"
+
+# The POF takes no -s: sfl_device belongs to the JIC flow and is rejected here.
+"$QDIR/quartus_cpf.exe" -c -d "$DEV" "$SOF" "$POF" >/dev/null || { echo "FAIL: pof"; exit 1; }
+echo "   $POF = $(wc -c < "$POF") bytes"
+
+"$QDIR/quartus_cpf.exe" -c "$POF" "$RPD" >/dev/null || { echo "FAIL: rpd"; exit 1; }
+rpdsz=$(wc -c < "$RPD")
+echo "   $RPD = $rpdsz bytes   (flash, openFPGALoader)"
+
+# The RPD is a raw image of the whole device, so it must be EXACTLY the chip's
+# size. Anything else means the wrong -d and a flash written past its end.
+if [ "$want" -ne 0 ] && [ "$rpdsz" -ne "$want" ]; then
+    echo "FAIL: $RPD is $rpdsz bytes, expected exactly $want for $DEV"
+    exit 1
+fi
+
 echo
 echo "JIC OK -> $JIC"
 echo "Program it with:"
 echo "   quartus_pgm -m jtag -o \"ipv;$JIC\""
 echo "then power-cycle the board."
+echo
+echo "Without Quartus (macOS, Linux):"
+echo "   openFPGALoader -c usb-blaster $RBF          # volatile, this session"
+echo "   openFPGALoader -c usb-blaster -f --file-type rpd $RPD   # to the flash"

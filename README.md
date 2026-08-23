@@ -77,16 +77,73 @@ Full detail, including why each item is hard and what it needs, is in
 
 ## Release history
 
-Each release publishes three artifacts, and all three are needed: the `.jic` is the
-chipset, the `.sof` is the same thing over JTAG, and the `.64k` is the BIOS that runs
-on it. Updating one does not update the other.
+Each release publishes the chipset and the BIOS separately, and both are needed:
+the FPGA image is the chipset, the `.64k` is the firmware that runs on it, and
+updating one does not update the other.
+
+The same bitstream ships in four containers, differing only in what can open them:
+
+| File | Programmer | Persists? |
+|---|---|---|
+| `.sof` | Quartus (`quartus_pgm`) | no — this session only |
+| `.jic` | Quartus, via JTAG into the config flash | yes |
+| `.rbf` | **openFPGALoader** — macOS, Linux, no Quartus | no |
+| `.rpd` | **openFPGALoader**, written to the config flash | yes |
+
+```bash
+openFPGALoader -c usb-blaster gertieboard.rbf                    # this session
+openFPGALoader -c usb-blaster -f --file-type rpd gertieboard.rpd # to the flash
+```
 
 | Version | Date | Headline |
 |---|---|---|
+| **[v1.30](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.30)** | 2026-08-23 | A USB floppy as drive B:, AdLib over USB audio, and a machine that boots at 10 MHz |
 | **[v1.21](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.21)** | 2026-08-17 | Low-speed USB, and a keyboard typing into DOS |
 | **[v1.20](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.20)** | 2026-08-17 | A USB mouse in real games — and the clock fix that raised the CPU ceiling |
 | **[v1.10](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.10)** | 2026-08-13 | EGA mode 0Dh, 640 KB in SDRAM, and every off-chip interface finally timed |
 | **[v1.00](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.00)** | 2026-07-30 | First release: a machine that boots on its own |
+
+### v1.30 — a USB floppy, AdLib over USB, and margins that stopped being luck
+
+**Drive B: is a USB floppy.** A TEAC FD-05PUB reads 720K and 1.44MB diskettes
+under DOS with no driver loaded, at usable speed. It is UFI over **CBI**, a
+different transport from the Bulk-Only used by the fixed disk: the command goes
+out as a control request, data over bulk, and status as two bytes on an
+interrupt endpoint. B: is the floppy when one is found at POST and the SPI flash
+otherwise, decided once so it cannot change under a running program.
+
+Three rules cost that bring-up, and all three are the same shape — a protocol
+step whose only purpose is to let the other end continue, omitted from the
+**error** path:
+
+* a **UNIT ATTENTION** aborts the command and it must be reissued
+* the **CBI interrupt status** must be collected even when the data phase failed
+* a **stalled endpoint is latched** until `CLEAR_FEATURE(ENDPOINT_HALT)` — without
+  which one bad sector took the drive down until it was physically unplugged
+
+**AdLib plays through a USB Audio Class device.** The CPU is not in the audio
+path at all: `opl2_lite` renders 48 kHz PCM in the 48 MHz domain straight into a
+double buffer, and the SIE ships one isochronous packet per frame on its own, so
+sound survives into software that has taken over the machine. Vendor-specific
+devices are supported too, inferring the format from the packet size.
+
+**The machine boots at 10 MHz**, and the BIOS ROM grew to 24 KB.
+
+**Margins stopped being luck.** `CPU_RDY` is the tightest path on the board, and
+a 20-bit comparator was sitting in front of it — build slack swung between
++0.1 ns and −0.6 ns on fitter placement alone, which is the honest explanation
+for one board being more tolerant than an identically built one. Registering
+that comparison took `CPU_RDY` off the critical path entirely.
+
+**The reset button is debounced.** It was a raw pin sampled by two clock domains
+with no synchroniser, so bounce could leave them disagreeing about whether a
+reset had happened at all.
+
+**POST narrates itself** down the host link, so a boot that fails before video —
+or hangs — can still say where it got to. GertieBoardLoader logs it to a file.
+
+**Also:** the same bitstream now ships as `.rbf` and `.rpd`, so the board can be
+programmed from macOS or Linux with openFPGALoader and no Quartus at all.
 
 ### v1.21 — low speed, and a keyboard
 

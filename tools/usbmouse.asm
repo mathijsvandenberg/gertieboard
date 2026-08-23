@@ -177,11 +177,22 @@ start:
         mov  al, C_RESET
         or   al, [spdbit]
         out  dx, al
-        call delay_tick
+        ; Two edges, not one. delay_tick waits for the BIOS tick to CHANGE,
+        ; so on its own it returns after whatever is LEFT of the current tick
+        ; -- 55 ms if one just passed, nearly nothing if the next is due. The
+        ; 10 ms minimum SE0 the spec requires was never actually guaranteed;
+        ; HID devices are forgiving enough that it never showed. Two edges
+        ; guarantee one whole period, so 55 ms becomes a floor.
+        mov  cx, 2
+        call delay_ticks
         SETDX O_CTRL
         mov  al, [spdbit]               ; release, keep the speed selection
         out  dx, al
-        call delay_tick
+        ; And let it come back up. A device with a microcontroller runs a
+        ; self-test before it will answer, and NAKs until it is ready -- which
+        ; is the device working correctly, not failing.
+        mov  cx, 6
+        call delay_ticks
         SETDX O_CTRL
         mov  al, C_SOFEN
         or   al, [spdbit]
@@ -645,7 +656,10 @@ txn:
         mov  bl, al
         mov  bh, 3
 .attempt:
-        mov  cx, 400
+        mov  cx, 8000                   ; NAK budget: a NAK is flow
+                                        ; control, not an error. 400 was a
+                                        ; few ms, tuned on devices that answer
+                                        ; at once
 .try:
         push cx
         mov  al, bl
@@ -704,6 +718,18 @@ setptr:
         out  dx, al
         pop  dx
         pop  ax
+        ret
+
+; delay_ticks: wait CX tick EDGES. A single edge is only the REMAINDER of the
+;              current tick, so it can be almost nothing; N edges guarantee
+;              (N-1) whole periods. Use this, not delay_tick, wherever a
+;              MINIMUM is required rather than a nod in its direction.
+delay_ticks:
+        push cx
+.dts_l:
+        call delay_tick
+        loop .dts_l
+        pop  cx
         ret
 
 ; delay_tick: up to 55 ms, from the 18.2 Hz BIOS tick. Clock-independent,
