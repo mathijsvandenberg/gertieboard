@@ -97,11 +97,63 @@ openFPGALoader -c usb-blaster -f --file-type rpd gertieboard.rpd # to the flash
 
 | Version | Date | Headline |
 |---|---|---|
+| **[v1.31](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.31)** | 2026-08-23 | Flashing the BIOS no longer depends on which device owns B: |
 | **[v1.30](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.30)** | 2026-08-23 | A USB floppy as drive B:, AdLib over USB audio, and a machine that boots at 10 MHz |
 | **[v1.21](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.21)** | 2026-08-17 | Low-speed USB, and a keyboard typing into DOS |
 | **[v1.20](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.20)** | 2026-08-17 | A USB mouse in real games — and the clock fix that raised the CPU ceiling |
 | **[v1.10](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.10)** | 2026-08-13 | EGA mode 0Dh, 640 KB in SDRAM, and every off-chip interface finally timed |
 | **[v1.00](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.00)** | 2026-07-30 | First release: a machine that boots on its own |
+
+### v1.31 — the SPI chip gets a drive number of its own
+
+**BIOSFLASH stopped working the moment a USB floppy was plugged in**, which is
+close to the worst possible timing: it found the chip by asking drive B: for
+its geometry and computing a cylinder above the advertised count, and that is
+sound only while B: is always the flash. With a floppy attached it handed a
+flash CHS to a diskette.
+
+The chip now answers on **drive 2**, whoever holds B:. BIOSFLASH cannot simply
+probe for that number — the floppy path answers `AH=08` for *any* drive with a
+canned geometry and carry **clear**, so a BIOS that never heard of drive 2 looks
+identical to one that routes it to the chip. Unknown *functions* do return carry
+set, so it asks `AH=FD` and requires `'SP'` back, and prints which drive it
+chose either way.
+
+**A geometry the BIOS never established is now a hard error.** `uf_nsec` is 9
+or 18; a stale 255 turned a request for LBA 4000 into LBA 56614 and sent it to
+the drive. Not knowing a geometry is a fault, not something to default.
+
+**POST writes every USB-floppy variable explicitly.** `.rtdata` lives inside the
+BIOS image in writable M9K, so its initialisers land when the region is *loaded*,
+not when the CPU resets — a warm boot re-runs POST over the previous run's
+values. Unlike a real XT, where those addresses are mask ROM and cannot have
+changed.
+
+**BIOSFLASH verifies against a snapshot.** It used to write straight out of
+F000 and then compare the read-back against F000 again — two readings of a live
+image separated by four flash writes, so anything changing in between read as a
+flash fault. What is verified is now what was written.
+
+**USB0 enumeration got its own NAK budget.** One value covered two unrelated
+situations. In data transfer NAK is flow control, and a stick programming a
+sector NAKs for hundreds of milliseconds while working perfectly — cutting that
+budget once abandoned writes mid-command, after which the device padded the
+sector from its stale buffer and reported success. In enumeration NAK is a
+fault: a freshly reset device returns eight descriptor bytes in milliseconds.
+Splitting them took a failed USB0 probe from **13.7 seconds to about 2.5**, on
+every boot, with the data path untouched.
+
+POST also now says *why* enumeration failed rather than just how far it got.
+That turned a stage number with every error counter at zero into `status 04` —
+NAK — which distinguishes a device that is alive and not ready from one that is
+absent (`TMO`) or one whose transactions are broken (`ERR`). Three faults that
+had all looked identical.
+
+**Known limit:** a USB device that wedges below the protocol cannot be recovered
+in software on this board. Measured, not assumed — SE0 holds of 36, 108, 324 and
+972 ms all returned NAK. Only removing VBUS clears it, and VBUS is hardwired to
+5 V: just DM and DP reach the FPGA. A load switch on a spare GPIO would fix it,
+on a future board revision.
 
 ### v1.30 — a USB floppy, AdLib over USB, and margins that stopped being luck
 
