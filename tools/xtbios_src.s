@@ -6652,7 +6652,23 @@ hw_quiesce:
     call u_delay
     loop .hq_hold
 
-    xor al, al
+    ## RELEASE INTO SOF, NOT INTO SILENCE.
+    ##
+    ## A device that hears nothing for 3 ms suspends, and POST does video and
+    ## probes drive A: before it enumerates anything -- about a second of bus
+    ## idle. Clearing CTRL to zero here left both ports quiet for all of it.
+    ##
+    ## That was survivable while the ports were merely idle, because a
+    ## CONFIGURED device suspends and resumes without much fuss. It stopped
+    ## being survivable the moment this routine started driving a real bus
+    ## reset: the device is then in the Default state, freshly reset and
+    ## waiting to be enumerated, and suspending from there is what left the
+    ## floppy visible on LINE and deaf to its first descriptor request --
+    ## enumeration stage 03.
+    ##
+    ## So the frame marker runs from here on. It costs nothing and it is what
+    ## keeps a reset device awake until somebody talks to it.
+    mov al, 0x04                 # SOFEN
     mov dx, 0xEE
     out dx, al
     mov dx, 0xAE
