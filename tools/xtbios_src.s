@@ -4571,9 +4571,22 @@ scancode_uc:
 ##  with the buffers, it was a forward reference, and GNU as turns those into
 ##  memory operands: "cmp bx, U_BUFSZ" assembled as "cmp bx, [0x0040]", i.e. a
 ##  compare against the BDA's floppy motor counter. Same trap as HD_DRIVE.
-## A control transfer or an interrupt status answers immediately; only a
-## sector has to wait for the disk to come round. ~20 ms against ~650.
-.equ UF_NAK_FAST, 2000
+## The ORDINARY NAK budget, used by everything except the bulk data phase.
+##
+## It was 2000, about 20 ms, and that was a regression I introduced while
+## making the failure path cheap: the budget was split so a sector read could
+## wait a revolution without every other phase paying the same, and the
+## default was set to what a control transfer needs when the device is idle
+## and listening. Enumeration is not that case. A drive that has just been
+## bus-reset NAKs its first descriptor request while its controller starts
+## up, and 20 ms is not enough -- it reported stage 03 with status 04 and
+## rxpid 5A, which is the device saying "ask again" and the host giving up.
+##
+## 8000 is what it was before the split and what worked; 16000 is chosen
+## because this particular drive has needed more time than expected at every
+## single stage of this bring-up, and the cost is only paid when something is
+## already going wrong.
+.equ UF_NAK_FAST, 16000
 .equ UF_BUFSZ, 64            # USB floppy descriptor buffer
 .equ U_BUFSZ,  64            # size of u_buf, and the descriptor request length
 
