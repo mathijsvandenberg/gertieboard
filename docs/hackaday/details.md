@@ -46,7 +46,7 @@ stock **Terasic DE0-Nano** (Cyclone IV EP4CE22F17C6) underneath carries the FPGA
 +--------------------------------------------------------------+
 ```
 
-**It is meant to be soldered by hand.** Almost everything on the top board is
+**Forty-two placements, and it is meant to be soldered by hand.** Almost everything is
 through-hole — the CPU in a socket, the connectors, the display, the buzzer, both GPIO
 headers. Only two parts are surface-mount, and both are SOIC-8. Using an off-the-shelf
 DE0-Nano rather than putting the Cyclone IV on the board follows from the same decision:
@@ -65,7 +65,9 @@ Everything listed here has been run on hardware.
   Transport and a SCSI stack in the BIOS. `FDISK`, `FORMAT` and `CHKDSK` all pass;
   504 MB addressable, ~220 KB/s reads.
 - **CGA** 80×25 colour text plus graphics modes 4, 5 and 6, scan-doubled out as
-  640×480 VGA — no external DAC, the FPGA drives the connector directly.
+  640×480 VGA. There is no DAC chip: six resistors are the entire video DAC — a
+  470 R/680 R pair per channel, two bits each, **64 colours**. Which is exactly the
+  size of EGA's palette, from which 16 are chosen.
 - **EGA mode 0Dh**, 320×200×16 — four 64 KB bit planes in SDRAM, with the latch/ALU
   read-modify-write path, the 16-of-64 palette and CRTC start-address page flipping.
   Commander Keen 4 runs on it.
