@@ -57,10 +57,40 @@ Full inventory of both boards: **[docs/hardware.md](docs/hardware.md)**.
   (verified in Monkey Island and Arkanoid) and a HID keyboard typing into the BIOS
   key buffer, both full speed and low speed. The USB keyboard works alongside the
   PS/2 one; nothing contends for port 60h
-- **Two floppy drives**: `A:` served over serial from a host loader, `B:` a
-  1.44 MB drive backed by the on-board SPI flash
+- **Two floppy drives**: `A:` served over serial from a host loader, `B:` a real
+  USB floppy drive when one is attached — otherwise a 1.44 MB volume on the
+  on-board SPI flash. Which one holds `B:` is decided once, at POST
 - 640 KB RAM, PC speaker, 8253 timer, 8259 PIC, 8237 DMA, 8255 PPI
 - Runs real software: Alley Cat, Digger, Sopwith, Pacman, the DOS utilities
+
+### Peripherals, working
+
+![POST and boot, with a USB floppy as B:](docs/photos/peripherals/01-boot-usb-floppy-720k.jpg)
+
+The whole machine announcing itself, and most of this README in one screen:
+
+| Line | What it means |
+|---|---|
+| `Philips ROM BIOS Version 1.30` … `Parity Checking Enabled` | The [P2120 reproduction](#a-short-history), down to a parity message on a machine with no parity |
+| `Processor : 80186 / V20 found` | The real CPU in the socket, detected rather than assumed |
+| `Diskette Drive A: Ready 720 KB` | Served over the serial link by the [host loader](#the-host-loader) |
+| `Diskette Drive B: Ready 720 KB USB floppy` | A **real USB floppy drive**, UFI over CBI, no DOS driver loaded |
+| `Internal Hard Disk : Ready 504 MB` | A USB flash drive over the fabric host controller, BOT + SCSI in the BIOS |
+| `System clock set to: 9.96 MHz` | **Measured**, not a constant — POST times a calibrated loop against PIT channel 2 |
+| `DIR/W` on `B:` | Six files off a 720 KB diskette, `36864 bytes free` |
+
+`code 403C` in the corner is the POST display's current value, shown on the
+single seven-segment digit at the same time.
+
+| | |
+|---|---|
+| <img src="docs/photos/peripherals/02-usb-floppy-drive-and-diskette.jpg" width="330"> | <img src="docs/photos/peripherals/03-usb-mouse.jpg" width="330"> |
+| The drive that answers as `B:`, with the diskette from that `DIR` still in it — a handwritten 3.5" DS/DD 720 K labelled *TETRIS / CTETRIS / BL* | A plain HID boot-protocol mouse on port 1, driving `INT 33h`. No hub and no PHY: `D+`/`D-` go straight to FPGA pins |
+| <img src="docs/photos/peripherals/04-usb-stick-and-power.jpg" width="330"> | |
+| Everything the machine needs: a USB stick for `C:`, a VGA lead, and the barrel jack. No host PC, no JTAG | |
+
+Full captions and the exact POST readout are in
+[`docs/photos/peripherals/manifest.json`](docs/photos/peripherals/manifest.json).
 
 ### On the list
 

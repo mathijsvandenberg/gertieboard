@@ -1,0 +1,44 @@
+[
+  {
+    "file": "01-boot-usb-floppy-720k.jpg",
+    "subject": "POST and boot",
+    "date": "2026-08-23",
+    "release": "v1.30",
+    "caption": "The whole machine announcing itself. Philips P2120 boot screen reproduced down to 'Parity Checking Enabled', then A: and B: both Ready at 720 KB with B: labelled USB floppy, a 504 MB hard disk, and a measured 9.96 MHz. DIR/W on B: lists TETRIS, CTETRIS and BLOCKBL off a real 3.5\" DS/DD diskette.",
+    "reads": {
+      "post_code": "403C",
+      "banner": "Philips ROM BIOS Version 1.30 / Gertieboard BIOS Retirement Edition / Release 1.30 82c0ac1",
+      "memory": "640 KB total, 640 base, 0 extra",
+      "processor": "80186 / V20 found - fast disk path",
+      "drive_a": "Ready 720 KB (served over serial)",
+      "drive_b": "Ready 720 KB USB floppy",
+      "hard_disk": "Ready 504 MB",
+      "clock": "9.96 MHz (measured against PIT channel 2, not a constant)",
+      "dir_b": "6 files, 36864 bytes free"
+    }
+  },
+  {
+    "file": "02-usb-floppy-drive-and-diskette.jpg",
+    "subject": "USB floppy drive",
+    "date": "2026-08-23",
+    "caption": "The Toshiba USB floppy drive that answers as B:, with the 720 KB diskette from the DIR above still in it - handwritten label, TETRIS / CTETRIS / BL. UFI over CBI, no DOS driver loaded. The 7-segment digit on the board is mid-POST.",
+    "reads": {
+      "media": "3.5\" MFD DS/DD 135TPI, 720 KB",
+      "label": "TETRIS, CTETRIS, BL"
+    }
+  },
+  {
+    "file": "03-usb-mouse.jpg",
+    "subject": "USB mouse",
+    "date": "2026-08-23",
+    "caption": "A plain HID boot-protocol mouse on USB port 1, driving INT 33h. No hub, no PHY: D+/D- go straight to FPGA pins and the serial interface engine is in fabric.",
+    "reads": {}
+  },
+  {
+    "file": "04-usb-stick-and-power.jpg",
+    "subject": "Standalone boot",
+    "date": "2026-08-23",
+    "caption": "What the machine actually needs: a USB flash drive for C:, a VGA lead, and the barrel jack about to go in. No host PC and no JTAG - the FPGA configures from its own flash and the BIOS comes off the on-board SPI chip.",
+    "reads": {}
+  }
+]
