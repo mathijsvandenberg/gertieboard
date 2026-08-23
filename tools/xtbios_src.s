@@ -424,9 +424,11 @@ _post:
     push ds
     push cs
     pop ds
-    mov al, byte ptr cs:[uf_stage]
+    mov bl, byte ptr cs:[uf_stage]
+    mov bh, byte ptr cs:[uf_lastst]
+    mov cl, byte ptr cs:[uf_lastpid]
     mov si, offset m_ufd
-    call ser_msg_al
+    call ser_msg_3
     pop ds
     cmp byte ptr cs:[uf_pres], 0
     je .post_nouf
@@ -6479,6 +6481,84 @@ ser_msg:
     pop ax
     ret
 
+## ser_msg_3 -- DS:SI = string, then three hex bytes from BL, BH, CL with
+##              spaces between, all in ONE frame.
+##
+## Three separate ser_msg_al calls would print three lines and leave the reader
+## pairing them by order, which is the mistake that split "stage=" from "FF"
+## in the first place.
+ser_msg_3:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    mov dx, bx                   # DL = first, DH = second
+    mov bh, cl                   # BH = third (BL still the first)
+    push cx
+    xor cx, cx
+    push si
+.sm3_len:
+    lodsb
+    test al, al
+    jz .sm3_got
+    inc cx
+    cmp cx, 240
+    jb .sm3_len
+.sm3_got:
+    pop si
+    mov al, 0x33
+    call ser_byte
+    mov al, 0x03
+    call ser_byte
+    mov al, cl
+    add al, 8                    # " xx xx xx" appended
+    call ser_byte
+    xor al, al
+    call ser_byte
+    call ser_byte
+    jcxz .sm3_vals
+.sm3_body:
+    lodsb
+    call ser_byte
+    loop .sm3_body
+.sm3_vals:
+    pop cx
+    mov al, dl
+    call .sm3_pair
+    mov al, dh
+    call .sm3_pair
+    mov al, bh
+    call .sm3_pair
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+.sm3_pair:
+    push ax
+    mov al, 0x20
+    call ser_byte
+    pop ax
+    push ax
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    call .sm3_nyb
+    pop ax
+    call .sm3_nyb
+    ret
+.sm3_nyb:
+    and al, 0x0F
+    add al, 0x30
+    cmp al, 0x39
+    jbe .sm3_e
+    add al, 7
+.sm3_e:
+    jmp ser_byte
+
 ## ser_msg_al -- DS:SI = string, AL = a byte to append as two hex digits,
 ##               all in ONE frame.
 ##
@@ -6896,6 +6976,18 @@ uf_ctlin:
     clc
     jmp .ufc_out
 .ufc_bad:
+    ## What the engine actually saw. RXPID is worth more than the status bits:
+    ## it says what came back off the wire rather than how it was classified.
+    push ax
+    push dx
+    mov dx, UF_CMD
+    in al, dx
+    mov byte ptr cs:[uf_lastst], al
+    mov dx, UF_ENDP
+    in al, dx
+    mov byte ptr cs:[uf_lastpid], al
+    pop dx
+    pop ax
     stc
 .ufc_out:
     pop bp
@@ -8271,7 +8363,7 @@ m_boot:    .asciz "POST: quiesced, video next"
 m_fda:     .asciz "POST: drive A: probed"
 m_usb:     .asciz "POST: enumerating USB0 (fixed disk)"
 m_stage:   .asciz "POST: USB0 stage="
-m_ufd:     .asciz "POST: USB1 floppy stage="
+m_ufd:     .asciz "POST: USB1 floppy  stage/status/rxpid"
 b_hd_ready:.asciz "Ready"
 b_hd_no:   .asciz "NOT READY"
 b_hd_kb:   .asciz " KB"
@@ -8363,6 +8455,7 @@ uf_stage:   .byte 0
 uf_rqt:     .byte 0
 uf_rstage:  .byte 0
 uf_lastst:  .byte 0
+uf_lastpid: .byte 0
 uf_bleft:   .word 0
 uf_bsave:   .word 0
 uf_stsave:  .byte 0
