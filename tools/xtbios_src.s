@@ -433,7 +433,17 @@ _post:
     call uf_ready
     call uf_report
     jmp short .post_ufdone
+    jmp short .post_ufdone
 .post_nouf:
+    ## No floppy: leave the flash's own B: line intact and put the stage it
+    ## reached at column 60, where it cannot collide with it.
+    ##
+    ## This was removed when the BIOS was full at 16 KB and the space was
+    ## needed for the AH=FE diagnostic. It went out over the serial link
+    ## instead -- which is no help at all with no host attached, and "the
+    ## floppy is not detected and there is no code either" is exactly the
+    ## silent absence the stage byte exists to prevent. There is room now.
+    call uf_stagerep
 .post_ufdone:
 
 ## ---- USB mass storage: enumerate, and advertise C: only if it worked ----
@@ -6616,14 +6626,46 @@ hw_quiesce:
     xor al, al
     out dx, al
 
-    ## ---- both USB engines idle ----
-    ## Not merely SOF off: bus reset and low speed live here too, and a stale
-    ## low-speed bit makes LINE report the engine's swapped view of the pins.
+    ## ---- both USB ports get a REAL bus reset ----
+    ##
+    ## Clearing CTRL only makes the HOST idle. It says nothing to the device,
+    ## which keeps whatever state it was in -- and after a warm reset that is
+    ## whatever the last run left behind: a half-finished transfer, a data
+    ## toggle out of step, a CBI command still waiting for its status to be
+    ## collected. That is why a wedged floppy needed UNPLUGGING rather than a
+    ## reboot; the machine restarted and the drive did not.
+    ##
+    ## Driving SE0 on both pairs is what a device is required to notice. It
+    ## costs ~50 ms once, at a point in POST where nothing is waiting.
     mov dx, 0xEE                 # USB0 CTRL
-    xor al, al
+    mov al, 0x02                 # BUSRESET: hold SE0
     out dx, al
     mov dx, 0xAE                 # USB1 CTRL
     out dx, al
+
+    ## The spec minimum is 10 ms. u_delay is a spin loop and therefore a
+    ## function of the CPU clock, so this is counted generously enough to be
+    ## legal at the fastest step on the ladder rather than exactly right at
+    ## one of them.
+    mov cx, 200
+.hq_hold:
+    call u_delay
+    loop .hq_hold
+
+    xor al, al
+    mov dx, 0xEE
+    out dx, al
+    mov dx, 0xAE
+    out dx, al
+
+    ## And let them come back up. A device is allowed 10 ms after the reset
+    ## before it must answer, and a floppy is a mechanism that takes longer;
+    ## enumeration waits again anyway, but starting from a device that has
+    ## finished restarting is what makes the first descriptor request work.
+    mov cx, 400
+.hq_rec:
+    call u_delay
+    loop .hq_rec
     ## and the audio streamer, which would otherwise keep sending isochronous
     ## packets to whatever address it was left pointing at
     mov dx, 0xA0
@@ -7263,6 +7305,35 @@ uf_reqsense:
     pop bx
     pop ax
     clc
+    ret
+
+## uf_stagerep -- "U:nn" at row 9 column 60, saying how far uf_enum got.
+##   1 entered   2 LINE read      3 bus reset done   4 device descriptor
+##   5 addressed 6 config header  7 config read      8 interface found
+##   9 configured
+##  Anything below 9 is where it stopped. 2 means no full-speed device was seen
+##  on the port at all, which separates a wiring or power question from a
+##  protocol one before any of the protocol is examined.
+uf_stagerep:
+    push ax
+    push di
+    push si
+    push ds
+    push es
+    mov ax, VID
+    mov es, ax
+    mov di, 9*160 + 60*2
+    push cs
+    pop ds
+    mov si, offset b_ufstage
+    call dbg_str
+    mov al, byte ptr cs:[uf_stage]
+    call dbg_byte
+    pop es
+    pop ds
+    pop si
+    pop di
+    pop ax
     ret
 
 ## uf_report -- repaint the B: line for a USB floppy. Reuses hd_detect's own
@@ -8179,6 +8250,7 @@ b_usb_st:  .asciz "  txseq/flags "
 b_usb_old: .asciz "FPGA image is older than this BIOS - reprogram it"
 b_fd2:     .asciz "Diskette Drive B:  : "   # same 21 columns, so the two lines align
 b_usbfd:   .asciz "  USB floppy"
+b_ufstage: .asciz "U:"
 m_boot:    .asciz "POST: quiesced, video next"
 m_fda:     .asciz "POST: drive A: probed"
 m_usb:     .asciz "POST: enumerating USB0 (fixed disk)"
