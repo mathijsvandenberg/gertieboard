@@ -4650,6 +4650,24 @@ scancode_uc:
 .equ UGO,       0x80
 .equ UD1,       0x08         # send DATA1 instead of DATA0
 
+## NAK budget, in rounds of 4096 iterations -- about 103 ms a round at 10 MHz.
+##
+## TWO values, because the two things NAK for completely different reasons.
+##
+##   FULL is for data transfer, where NAK is ordinary flow control: a stick
+##   programming a sector NAKs the next packet for hundreds of milliseconds and
+##   is working correctly. Cutting this is what once abandoned writes mid
+##   command, after which the device padded the sector from its stale buffer
+##   and reported success -- a silent corruption, not a visible failure.
+##
+##   ENUM is for enumeration, where NAK means something is wrong. A device that
+##   has just been reset returns eight descriptor bytes in milliseconds; it is
+##   not busy, there is nothing to be busy with. Waiting 3.3 s for it four
+##   times over is 13.7 s spent learning what half a second already said, on
+##   every boot of a machine with no fixed disk attached.
+.equ U_NAK_FULL, 32          # ~3.3 s -- data transfer, NAK is flow control
+.equ U_NAK_ENUM, 5           # ~0.5 s -- enumeration, NAK is a fault
+
 .equ UST_BUSY,  0x01
 .equ UST_ACK,   0x02
 .equ UST_NAK,   0x04
@@ -4697,11 +4715,10 @@ u_txn:
     push si
     mov bl, al                   # command, in a register DX cannot touch
     mov bh, 3                    # attempts left after a corrupted packet
-    mov si, 32                   # outer NAK budget -- see .ut_attempt
+    mov si, word ptr cs:[u_nakbud]   # outer NAK budget -- see .ut_attempt
 .ut_attempt:
-    # NAK budget: 16 rounds of 4096. These are ITERATIONS, not time, so the
-    # budget scales with the bus clock -- it was doubled to 32 while c0 was
-    # 10 MHz and is back to 16 now that c0 is 5. An earlier version gave up
+    # NAK budget: rounds of 4096 from u_nakbud. These are ITERATIONS, not time,
+    # so the budget scales with the bus clock. An earlier version gave up
     # after ONE
     # round (~70 ms) on the theory that the command-level retry above would
     # cover anything slower. The write soak disproved it: a flash stick
@@ -6189,6 +6206,11 @@ u_enum:
     ##  to 5 V on this board -- only DM and DP reach the FPGA. That is why
     ##  replugging works when nothing in software does, and it is a board fix
     ##  (a load switch on VBUS off a spare GPIO), not a BIOS one.
+    ## Enumeration runs on the SHORT budget. Everything from here to .ue_out is
+    ## descriptor and address traffic, none of which any healthy device needs
+    ## more than milliseconds for. Restored at .ue_out so the bulk paths that
+    ## follow get the full one back.
+    mov word ptr cs:[u_nakbud], U_NAK_ENUM
     mov byte ptr [0xC0], 3
     mov cx, 4
 .ue_dev_try:
@@ -6334,6 +6356,7 @@ u_enum:
     mov byte ptr [0xC0], 0xFF
     mov byte ptr [0xC1], 1       # C: is real
 .ue_out:
+    mov word ptr cs:[u_nakbud], U_NAK_FULL   # data transfer gets it back
     pop di
     pop si
     pop dx
@@ -8777,6 +8800,10 @@ _reset:
 ## It goes at the end of .rtdata so mkbios.sh's fixed table offsets, which it
 ## re-derives and checks, are undisturbed.
 .section .rtdata, "aw"
+u_nakbud:   .word U_NAK_FULL     # USB0 NAK budget. Lives HERE, not with the
+                                 # other u_ variables: those sit at offsets
+                                 # mkbios.sh verifies, and a word inserted
+                                 # among them moves every table after it.
 uf_pres:    .byte 0
 uf_ep0:     .byte 8
 uf_epin:    .byte 0
