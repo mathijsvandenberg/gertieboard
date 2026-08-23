@@ -196,6 +196,11 @@ function Get-Kind($name) {
         '.sof' { 'fpga-sram' }
         '.jic' { 'fpga-flash' }
         '.pof' { 'fpga-flash' }
+        # Raw formats, for programmers that are not Quartus. Same bitstream,
+        # different container: openFPGALoader on macOS or Linux reads these
+        # where it cannot open a .sof or .jic at all.
+        '.rbf' { 'fpga-sram' }
+        '.rpd' { 'fpga-flash' }
         '.64k' { 'bios' }
         '.rom' { 'bios' }
         '.ima' { 'floppy' }

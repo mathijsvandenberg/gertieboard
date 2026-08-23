@@ -5,8 +5,8 @@
 # contains diagnostic ROMs and stale images that should not reach end users.
 #
 # Recognised kinds are inferred from the extension:
-#   .sof -> fpga-sram    .jic/.pof -> fpga-flash
-#   .64k/.rom -> bios    .ima/.img -> floppy
+#   .sof/.rbf -> fpga-sram    .jic/.pof/.rpd -> fpga-flash
+#   .64k/.rom -> bios         .ima/.img -> floppy
 
 # These three are what an end user needs, and all three are gitignored, so a
 # release is the only way they reach anybody. A name here that does not exist is
@@ -14,3 +14,10 @@
 output_files/gertieboard.sof
 output_files/gertieboard.jic
 tools/gertieboard_bios.64k
+
+# The same bitstream in formats openFPGALoader can read, so the board can be
+# programmed from macOS or Linux without Quartus installed at all. .rbf
+# configures the FPGA for this session; .rpd is written to the config flash and
+# survives a power cycle.
+output_files/gertieboard.rbf
+output_files/gertieboard.rpd
