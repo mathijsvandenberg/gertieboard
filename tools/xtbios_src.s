@@ -6494,6 +6494,81 @@ ser_msg:
     pop ax
     ret
 
+## ser_msg_buf -- DS:SI = label, CL = how many bytes from cs:ser_vals to
+##                append as spaced hex, all in ONE frame.
+##
+## Drive B: traffic never reaches the host -- A: is the one served over this
+## link -- so a failing read on the USB floppy is invisible from the outside.
+## This is how it says what it was asked for and what came back.
+ser_msg_buf:
+    push ax
+    push bx
+    push cx
+    push si
+    mov bl, cl                   # bytes to append
+    xor cx, cx
+    push si
+.smb_len:
+    lodsb
+    test al, al
+    jz .smb_got
+    inc cx
+    cmp cx, 200
+    jb .smb_len
+.smb_got:
+    pop si
+    mov al, 0x33
+    call ser_byte
+    mov al, 0x03
+    call ser_byte
+    mov al, cl                   # label + 3 chars per value
+    mov bh, bl
+    add bh, bh
+    add al, bh
+    add al, bl
+    call ser_byte
+    xor al, al
+    call ser_byte
+    call ser_byte
+    jcxz .smb_vals
+.smb_body:
+    lodsb
+    call ser_byte
+    loop .smb_body
+.smb_vals:
+    mov cl, bl
+    xor ch, ch
+    jcxz .smb_out
+    mov si, offset ser_vals
+.smb_v:
+    mov al, 0x20
+    call ser_byte
+    mov al, byte ptr cs:[si]
+    push ax
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    call .smb_nyb
+    pop ax
+    call .smb_nyb
+    inc si
+    loop .smb_v
+.smb_out:
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+.smb_nyb:
+    and al, 0x0F
+    add al, 0x30
+    cmp al, 0x39
+    jbe .smb_e
+    add al, 7
+.smb_e:
+    jmp ser_byte
+
 ## ser_msg_3 -- DS:SI = string, then three hex bytes from BL, BH, CL with
 ##              spaces between, all in ONE frame.
 ##
@@ -8095,6 +8170,38 @@ uf_int13:
     mov ah, 0x06                        # media changed
 .u13_esave:
     mov byte ptr cs:[uf_err], ah
+    ## SAY SO. A read that fails inside the BIOS is invisible: DOS reports
+    ## "general failure" for anything it cannot classify and throws the code
+    ## away. This puts the request and the answer on the host link, where they
+    ## can be read afterwards.
+    ##   LBA hi/lo, sectors asked for, the code returned to DOS,
+    ##   then the drive's own sense key and ASC.
+    push ax
+    push cx
+    push si
+    push ds
+    push cs
+    pop ds
+    mov al, byte ptr cs:[uf_lba+1]
+    mov byte ptr cs:[ser_vals+0], al
+    mov al, byte ptr cs:[uf_lba]
+    mov byte ptr cs:[ser_vals+1], al
+    mov al, byte ptr cs:[uf_cnt]
+    mov byte ptr cs:[ser_vals+2], al
+    mov al, byte ptr cs:[uf_err]
+    mov byte ptr cs:[ser_vals+3], al
+    mov al, byte ptr cs:[uf_sense+2]
+    and al, 0x0F
+    mov byte ptr cs:[ser_vals+4], al
+    mov al, byte ptr cs:[uf_sense+12]
+    mov byte ptr cs:[ser_vals+5], al
+    mov si, offset m_rdfail
+    mov cl, 6
+    call ser_msg_buf
+    pop ds
+    pop si
+    pop cx
+    pop ax
     pop es
     pop bp
     pop di
@@ -8377,6 +8484,7 @@ m_fda:     .asciz "POST: drive A: probed"
 m_usb:     .asciz "POST: enumerating USB0 (fixed disk)"
 m_stage:   .asciz "POST: USB0 stage="
 m_ufd:     .asciz "POST: USB1 floppy  stage/status/rxpid"
+m_rdfail:  .asciz "B: FAIL  lba.hi lba.lo cnt ah key asc"
 b_hd_ready:.asciz "Ready"
 b_hd_no:   .asciz "NOT READY"
 b_hd_kb:   .asciz " KB"
@@ -8469,6 +8577,7 @@ uf_rqt:     .byte 0
 uf_rstage:  .byte 0
 uf_lastst:  .byte 0
 uf_lastpid: .byte 0
+ser_vals:   .space 8
 uf_bleft:   .word 0
 uf_bsave:   .word 0
 uf_stsave:  .byte 0
