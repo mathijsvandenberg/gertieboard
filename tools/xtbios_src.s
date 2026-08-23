@@ -429,6 +429,11 @@ _post:
     mov cl, byte ptr cs:[uf_lastpid]
     mov si, offset m_ufd
     call ser_msg_3
+    mov bl, byte ptr cs:[uf_pres]
+    mov bh, byte ptr cs:[uf_nsec]
+    mov cl, byte ptr cs:[uf_stage]
+    mov si, offset m_ufp1
+    call ser_msg_3
     pop ds
     cmp byte ptr cs:[uf_pres], 0
     je .post_nouf
@@ -472,6 +477,15 @@ _post:
     mov si, offset m_stage
     call ser_msg_al
     pop es
+    pop ds
+    push ds
+    push cs
+    pop ds
+    mov bl, byte ptr cs:[uf_pres]
+    mov bh, byte ptr cs:[uf_nsec]
+    mov cl, byte ptr cs:[uf_stage]
+    mov si, offset m_ufp2
+    call ser_msg_3
     pop ds
     call usb_report
     mov ax, BDA
@@ -2742,6 +2756,19 @@ _int16:
 ##  fell through to the serial floppy and B: showed A:'s contents. The source
 ##  looked perfectly correct; only the encoding was wrong.
 .equ HD_DRIVE,  0x01     # drive B: -- the flash-backed second floppy
+## The SPI chip, reachable whether or not it is the one holding B:.
+##
+## BIOSFLASH addresses the reserved region by asking B: for its geometry and
+## computing a cylinder above the advertised count. That was sound while B:
+## was ALWAYS the flash. It is not sound now: a USB floppy takes B: when one
+## is found, so the same call sequence hands a flash CHS to a diskette, and
+## the flash becomes unreachable exactly when a floppy is plugged in -- which
+## is when someone is most likely to be flashing a new BIOS.
+##
+## So the chip gets a number of its own that nothing else can take. DOS never
+## probes drive 2 while the equipment word reports two floppies, so this is
+## invisible to software that is not looking for it.
+.equ SPI_DRIVE, 0x02     # the SPI flash, always, regardless of what B: is
 ##  Geometry lives up here rather than beside the INT 13h code because
 ##  hd_detect, further down but assembled earlier, needs HD_KB for its POST
 ##  line -- and a .equ used above its definition assembles as a memory operand.
@@ -2770,6 +2797,8 @@ _int13:
 .if HD_ENABLE
     cmp dl, HD_DRIVE             # B: -> the flash-backed floppy
     je .i13_flashfd
+    cmp dl, SPI_DRIVE            # the SPI chip itself, whoever holds B:
+    je .i13_spidrv
 .endif
     jmp .i13_floppy
 .i13_fixed:
@@ -2783,6 +2812,22 @@ _int13:
     cmp byte ptr cs:[uf_pres], 0
     je .i13_spi
     jmp uf_int13
+.i13_spidrv:
+    ## AH=FD -- "is drive 2 really the SPI chip on this BIOS?"
+    ##
+    ## A tool cannot answer that by probing. The floppy path answers AH=08 for
+    ## ANY drive number with a canned geometry and CF CLEAR, so "it responded"
+    ## proves nothing -- an older BIOS would look exactly like a machine that
+    ## routes drive 2 to the chip, and the tool would write a flash image at a
+    ## diskette. An unknown function, though, returns CF SET there. So the
+    ## question is asked as a function that only this BIOS knows, and the
+    ## answer carries a magic rather than just a cleared carry.
+    cmp ah, 0xFD
+    jne .i13_spi
+    mov bx, 0x5350               # 'SP'
+    xor ah, ah
+    clc
+    retf 2
 .i13_spi:
     jmp hd_int13
 .endif
@@ -5543,7 +5588,21 @@ u_busreset:
     # generous enough that the FASTEST step on the ladder is still comfortably
     # legal. A bus reset happens once at POST; spending 100 ms on it costs
     # nothing, and there is no upper limit on how long SE0 may be held.
-    mov cx, 120                  # >= 36 ms at 10 MHz, ~72 ms at 5
+    ## 36 ms of SE0, against a 10 ms minimum and no maximum.
+    ##
+    ## Escalating this was tried and DISPROVED, which is worth writing down so
+    ## it is not tried again: holds of 36, 108, 324 and 972 ms were measured
+    ## against a wedged stick and every one of them came back status 04, NAK.
+    ## A device that NAKs after a one-second reset is not waiting on a longer
+    ## one, and the escalation cost seven seconds of POST to learn nothing.
+    ##
+    ## What it does establish is where the limit is. The device is in Default
+    ## state and accepting SETUPs, so the reset works; it simply will not
+    ## produce its descriptor. Only removing VBUS clears that, and VBUS is
+    ## hardwired to 5 V on this board -- just DM and DP reach the FPGA. Hence
+    ## replugging works when nothing in software does, and hence the fix is a
+    ## load switch on VBUS off a spare GPIO, on a future board revision.
+    mov cx, 120
 .ubr_hold:
     call u_delay
     loop .ubr_hold
@@ -6112,12 +6171,24 @@ u_enum:
     call u_busreset
 
     # ---- device descriptor at address 0 ----
-    ##  Retried, with a fresh bus reset between attempts. Reflashing the FPGA
-    ##  resets this controller but NOT the stick: 5 V comes straight off the
-    ##  board, so the device keeps its address and configuration and ignores
-    ##  requests to address 0. One reset should undo that, but a device left
-    ##  mid-transaction can need more than one, and the failure looks identical
-    ##  to "no device" -- which is what stage 03 was reporting after a reflash.
+    ##  Retried WITH a fresh bus reset between attempts. That reset is load
+    ##  bearing, and it was measured rather than assumed -- the original reason
+    ##  given for it (the stick keeps its old address and ignores address 0)
+    ##  turned out to be wrong, but the reset is right anyway:
+    ##
+    ##    with a reset between attempts:  status 04, UST_NAK, ~3.3 s each
+    ##    without one:                    status 20, UST_ERR, 2 ms each
+    ##
+    ##  NAK means a device in the Default state answering properly and asking
+    ##  for time; an absent one would report UST_TMO. So the reset is what puts
+    ##  the device somewhere it can answer from at all, and removing it does
+    ##  not give the device a longer window, it just breaks the transactions.
+    ##
+    ##  What neither shape can do is recover a device that has wedged below the
+    ##  protocol: the only cure for that is removing VBUS, and VBUS is hardwired
+    ##  to 5 V on this board -- only DM and DP reach the FPGA. That is why
+    ##  replugging works when nothing in software does, and it is a board fix
+    ##  (a load switch on VBUS off a spare GPIO), not a BIOS one.
     mov byte ptr [0xC0], 3
     mov cx, 4
 .ue_dev_try:
@@ -6139,6 +6210,39 @@ u_enum:
     pop ds
     pop cx
     jnc .ue_dev_ok
+
+    ## WHY it failed, per attempt, not just that four of them did.
+    ##
+    ## The screen reports stage 03 with every error counter at zero, which is
+    ## the one combination that says nothing: no CRC error, no timeout, no NAK,
+    ## no STALL. A device that is absent should at least TIME OUT. Zero of
+    ## everything means either the transaction never reached the wire or the
+    ## counters do not cover this path, and those need separating before any
+    ## more retries are added on top.
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push ds
+    mov bl, cl                   # attempts remaining, counting down from 4
+    mov dx, U_CMD
+    in al, dx
+    mov bh, al                   # status: bit1 ACK 2 NAK 3 STALL 4 TMO 5 ERR
+    mov dx, U_ENDP
+    in al, dx
+    mov cl, al                   # last received PID
+    push cs
+    pop ds
+    mov si, offset m_u0try
+    call ser_msg_3
+    pop ds
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+
     call u_busreset
     loop .ue_dev_try
     jmp .ue_out
@@ -7631,6 +7735,44 @@ uf_wait:
     pop cx
     ret
 
+## uf_vars_init -- put every USB-floppy variable back to its designed value.
+##
+## WHY THIS EXISTS AND WHY THE .byte INITIALISERS ARE NOT ENOUGH
+##
+##   .rtdata is inside the BIOS image at F000:F880, and on this machine that
+##   image lives in M9K that the CPU can WRITE. So the initialisers below are
+##   loaded when the FPGA is CONFIGURED -- not when the CPU resets. A warm
+##   boot re-runs POST over variables still holding the last run's values.
+##
+##   That is a state-persistence trap unlike a real XT, where the same
+##   addresses are mask ROM and cannot have changed. Anything in .rtdata that
+##   POST does not explicitly write is carried across CTRL+ALT+DEL, and the
+##   only reason it has not bitten harder is that most of these are written
+##   before they are read.
+##
+##   uf_nsec was the exception, and it cost a wild write: a stale geometry
+##   multiplied a valid CHS into an LBA fourteen times too large. Clearing
+##   the block is a few bytes and removes the whole class.
+##
+## Clobbers AX, CX, DI, ES.
+uf_vars_init:
+    push cs
+    pop es
+    mov di, offset uf_pres
+    mov cx, offset uf_var_end
+    sub cx, di
+    xor al, al
+    cld
+    rep stosb
+    ## The three that are not zero. Kept next to the clear, not near their
+    ## declarations, so a value can never be changed in one place only.
+    mov byte ptr cs:[uf_ep0], 8          # every device answers 8 before the
+                                         # descriptor says otherwise
+    mov byte ptr cs:[uf_nsec], 18        # harmless default; the guard in
+                                         # uf_int13 no longer trusts it
+    mov word ptr cs:[uf_nakbud], UF_NAK_FAST
+    ret
+
 ## uf_enum -- bring up USB1 and find a UFI/CBI floppy. Sets uf_pres on success.
 ##            Every failure is silent and simply leaves uf_pres 0: a machine
 ##            with no USB floppy must behave exactly like one that never had
@@ -7645,9 +7787,8 @@ uf_enum:
     push es
     push cs
     pop es
-    mov byte ptr cs:[uf_pres], 0
+    call uf_vars_init
     mov byte ptr cs:[uf_stage], 1
-    mov byte ptr cs:[uf_ep0], 8
 
     ## CTRL persists across resets and LINE reports the engine's SWAPPED view
     ## of the pins once low speed is set, so clear it before believing LINE.
@@ -7966,13 +8107,37 @@ uf_ready:
 uf_int13:
     sti
     cld                          # STOSB/LODSB below; DF belongs to the caller
+    ## ONCE, on the first call to reach here. Every call would drown the link
+    ## during a boot; the question is only whether this path is entered at all
+    ## and what it believes about the drive when it is.
+    cmp byte ptr cs:[uf_trc], 0
+    jne .u13_traced
+    mov byte ptr cs:[uf_trc], 1
+    push ax
+    push bx
+    push cx
+    push si
+    push ds
+    push cs
+    pop ds
+    mov bl, ah
+    mov bh, byte ptr cs:[uf_pres]
+    mov cl, byte ptr cs:[uf_nsec]
+    mov si, offset m_u13
+    call ser_msg_3
+    pop ds
+    pop si
+    pop cx
+    pop bx
+    pop ax
+.u13_traced:
     cmp byte ptr cs:[uf_pres], 0
     je .u13_nodrv
 
     cmp ah, 0x02
-    je .u13_rw
+    je .u13_geomchk
     cmp ah, 0x03
-    je .u13_rw
+    je .u13_geomchk
     cmp ah, 0x00
     je .u13_reset
     cmp ah, 0x04
@@ -8085,6 +8250,27 @@ uf_int13:
 .u13_nochg:
     xor ah, ah
     clc
+    retf 2
+
+.u13_geomchk:
+    ## REFUSE A TRANSFER WHOSE GEOMETRY THE BIOS NEVER ESTABLISHED.
+    ##
+    ## uf_nsec is 9 or 18, written by uf_ready once the drive has reported a
+    ## medium. Any other value means no medium was ever read, and the CHS the
+    ## caller passed is about to be multiplied by garbage: a 255 here turned a
+    ## request for LBA 4000 into LBA 56614 and sent it to the drive, which is
+    ## how a BIOS flash aimed at the SPI chip became a wild write.
+    ##
+    ## A geometry is not a hint to be defaulted. Not knowing it is a hard
+    ## error, and saying so costs one comparison on a path that then spends
+    ## milliseconds on USB.
+    cmp byte ptr cs:[uf_nsec], 9
+    je .u13_rw
+    cmp byte ptr cs:[uf_nsec], 18
+    je .u13_rw
+    mov ah, 0x0C                     # media type not found
+    mov byte ptr cs:[uf_err], ah
+    stc
     retf 2
 
 .u13_rw:
@@ -8460,8 +8646,8 @@ boot_order: .byte 0x00, 0x80, 0x01, 0xFF   # A:, C:, B:, end
 
 ##  Generated by mkbios.sh on every build; see the note there. Not committed.
 .include "gitver.inc"
-b_rel:    .asciz "Release 1.30  "
-b_ver:    .asciz "Philips ROM BIOS Version 1.30"
+b_rel:    .asciz "Release 1.31  "
+b_ver:    .asciz "Philips ROM BIOS Version 1.31"
 b_model:  .asciz "Gertieboard BIOS Retirement Edition"
 b_copy:   .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)"
 b_hdr:    .asciz "                     Total  Base Extra"
@@ -8510,7 +8696,16 @@ m_boot:    .asciz "POST: quiesced, video next"
 m_fda:     .asciz "POST: drive A: probed"
 m_usb:     .asciz "POST: enumerating USB0 (fixed disk)"
 m_stage:   .asciz "POST: USB0 stage="
+m_u0try:   .asciz "POST: USB0 dev8 failed     left/status/pid"
 m_ufd:     .asciz "POST: USB1 floppy  stage/status/rxpid"
+## uf_pres decides which device owns B:, and it was seen to be 0 at POST and 1
+## by the time DOS called INT 13h. Nothing in the BIOS writes it in between, so
+## either something scribbles on .rtdata or that reading was wrong. These three
+## traces bracket it: after uf_enum, after u_enum (the only substantial code
+## that runs in between), and at the first INT 13h to reach the USB floppy.
+m_ufp1:    .asciz "POST: USB1 after uf_enum   pres/nsec/stage"
+m_ufp2:    .asciz "POST: USB1 after u_enum    pres/nsec/stage"
+m_u13:     .asciz "INT13: USB floppy entered  ah/pres/nsec"
 m_rdfail:  .asciz "B: FAIL  lba.hi lba.lo cnt ah key asc"
 b_hd_ready:.asciz "Ready"
 b_hd_no:   .asciz "NOT READY"
@@ -8518,7 +8713,7 @@ b_hd_kb:   .asciz " KB"
 b_hd_idl:  .asciz "  ("
 b_hd_idr:  .asciz ")"
 
-msg_ver:      .asciz "Philips ROM BIOS Version 1.30\r\n"
+msg_ver:      .asciz "Philips ROM BIOS Version 1.31\r\n"
 msg_model:    .asciz "Gertieboard BIOS Retirement Edition\r\n"
 msg_copy:     .asciz "2026 Mathijs van den Berg (mathijsvandenberg3@gmail.com)\r\n\r\n"
 msg_memhdr:   .asciz "                     Total  Base Extra\r\n"
@@ -8615,6 +8810,8 @@ uf_ascq:    .byte 0
 uf_blocks:  .word 0
 uf_cfglen:  .word 0
 uf_lba:     .word 0
+uf_trc:     .byte 0                     # one-shot: INT 13h entry traced
+uf_var_end:                             # uf_vars_init clears uf_pres..here
 uf_sense:   .space 20
 uf_buf:     .space UF_BUFSZ
 

@@ -41,12 +41,19 @@
         bits 16
         CPU  8086               ; mandatory: see docs/gotchas.md
 
-FLASHDRV equ 0x01               ; drive B: -- the SPI flash second floppy
+; The SPI chip used to be reachable only as drive B:, because B: WAS the
+; flash. It is not any more -- a USB floppy takes B: when one is found, and
+; then this tool's carefully computed flash CHS lands on a diskette. The BIOS
+; now answers for the chip on a drive number of its own that nothing else can
+; take, so ask for that first and fall back to B: on a BIOS that predates it.
+SPIDRV   equ 0x02               ; the SPI flash, whatever holds B:
+FLASHDRV equ 0x01               ; where it used to be, and still is with no floppy
 ROMSEG   equ 0xF000             ; the running BIOS image
 RESVKB   equ 64                 ; size of the reserved BIOS region, KB
 CHUNK    equ 32                 ; sectors per INT 13h call = 16 KB
 CHUNKS   equ (RESVKB*2)/CHUNK   ; 128 sectors total, in 4 calls
-BUF      equ 0x4000             ; 16 KB scratch for the read-back compare
+BUF      equ 0x4000             ; 16 KB snapshot of the BIOS chunk being written
+BUF2     equ 0x8000             ; 16 KB read back from the flash, compared to BUF
 
 start:
         mov  dx, msg_hdr
@@ -65,9 +72,35 @@ start:
         mov  [lba], ax
         mov  [lba0], ax
 
-        ; ---- geometry of drive B:, straight from the BIOS ----
+        ; ---- which drive answers for the chip? ----
+        ; NOT by probing AH=08: the floppy path answers that for any drive
+        ; number at all, with a canned geometry and carry CLEAR, so a BIOS
+        ; that has never heard of drive 2 looks identical to one that routes
+        ; it to the chip. Ask a question only the new BIOS can answer.
+        mov  byte [drv], SPIDRV
+        mov  ah, 0xFD
+        mov  dl, SPIDRV
+        int  0x13
+        jc   .legacy
+        cmp  bx, 0x5350                 ; 'SP'
+        je   .havedrv
+.legacy:
+        ; No dedicated number. B: is the chip on such a BIOS -- unless a USB
+        ; floppy took it, and then the reserved cylinder lies past the end of
+        ; any diskette and the write fails rather than eating one. Say which
+        ; drive was chosen either way; this is the line to check when a flash
+        ; goes somewhere unexpected.
+        mov  byte [drv], FLASHDRV
+.havedrv:
+        mov  dx, msg_drv2
+        cmp  byte [drv], SPIDRV
+        je   .saydrv
+        mov  dx, msg_drvb
+.saydrv:
+        call puts
+
         mov  ah, 0x08
-        mov  dl, FLASHDRV
+        mov  dl, [drv]
         int  0x13
         jc   .nogeo
         mov  al, cl
@@ -129,60 +162,65 @@ start:
         call puts
 .nosum:
 
-        ; ---- write CHUNKS x CHUNK sectors ----
+        ; ---- write and verify, one chunk at a time ----
+        ; SNAPSHOT BEFORE WRITING. The old code wrote straight out of F000 and
+        ; then compared the read-back against F000 AGAIN -- two readings of the
+        ; live image separated by four flash writes. Anything that changes in
+        ; that window is indistinguishable from a flash fault, and something
+        ; does: offset E000 compared 35 against 51, and E000 is past _edata, in
+        ; padding that no build sets to either value.
+        ;
+        ; Copying the chunk out first makes the bytes verified the same bytes
+        ; written, which is the only comparison that says anything about the
+        ; flash. A real write failure still fails, and now it means it.
         mov  dx, msg_write
         call puts
+        cld
         xor  bp, bp
 .wr:
         mov  dx, msg_dot
         call puts
-        call chs                        ; CX and DH from [lba]
-        mov  ax, ROMSEG
-        mov  es, ax
-        push cx
-        mov  bx, bp
-        mov  cl, 14
-        shl  bx, cl                     ; BX = chunk * 16384
-        pop  cx
-        mov  ax, 0x0300 | CHUNK         ; AH=03 write, AL=32 sectors
-        mov  dl, FLASHDRV
-        int  0x13
-        jc   .wr_bad
-        add  word [lba], CHUNK
-        inc  bp
-        cmp  bp, CHUNKS
-        jb   .wr
-        jmp  .verify
-.wr_bad:
-        mov  [rah], ah
-        mov  dx, msg_wrfail
-        call puts
-        jmp  .fail_ah
 
-        ; ---- read it all back and compare with the running BIOS ----
-.verify:
-        mov  dx, msg_verify
-        call puts
-        mov  ax, [lba0]
-        mov  [lba], ax
-        xor  bp, bp
-.vf:
-        call chs
-        push cs
-        pop  es
-        mov  bx, BUF
-        mov  ax, 0x0200 | CHUNK         ; AH=02 read, AL=32 sectors
-        mov  dl, FLASHDRV
-        int  0x13
-        jc   .v_bad
-        ; compare 16 KB:  BUF  vs  F000:(chunk * 16384)
-        mov  si, BUF
+        ; snapshot F000:(chunk*16384) -> BUF
         mov  ax, bp
         mov  cl, 14
         shl  ax, cl
-        mov  di, ax
+        mov  si, ax
+        push ds
         mov  ax, ROMSEG
-        mov  es, ax                     ; ES:DI = the running BIOS
+        mov  ds, ax
+        push cs
+        pop  es
+        mov  di, BUF
+        mov  cx, 0x4000
+        rep  movsb
+        pop  ds
+
+        ; write the snapshot
+        call chs                        ; CX and DH from [lba]
+        push cs
+        pop  es
+        mov  bx, BUF
+        mov  ax, 0x0300 | CHUNK         ; AH=03 write, AL=32 sectors
+        mov  dl, [drv]
+        int  0x13
+        jc   .wr_bad
+
+        ; read the same sectors back
+        call chs
+        push cs
+        pop  es
+        mov  bx, BUF2
+        mov  ax, 0x0200 | CHUNK         ; AH=02 read, AL=32 sectors
+        mov  dl, [drv]
+        int  0x13
+        jc   .v_bad
+
+        ; compare: SI walks the flash, ES:DI the snapshot
+        push cs
+        pop  es
+        mov  si, BUF2
+        mov  di, BUF
         mov  cx, 0x4000
 .vc:    mov  al, [si]
         cmp  al, [es:di]
@@ -190,15 +228,19 @@ start:
         inc  si
         inc  di
         loop .vc
-        mov  dx, msg_dot
-        call puts
+
         add  word [lba], CHUNK
         inc  bp
         cmp  bp, CHUNKS
-        jb   .vf
+        jb   .wr
         mov  dx, msg_ok
         call puts
         jmp  .fin
+.wr_bad:
+        mov  [rah], ah
+        mov  dx, msg_wrfail
+        call puts
+        jmp  .fail_ah
 
 .v_mismatch:
         ; Say WHERE and WHAT, not just that it failed: an offset plus the two
@@ -206,6 +248,13 @@ start:
         mov  dx, msg_vmm
         call puts
         mov  ax, di
+        sub  ax, BUF                    ; offset inside this chunk
+        push cx
+        mov  bx, bp
+        mov  cl, 14
+        shl  bx, cl
+        pop  cx
+        add  ax, bx                     ; + chunk base = offset in the 64 KB
         call puthexw
         mov  dx, msg_vmm2
         call puts
@@ -341,6 +390,8 @@ putdec: push ax
 ; ---------------------------------------------------------------------------
 msg_hdr:    db 'BIOSFLASH - copy the running BIOS (F000:0000, 64 KB) into the',13,10
             db 'reserved top of the SPI flash, through drive B:.',13,10,13,10,'$'
+msg_drv2:   db 'via drive: 2 -- the SPI chip, whatever holds B:',13,10,'$'
+msg_drvb:   db 'via drive: B: -- BIOS has no dedicated flash drive',13,10,'$'
 msg_target: db 'target   : LBA $'
 msg_target2: db ', 128 sectors (the last 64 KB of the chip)',13,10,'$'
 msg_write:  db 'writing  $'
@@ -365,6 +416,7 @@ msg_nochip: db 'No SPI flash was detected at POST (BDA 40:E4 is zero).',13,10,'$
 msg_nogeo:  db 'Drive B: did not report a geometry.',13,10,'$'
 msg_crlf:   db 13,10,'$'
 
+drv     db SPIDRV               ; set at startup; never assumed
 lba     dw 0
 lba0    dw 0
 spt     dw 18
