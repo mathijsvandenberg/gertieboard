@@ -86,8 +86,8 @@ single seven-segment digit at the same time.
 |---|---|
 | <img src="docs/photos/peripherals/02-usb-floppy-drive-and-diskette.jpg" width="330"> | <img src="docs/photos/peripherals/03-usb-mouse.jpg" width="330"> |
 | The drive that answers as `B:`, with the diskette from that `DIR` still in it — a handwritten 3.5" DS/DD 720 K labelled *TETRIS / CTETRIS / BL* | A plain HID boot-protocol mouse on port 1, driving `INT 33h`. No hub and no PHY: `D+`/`D-` go straight to FPGA pins |
-| <img src="docs/photos/peripherals/04-usb-stick-and-power.jpg" width="330"> | |
-| Everything the machine needs: a USB stick for `C:`, a VGA lead, and the barrel jack. No host PC, no JTAG | |
+| <img src="docs/photos/peripherals/04-usb-audio-and-stick.jpg" width="330"> | |
+| **Both USB ports at once**: a USB sound card — the 3.5 mm socket in hand is its headphone jack — and the red-topped stick that is `C:`. The sound card is the AdLib output path: the OPL2 renders 48 kHz PCM in fabric and the SIE ships one isochronous packet per frame, so the CPU is never in the audio path. The FTDI cable on `COM1` is for POST logging, not needed to run | |
 
 Full captions and the exact POST readout are in
 [`docs/photos/peripherals/manifest.json`](docs/photos/peripherals/manifest.json).

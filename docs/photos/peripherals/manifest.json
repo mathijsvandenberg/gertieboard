@@ -35,10 +35,12 @@
     "reads": {}
   },
   {
-    "file": "04-usb-stick-and-power.jpg",
-    "subject": "Standalone boot",
+    "file": "04-usb-audio-and-stick.jpg",
+    "subject": "Both USB ports at once",
     "date": "2026-08-23",
-    "caption": "What the machine actually needs: a USB flash drive for C:, a VGA lead, and the barrel jack about to go in. No host PC and no JTAG - the FPGA configures from its own flash and the BIOS comes off the on-board SPI chip.",
-    "reads": {}
+    "caption": "Both ports in use together: a USB sound card - the 3.5 mm headphone socket on its braided lead is the one in hand - and the red-topped USB flash drive that is C:. The sound card is the AdLib output path: the OPL2 block renders 48 kHz PCM in fabric and the SIE ships one isochronous packet per frame, with the CPU never in the audio path. The orange/green ribbon at the back is the FTDI cable on COM1, there for POST logging during development, not needed to run.",
+    "reads": {
+      "cpu_markings": "NEC JAPAN 9516ND V20 / D70108C-8 '84NEC - visible in this shot"
+    }
   }
 ]
