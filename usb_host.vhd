@@ -302,6 +302,10 @@ ARCHITECTURE rtl OF usb_host IS
                                                   -- the byte cursor to go idle
   SIGNAL aud_en_m1 : std_logic := '0';
   SIGNAL aud_en_s  : std_logic := '0';            -- AUD_EN, resynchronised
+
+  -- RESET, brought into the CLK48 domain. See the bridge below.
+  SIGNAL rst48_m1  : std_logic := '1';
+  SIGNAL rst48     : std_logic := '1';
   -- bytes per frame = samples * 4 (16-bit stereo). 7 bits of AUD_NSMP is
   -- ample: 48 at full speed, and the whole packet has to fit a 256-byte bank.
   SIGNAL aud_nsmp_x4 : std_logic_vector(8 DOWNTO 0);
@@ -661,6 +665,41 @@ BEGIN
   END PROCESS;
 
   -- ==========================================================================
+  --  RESET BRIDGE into the 48 MHz domain.
+  --
+  --  RESET is generated in the CLK domain and CLK48 is asynchronous to it --
+  --  the SDC says so explicitly, pll48 is the one clock group standing apart
+  --  from every other clock in this design. Sampling RESET directly in a CLK48
+  --  process, which four of them used to do, is a clock-domain crossing with no
+  --  synchroniser on it.
+  --
+  --  ASSERTION was never the problem. RELEASE is. When RESET falls, its edge
+  --  lands at an arbitrary point relative to CLK48, and a flop that samples it
+  --  exactly then can go metastable -- with each of those four processes
+  --  resolving INDEPENDENTLY. Part of the engine leaves reset a cycle before
+  --  the rest and the sequencer starts from a state it has no legal transition
+  --  out of. It fails on some power-ups and not others, the rate moves with
+  --  temperature and voltage because that is what a metastability MTBF does,
+  --  and static timing analysis cannot see any of it: those paths are declared
+  --  asynchronous, which is an instruction not to check them.
+  --
+  --  Async assert, synchronous deassert. Reset still takes hold the instant
+  --  RESET rises, with no clock required -- which matters because CLK48 may not
+  --  be running yet. Release is handed to a CLK48 edge that every flop in the
+  --  domain sees on the same cycle.
+  -- ==========================================================================
+  RST48SYNC : PROCESS (CLK48, RESET)
+  BEGIN
+    IF RESET = '1' THEN
+      rst48_m1 <= '1';
+      rst48    <= '1';
+    ELSIF rising_edge(CLK48) THEN
+      rst48_m1 <= '0';
+      rst48    <= rst48_m1;
+    END IF;
+  END PROCESS;
+
+  -- ==========================================================================
   --  Clock crossing.  The command registers are only sampled while the SIE is
   --  idle, and go_cpu is a toggle, so a plain two-stage synchroniser is enough.
   --  ctrl_m is used combinationally by the transmitter (BUSRESET), so it gets
@@ -794,7 +833,7 @@ BEGIN
           aud_wlen <= aud_wlen + 1;
         END IF;
 
-        IF RESET = '1' THEN
+        IF rst48 = '1' THEN
           aud_wbank <= '0'; aud_wlen <= (OTHERS => '0');
           aud_run   <= '0'; aud_und  <= '0'; aud_ph <= 4; aud_swp <= '0';
         END IF;
@@ -1077,7 +1116,7 @@ BEGIN
       END CASE;
       END IF;
 
-      IF RESET = '1' THEN
+      IF rst48 = '1' THEN
         tx_st <= T_IDLE; tx_oe <= '0'; tx_req <= '0';
       END IF;
     END IF;
@@ -1233,7 +1272,7 @@ BEGIN
 
       END CASE;
 
-      IF RESET = '1' THEN
+      IF rst48 = '1' THEN
         rx_st   <= R_IDLE;
         se0_cnt <= 0;
         se0_st  <= '0';
@@ -1576,7 +1615,7 @@ BEGIN
 
       END CASE;
 
-      IF RESET = '1' THEN
+      IF rst48 = '1' THEN
         se <= S_IDLE; st_busy <= '0'; frame_cnt <= (OTHERS => '0');
         go_pend <= '0'; aud_act <= '0'; tx_aud <= '0';
       END IF;
