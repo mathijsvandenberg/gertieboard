@@ -31,7 +31,12 @@
 ; decided by asking the 8237 where it has got to. No interrupt is needed for
 ; that, and polling means no handler to get wrong before there is any music.
 
-CPU 8086
+; CPU 186, not 8086. The V20 is an 80186 core and this machine runs at 10 MHz,
+; so immediate shift counts are available and "mov cl,n / shr ax,cl" is two
+; instructions and a register where one will do. The BIOS and the other tools
+; stay 8086 -- they have to run before anything has established what the CPU
+; is. This does not: by the time it loads, POST has already identified a V20.
+CPU 186
 org 0x100
 
 ; ---- Sound Blaster ---------------------------------------------------------
@@ -304,8 +309,7 @@ loadmod:
         ; ---- patterns: npat * 1024 bytes, into their own block ----
         mov  al, [npat]
         xor  ah, ah
-        mov  cl, 6                      ; 1024 bytes = 64 paragraphs each
-        shl  ax, cl                     ; paragraphs needed
+        shl  ax, 6                      ; 1024 bytes = 64 paragraphs each
         mov  bx, ax
         mov  ah, 0x48
         int  0x21
@@ -712,7 +716,8 @@ play:
         cmp  al, [lasthalf]
         je   .nofill
         mov  [lasthalf], al
-        call fillhalf
+        mov  byte [posdirty], 1         ; a fill always refreshes the line, so
+        call fillhalf                   ; the stats appear even between rows
         ; Did the DMA reach the half we were writing before we finished? If the
         ; half indicator has already flipped, the mix did not keep up and the
         ; DMA played stale data -- which sounds like the same fragment being
@@ -749,8 +754,20 @@ play:
         cmp  al, 27
         je   .quit
         cmp  al, ' '
-        jne  .loop
+        jne  .n_sp
         xor  byte [paused], 1
+        jmp  .loop
+.n_sp:
+        cmp  al, 's'
+        je   .stats
+        cmp  al, 'S'
+        jne  .loop
+.stats:
+        mov  dx, msg_crlf
+        call puts
+        call showpos
+        mov  dx, msg_crlf
+        call puts
         jmp  .loop
 .quit:
         ret
@@ -870,8 +887,7 @@ mixchunk:
         ; becomes the step
         mov  al, [ch_vol+bp]
         xor  ah, ah
-        mov  cl, 8
-        shl  ax, cl
+        shl  ax, 8
         add  ax, voltab
         mov  [tabptr], ax
 
@@ -960,14 +976,12 @@ dorow:
         xor  bh, bh
         mov  al, [hdr+952+bx]
         xor  ah, ah
-        mov  cl, 6
-        shl  ax, cl
+        shl  ax, 6
         add  ax, [patseg]
         mov  [patcur], ax
         mov  bl, [row]
         xor  bh, bh
-        mov  cl, 4
-        shl  bx, cl
+        shl  bx, 4
         mov  [rowoff], bx
 
         mov  byte [brk], 0
@@ -1462,7 +1476,7 @@ msg_smp2    db ' whole, $'
 msg_smp3    db ' shortened, $'
 msg_smp4    db ' skipped',13,10,'$'
 msg_chan    db 'channels : mask $'
-msg_playing db 'playing - SPACE pauses, ESC quits',13,10,'$'
+msg_playing db 'playing - SPACE pauses, S shows stats, ESC quits',13,10,'$'
 msg_bye     db 13,10,'stopped.',13,10,'$'
 msg_crlf    db 13,10,'$'
 msg_cr      db 13,'$'
