@@ -734,6 +734,11 @@ play:
         call puts
         mov  dx, msg_playing
         call puts
+        ; the line the status will own, taken once from the cursor
+        mov  ah, 0x03
+        xor  bh, bh
+        int  0x10
+        mov  [vidrow], dh
 
 .loop:
         ; ---- which half is the DMA reading? ----
@@ -1386,36 +1391,110 @@ setbpm:
         ret
 
 ; ----------------------------------------------------------------------------
+;  vputs / vputdec / vblit -- the status line, without DOS.
+;
+;  showpos used to print through INT 21h, which goes to BIOS teletype: cursor
+;  positioning and a scroll check per character, tens of milliseconds for a
+;  50-character line. That sat in the main loop between finishing one fill and
+;  noticing the next half boundary -- so the mixer had 28% of the window and the
+;  status line was quietly spending much of the rest.
+;
+;  A line is 50 word writes straight into video memory instead. Microseconds.
+; ----------------------------------------------------------------------------
+vputs:                                  ; DS:DX -> $-terminated, DI = buffer pos
+        push si
+        mov  si, dx
+.vs:    lodsb
+        cmp  al, '$'
+        je   .vsd
+        mov  [di], al
+        inc  di
+        jmp  .vs
+.vsd:   pop  si
+        ret
+
+vputdec:                                ; AX = value, DI = buffer pos
+        push ax
+        push bx
+        push cx
+        push dx
+        mov  bx, 10
+        xor  cx, cx
+.vd:    xor  dx, dx
+        div  bx
+        push dx
+        inc  cx
+        test ax, ax
+        jnz  .vd
+.vp:    pop  ax
+        add  al, '0'
+        mov  [di], al
+        inc  di
+        loop .vp
+        pop  dx
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+
+vblit:                                  ; DI = end of text in linebuf
+        push es
+        push ds
+        pop  es
+        mov  cx, di
+        sub  cx, linebuf
+.pad:   cmp  cx, 60                     ; clear the tail of the previous line
+        jae  .padded
+        mov  byte [di], ' '
+        inc  di
+        inc  cx
+        jmp  .pad
+.padded:
+        mov  ax, 0xB800
+        mov  es, ax
+        mov  al, [vidrow]
+        xor  ah, ah
+        mov  bx, 160
+        mul  bx
+        mov  di, ax
+        mov  si, linebuf
+        mov  cx, 60
+        mov  ah, 0x07
+.bl:    lodsb
+        stosw
+        loop .bl
+        pop  es
+        ret
+
+; ----------------------------------------------------------------------------
 ;  showpos -- one line of status, rewritten in place
 ; ----------------------------------------------------------------------------
 showpos:
-        mov  dx, msg_cr
-        call puts
+        mov  di, linebuf
         mov  dx, msg_p
-        call puts
+        call vputs
         mov  al, [pos]
         xor  ah, ah
-        call putdec
+        call vputdec
         mov  dx, msg_slash
-        call puts
+        call vputs
         mov  al, [songlen]
         xor  ah, ah
-        call putdec
+        call vputdec
         mov  dx, msg_r
-        call puts
+        call vputs
         mov  al, [row]
         xor  ah, ah
-        call putdec
+        call vputdec
         mov  dx, msg_und
-        call puts
+        call vputs
         mov  ax, [nunder]
-        call putdec
+        call vputdec
         mov  dx, msg_fill
-        call puts
+        call vputs
         mov  ax, [tmax]
-        call putdec
-        mov  dx, msg_sp
-        call puts
+        call vputdec
+        call vblit
         ret
 
 ; ============================================================================
@@ -1599,6 +1678,8 @@ nunder    dw 0
 prevcnt   dw 0
 t0        dw 0
 tmax      dw 0
+vidrow    db 0
+linebuf   times 80 db ' '
 chmask    db 0x0F
 lasthalf  db 0xFF
 filled    dw 0
