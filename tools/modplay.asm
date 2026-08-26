@@ -777,20 +777,12 @@ play:
         ; coarse to time a single fill, but summing across many gives the total
         ; time spent filling, and against elapsed time that is the utilisation
         ; -- which is the number that actually decides whether this keeps up.
-        push es
-        mov  ax, BDASEG
-        mov  es, ax
-        mov  ax, [es:0x6C]
+        call tickrd
         mov  [tk0], ax
-        pop  es
         call fillhalf
-        push es
-        mov  ax, BDASEG
-        mov  es, ax
-        mov  ax, [es:0x6C]
+        call tickrd
         sub  ax, [tk0]
         add  [busytk], ax
-        pop  es
         call dmacnt                     ; refresh BX for the gap test below
 .nofill:
         ; HOW FAR DID THE DMA MOVE SINCE THE LAST LOOK?
@@ -832,12 +824,24 @@ play:
         cmp  byte [posdirty], 0
         je   .nopaint
         mov  byte [posdirty], 0
+        call tickrd
+        mov  [tk0], ax
         call showpos
+        call tickrd
+        sub  ax, [tk0]
+        add  [disptk], ax
 .nopaint:
 
         ; ---- keys ----
+        call tickrd
+        mov  [tk0], ax
         mov  ah, 1
         int  0x16
+        pushf
+        call tickrd
+        sub  ax, [tk0]
+        add  [keytk], ax
+        popf
         jz   .loop
         mov  ah, 0
         int  0x16
@@ -1597,7 +1601,29 @@ showpos:
         mov  bx, ax
         test bx, bx
         jz   .nopct
+        push bx
         mov  ax, [busytk]
+        mov  cx, 100
+        mul  cx
+        div  bx
+        call vputdec
+        pop  bx
+        mov  dx, msg_pct
+        call vputs
+        mov  dx, msg_disp
+        call vputs
+        push bx
+        mov  ax, [disptk]
+        mov  cx, 100
+        mul  cx
+        div  bx
+        call vputdec
+        pop  bx
+        mov  dx, msg_pct
+        call vputs
+        mov  dx, msg_key
+        call vputs
+        mov  ax, [keytk]
         mov  cx, 100
         mul  cx
         div  bx
@@ -1606,6 +1632,20 @@ showpos:
         call vputs
 .nopct:
         call vblit
+        ret
+
+; ============================================================================
+;  tickrd -- the 18.2 Hz BIOS tick, AX. Four of these per loop iteration cost
+;  four memory reads, which is nothing next to what they are measuring.
+; ============================================================================
+tickrd:
+        push es
+        push bx
+        mov  bx, BDASEG
+        mov  es, bx
+        mov  ax, [es:0x6C]
+        pop  bx
+        pop  es
         ret
 
 ; ============================================================================
@@ -1791,6 +1831,8 @@ t0        dw 0
 tk0       dw 0
 tkstart   dw 0
 busytk    dw 0
+disptk    dw 0
+keytk     dw 0
 maxgap    dw 0
 tmax      dw 0
 vidrow    db 0
@@ -1870,6 +1912,8 @@ msg_und     db '  underrun $'
 msg_gap     db '  gap $'
 msg_fill    db '  busy $'
 msg_pct     db '%$'
+msg_disp    db ' disp $'
+msg_key     db ' key $'
 msg_sp      db '    $'
 
 ; ---- buffers, placed by hand and NOT emitted ---------------------------
