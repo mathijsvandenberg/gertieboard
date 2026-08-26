@@ -45,7 +45,7 @@ MIXRATE equ 11025
 TCONST  equ 256 - (1000000 / MIXRATE)
 
 ; ---- buffer geometry -------------------------------------------------------
-HALF    equ 1024                ; samples per half, ~93 ms
+HALF    equ 2048                ; samples per half, ~186 ms at 11025
 BUFLEN  equ HALF*2
 
 ; ---- Amiga PAL clock / 2, for period -> frequency --------------------------
@@ -711,7 +711,32 @@ play:
         je   .nofill
         mov  [lasthalf], al
         call fillhalf
+        ; Did the DMA reach the half we were writing before we finished? If the
+        ; half indicator has already flipped, the mix did not keep up and the
+        ; DMA played stale data -- which sounds like the same fragment being
+        ; repeated, not like a click.
+        xor  al, al
+        out  0x0C, al
+        in   al, 0x03
+        mov  bl, al
+        in   al, 0x03
+        mov  bh, al
+        xor  al, al
+        cmp  bx, HALF
+        jb   .u_snd
+        mov  al, 1
+.u_snd:
+        cmp  al, [lasthalf]
+        je   .nofill
+        inc  word [nunder]
 .nofill:
+
+        ; ---- status, safely outside the mix ----
+        cmp  byte [posdirty], 0
+        je   .nopaint
+        mov  byte [posdirty], 0
+        call showpos
+.nopaint:
 
         ; ---- keys ----
         mov  ah, 1
@@ -991,7 +1016,12 @@ dorow:
         jb   .done
         mov  byte [pos], 0              ; loop the song
 .done:
-        call showpos
+        ; NOT showpos here. This runs inside fillhalf, and printing a status
+        ; line costs ~15 INT 21h character writes through BIOS teletype, with
+        ; scrolling -- tens of milliseconds injected into the middle of a mix
+        ; that has to finish before the DMA reaches the half being written.
+        ; The main loop paints it instead, where being slow costs nothing.
+        mov  byte [posdirty], 1
         ret
 
 ; ----------------------------------------------------------------------------
@@ -1218,6 +1248,10 @@ showpos:
         mov  al, [row]
         xor  ah, ah
         call putdec
+        mov  dx, msg_und
+        call puts
+        mov  ax, [nunder]
+        call putdec
         mov  dx, msg_sp
         call puts
         ret
@@ -1340,6 +1374,8 @@ tickno    db 0
 tickcnt   dw 0
 samptick  dw 220
 paused    db 0
+posdirty  db 0
+nunder    dw 0
 chmask    db 0x0F
 lasthalf  db 0xFF
 filled    dw 0
@@ -1406,6 +1442,7 @@ msg_cr      db 13,'$'
 msg_p       db 'pos $'
 msg_slash   db '/$'
 msg_r       db '  row $'
+msg_und     db '  late $'
 msg_sp      db '    $'
 
 ; ---- buffers, placed by hand and NOT emitted ---------------------------
