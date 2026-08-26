@@ -89,6 +89,7 @@ ENTITY sb_dsp IS
         -- 8237 channel 1
         DRQ        : OUT   std_logic;                    -- active HIGH
         DACK       : IN    std_logic;                    -- active HIGH
+        IOW        : IN    std_logic := '1';             -- 8237 /IOW, active LOW
         TC         : IN    std_logic;
         DMA_DIN    : IN    std_logic_vector(7 DOWNTO 0); -- byte <- memory
 
@@ -112,6 +113,7 @@ ARCHITECTURE behavior OF sb_dsp IS
   SIGNAL rd_prev : std_logic := '1';
   SIGNAL rd_done : std_logic;      -- END of the read strobe, not the start
   SIGNAL dma_lat : std_logic_vector(7 DOWNTO 0) := x"80";
+  SIGNAL iow_p   : std_logic := '1';
 
   -- ---- DSP command machine --------------------------------------------------
   SIGNAL cmd     : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
@@ -197,17 +199,21 @@ BEGIN
       END IF;
 
       -- ---- the 8237 handed a byte over -------------------------------------
-      -- CAPTURED WHILE DACK IS ASSERTED, used when it falls.
+      -- TIMED BY /IOW, which is the signal that exists to say exactly this.
       --
-      -- Reading DMA_DIN on the falling edge itself samples the bus one cycle
-      -- AFTER the cycle that owned it -- the memory has stopped driving by
-      -- then, so what arrives is whatever the shared read bus floated to. The
-      -- transfer still completes and the count still reaches zero, so it looks
-      -- exactly like success while playing silence.
-      IF DACK = '1' THEN
+      -- DACK is not the right reference and two attempts at using it failed
+      -- for the same reason: it is asserted in D_HOLD and stays asserted after
+      -- the memory strobe has released, so anything keyed to it samples a bus
+      -- nobody is driving. The 8237 deasserts /IOW on the cycle RAM_READY
+      -- arrives -- data valid throughout the strobe, taken at its end, which
+      -- is the ordinary contract for every device on this bus.
+      --
+      -- It was generated all along and wired to OPEN in the top level.
+      iow_p <= IOW;
+      IF DACK = '1' AND IOW = '0' THEN
         dma_lat <= DMA_DIN;
       END IF;
-      IF dack_p = '1' AND DACK = '0' THEN
+      IF DACK = '1' AND iow_p = '0' AND IOW = '1' THEN
         dac_hold <= dma_lat;
         dac_tgl  <= NOT dac_tgl;
         drq_r    <= '0';

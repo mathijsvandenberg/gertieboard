@@ -34,8 +34,6 @@
 CPU 8086
 org 0x100
 
-section .text
-
 ; ---- Sound Blaster ---------------------------------------------------------
 SB      equ 0x220
 RESETP  equ SB+6
@@ -1182,16 +1180,24 @@ msg_slash   db '/$'
 msg_r       db '  row $'
 msg_sp      db '    $'
 
-section .bss
-; ---- uninitialised, and deliberately NOT in the file --------------------
-; buildvol fills voltab, the file read fills hdr, and accum is cleared every
-; pass -- so emitting 20 KB of zeros only makes the .COM 20 KB longer to load
-; and to store. NASM's flat binary output drops trailing reserved space, which
-; takes this from 23 KB to under 5.
-hdr       resb 1084             ; the whole MOD header: the order table at +952
-                                ; is read on every row, so it stays resident
-accum     resw HALF             ; 16-bit mixing accumulator
-          alignb 256            ; XLAT needs the table 256-aligned per row
-voltab    resb 64*256
-          resb 512
-stacktop:
+; ---- buffers, placed by hand and NOT emitted ---------------------------
+;
+; Laid out with EQU from one aligned label rather than as a .bss section.
+; NASM's bin output does not chain a nobits section after .text on its own --
+; it started .bss at address ZERO, and because the section holds no file data
+; nothing about that looked wrong. hdr landed on the PSP, command line and
+; memory-control fields included, and voltab landed on the program's own code.
+; The visible symptom was every DOS allocation failing: "out of memory" on a
+; machine with 600 KB free, because the PSP DOS was consulting had been
+; overwritten by a MOD header.
+;
+; This way the addresses are arithmetic on a label the assembler has already
+; placed, so they cannot be anywhere else. voltab goes first because XLAT needs
+; it 256-aligned and the align directive below is the only padding emitted.
+
+          align 256
+bufbase:
+voltab    equ bufbase                          ; 64 rows x 256, 256-aligned
+hdr       equ bufbase + 16384                  ; the whole 1084-byte MOD header
+accum     equ bufbase + 16384 + 1084           ; HALF 16-bit mixing slots
+stacktop  equ bufbase + 16384 + 1084 + HALF*2 + 512

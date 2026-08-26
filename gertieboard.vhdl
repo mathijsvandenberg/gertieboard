@@ -125,6 +125,7 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_drq_v                : std_logic_vector(3 DOWNTO 0);  -- to the 8237
   SIGNAL n_dack_v               : std_logic_vector(3 DOWNTO 0);  -- from the 8237
   SIGNAL n_sb_drq               : std_logic;                     -- SB DSP -> ch1
+  SIGNAL n_dma_iow              : std_logic;                     -- 8237 /IOW to devices
   SIGNAL n_sb_irq               : std_logic;                     -- SB DSP -> IR5
   SIGNAL n_sb_pcm               : std_logic_vector(15 DOWNTO 0); -- FM + DAC
   SIGNAL n_sb_pcm_stb           : std_logic;
@@ -386,7 +387,7 @@ BEGIN
       DMA_MEMR             => n_dma_memr,
       DMA_MEMW             => n_dma_memw,
       DMA_IOR              => OPEN,
-      DMA_IOW              => OPEN,
+      DMA_IOW              => n_dma_iow,
       TC                   => n_tc,
       DATAOUT              => n_periph_rdata
     );
@@ -816,6 +817,7 @@ BEGIN
       DATAOUT              => n_periph_rdata,
       DRQ                  => n_sb_drq,
       DACK                 => n_dack_v(1),
+      IOW                  => n_dma_iow,
       TC                   => n_tc,
       DMA_DIN              => n_periph_rdata,
       IRQ                  => n_sb_irq,
