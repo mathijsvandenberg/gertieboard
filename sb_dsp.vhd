@@ -110,7 +110,8 @@ ARCHITECTURE behavior OF sb_dsp IS
   SIGNAL wr_prev : std_logic := '1';
   SIGNAL wr_rise : std_logic;
   SIGNAL rd_prev : std_logic := '1';
-  SIGNAL rd_rise : std_logic;
+  SIGNAL rd_done : std_logic;      -- END of the read strobe, not the start
+  SIGNAL dma_lat : std_logic_vector(7 DOWNTO 0) := x"80";
 
   -- ---- DSP command machine --------------------------------------------------
   SIGNAL cmd     : std_logic_vector(7 DOWNTO 0) := (OTHERS => '0');
@@ -156,7 +157,18 @@ BEGIN
   io_hit  <= '1' WHEN ADDR(15 DOWNTO 4) = IO_BASE(15 DOWNTO 4) ELSE '0';
   io_reg  <= ADDR(3 DOWNTO 0);
   wr_rise <= '1' WHEN (wr_prev = '1' AND WR = '0') ELSE '0';
-  rd_rise <= '1' WHEN (rd_prev = '1' AND RD = '0') ELSE '0';
+  -- CONSUME A BUFFERED BYTE AT THE END OF THE READ, NOT THE BEGINNING.
+  --
+  -- This was the falling edge of RD, which is when the CPU STARTS a read. The
+  -- V20 latches read data at the end of the cycle, so advancing the buffer
+  -- there meant the byte had already been replaced by the next one before the
+  -- CPU sampled it: GET VERSION returned 01 01 instead of 02 01, and reported
+  -- a DSP 1.1 that has never existed.
+  --
+  -- dma8237 records the same rule for writes -- latch on the RISING edge of
+  -- the strobe, when the data has been stable throughout the cycle. It applies
+  -- just as much to a side effect on a read.
+  rd_done <= '1' WHEN (rd_prev = '0' AND RD = '1') ELSE '0';
 
   DRQ <= drq_r;
   IRQ <= irq_r;
@@ -185,10 +197,18 @@ BEGIN
       END IF;
 
       -- ---- the 8237 handed a byte over -------------------------------------
-      -- Latched on the FALLING edge of DACK, which is when the byte is on the
-      -- bus and settled. Same contract fdc8272 uses.
+      -- CAPTURED WHILE DACK IS ASSERTED, used when it falls.
+      --
+      -- Reading DMA_DIN on the falling edge itself samples the bus one cycle
+      -- AFTER the cycle that owned it -- the memory has stopped driving by
+      -- then, so what arrives is whatever the shared read bus floated to. The
+      -- transfer still completes and the count still reaches zero, so it looks
+      -- exactly like success while playing silence.
+      IF DACK = '1' THEN
+        dma_lat <= DMA_DIN;
+      END IF;
       IF dack_p = '1' AND DACK = '0' THEN
-        dac_hold <= DMA_DIN;
+        dac_hold <= dma_lat;
         dac_tgl  <= NOT dac_tgl;
         drq_r    <= '0';
 
@@ -290,7 +310,7 @@ BEGIN
       END IF;
 
       -- ---- CPU reads -------------------------------------------------------
-      IF io_hit = '1' AND rd_rise = '1' THEN
+      IF io_hit = '1' AND rd_done = '1' THEN
         IF io_reg = x"A" THEN
           IF rd_n = 2 THEN
             rd_a <= rd_b;
