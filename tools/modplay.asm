@@ -64,8 +64,18 @@ start:
         mov  bx, stacktop + 15
         mov  cl, 4
         shr  bx, cl
+        mov  [wantpar], bx
         mov  ah, 0x4A
         int  0x21
+        jnc  .shrunk
+        ; Never checked before, and it is the one call everything else depends
+        ; on: if the block does not shrink there is no free memory to allocate
+        ; from, and every later failure is a consequence rather than a cause.
+        mov  [doserr], ax
+        mov  dx, msg_e_shrk
+        call puts
+        jmp  .die
+.shrunk:
 
         mov  dx, msg_hdr
         call puts
@@ -94,6 +104,16 @@ start:
         jmp  .die
 .loadfail:
         mov  dx, [errmsg]
+        call puts
+        mov  dx, msg_e_det
+        call puts
+        mov  ax, [freepar]
+        call putdec
+        mov  dx, msg_e_par
+        call puts
+        mov  ax, [doserr]
+        call putdec
+        mov  dx, msg_crlf
         call puts
         jmp  .die
 .nodma:
@@ -282,33 +302,96 @@ loadmod:
         jmp  .pread
 .pdone:
 
-        ; ---- sample data, one block each ----
+        ; ---- sample data: as much of it as there is room for ----------------
+        ; DOS hands this program about 57 KB in total, so a 41 KB set of
+        ; samples does not fit alongside 11 KB of patterns. Rather than refuse
+        ; to play, each sample takes what is left and is TRUNCATED if it has
+        ; to be -- s_len is set to what actually loaded, so the mixer stops at
+        ; the real end and never reads a block it does not own.
+        ;
+        ; Whatever is not read still has to be SKIPPED IN THE FILE, or every
+        ; sample after it loads from the wrong offset and the module turns to
+        ; noise. That is what the seek at the end of the loop is for.
         xor  bx, bx
 .dloop:
         mov  ax, [s_len+bx]
-        mov  [s_seg+bx], 0
+        mov  word [s_seg+bx], 0
         cmp  ax, 2                      ; length 0 or 1 word = no sample
         jbe  .dnext
+        mov  [wantb], ax
+        mov  word [gotb], 0
 
         add  ax, 15
         mov  cl, 4
-        shr  ax, cl                     ; bytes -> paragraphs
+        shr  ax, cl
+        mov  [wantp], ax
+
+        ; what will DOS actually give us? A failing AH=48h reports the largest
+        ; block in BX, which is the honest number to size the request against.
         push bx
-        mov  bx, ax
+        mov  bx, 0xFFFF
+        mov  ah, 0x48
+        int  0x21
+        mov  ax, bx
+        pop  bx
+        test ax, ax
+        jz   .noroom
+        cmp  ax, [wantp]
+        jae  .askfor
+        mov  [wantp], ax                ; take what there is
+.askfor:
+        push bx
+        mov  bx, [wantp]
         mov  ah, 0x48
         int  0x21
         pop  bx
-        jc   .bad
+        jc   .noroom
         mov  [s_seg+bx], ax
 
+        ; how many bytes that block can hold, capped by the sample's length
+        mov  ax, [wantp]
+        mov  cl, 4
+        shl  ax, cl
+        cmp  ax, [wantb]
+        jbe  .capped
+        mov  ax, [wantb]
+.capped:
+        mov  [gotb], ax
+        mov  [s_len+bx], ax             ; the mixer stops at what really loaded
+        cmp  ax, [wantb]
+        je   .full
+        inc  byte [ncut]
+        jmp  .doread
+.full:
+        inc  byte [nfull]
+.doread:
+        mov  ax, [s_seg+bx]
+        push bx
+        mov  cx, [gotb]
         push ds
-        mov  cx, [s_len+bx]
         mov  ds, ax
         xor  dx, dx
         mov  bx, [cs:fh]
         mov  ah, 0x3F
         int  0x21
         pop  ds
+        pop  bx
+        jmp  .skiprest
+.noroom:
+        inc  byte [nskip]
+        mov  word [s_len+bx], 0         ; nothing to play from
+.skiprest:
+        ; step over whatever was not read
+        mov  ax, [wantb]
+        sub  ax, [gotb]
+        jz   .dnext
+        push bx
+        mov  bx, [fh]
+        xor  cx, cx
+        mov  dx, ax
+        mov  ax, 0x4201                 ; seek from current position
+        int  0x21
+        pop  bx
 .dnext:
         add  bx, 2
         cmp  bx, 62
@@ -350,9 +433,35 @@ loadmod:
         call putdec
         mov  dx, msg_crlf
         call puts
+
+        mov  dx, msg_smp
+        call puts
+        mov  al, [nfull]
+        xor  ah, ah
+        call putdec
+        mov  dx, msg_smp2
+        call puts
+        mov  al, [ncut]
+        xor  ah, ah
+        call putdec
+        mov  dx, msg_smp3
+        call puts
+        mov  al, [nskip]
+        xor  ah, ah
+        call putdec
+        mov  dx, msg_smp4
+        call puts
         clc
         ret
 .bad:
+        ; A failed AH=48h returns the largest block available in BX. Printing
+        ; it turns "out of memory" from a guess into a measurement: a big
+        ; number means the request was wrong, a tiny one means the shrink was.
+        mov  [doserr], ax
+        mov  bx, 0xFFFF
+        mov  ah, 0x48
+        int  0x21
+        mov  [freepar], bx
         mov  word [errmsg], msg_e_mem
         stc
         ret
@@ -424,6 +533,14 @@ allocdma:
         clc
         ret
 .bad:
+        ; A failed AH=48h returns the largest block available in BX. Printing
+        ; it turns "out of memory" from a guess into a measurement: a big
+        ; number means the request was wrong, a tiny one means the shrink was.
+        mov  [doserr], ax
+        mov  bx, 0xFFFF
+        mov  ah, 0x48
+        int  0x21
+        mov  [freepar], bx
         mov  word [errmsg], msg_e_mem
         stc
         ret
@@ -1109,6 +1226,15 @@ putdec:
 fname     times 80 db 0
 fh        dw 0
 errmsg    dw 0
+freepar   dw 0
+doserr    dw 0
+wantpar   dw 0
+wantb     dw 0
+wantp     dw 0
+gotb      dw 0
+nfull     db 0
+ncut      db 0
+nskip     db 0
 patseg    dw 0
 dmaseg    dw 0
 dmaphys   dw 0
@@ -1166,11 +1292,18 @@ msg_e_open  db 'cannot open that file - check the name and that it is on the dis
 msg_e_short db 'file is too short to be a MOD - the header is 1084 bytes',13,10,'$'
 msg_e_sig   db 'not a 4-channel MOD - no M.K., 4CHN or FLT4 signature at 1080',13,10,'$'
 msg_e_mem   db 'out of memory loading patterns or samples',13,10,'$'
+msg_e_shrk  db 'DOS refused to shrink this program down to size',13,10,'$'
+msg_e_det   db '  largest free block: $'
+msg_e_par   db ' paragraphs, DOS error $'
 msg_nomem   db 'not enough memory for the DMA buffer',13,10,'$'
 msg_nosb    db 'no Sound Blaster answered at 220h',13,10,'$'
 msg_title   db 'title    : $'
 msg_pats    db 'patterns : $'
 msg_pos     db '   positions : $'
+msg_smp     db 'samples  : $'
+msg_smp2    db ' whole, $'
+msg_smp3    db ' shortened, $'
+msg_smp4    db ' skipped',13,10,'$'
 msg_playing db 'playing - SPACE pauses, ESC quits',13,10,'$'
 msg_bye     db 13,10,'stopped.',13,10,'$'
 msg_crlf    db 13,10,'$'
