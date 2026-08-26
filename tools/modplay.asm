@@ -901,8 +901,7 @@ fillhalf:
 ;  instead of twelve.
 ; ----------------------------------------------------------------------------
 ; wrapchk -- SI has reached the end of the sample. Loop it, or stop the
-; channel and return carry set. Shared by both inner loops so the looping rule
-; lives in exactly one place.
+; channel and return carry set.
 wrapchk:
         push bx
         mov  bx, [curch]
@@ -919,135 +918,39 @@ wrapchk:
         stc
         ret
 
+; ----------------------------------------------------------------------------
+;  mixchunk -- add [chunklen] samples of every live channel into the accumulator
+;
+;  MEASURED: about 134 cycles per sample per channel, which is five times what
+;  the instruction count suggests. The difference is memory. Every access in
+;  here crosses the V20's eight-bit bus to SDRAM, so what matters is the NUMBER
+;  OF ACCESSES per sample and very little else. The old loop made six:
+;
+;      mov al,[es:si]   xlat   add [di],ax (read+write)
+;      cmp si,[chlen]   cmp di,[accend]
+;
+;  Two of those are bookkeeping. Both are gone from the fast path:
+;
+;   * the end-of-sample check, by computing beforehand how many samples can be
+;     produced before the sample ends. When the step is under one byte per
+;     sample -- which is every note at or below the mixing rate -- n samples
+;     advance strictly less than n bytes, so "bytes remaining" IS a safe count
+;     and needs no division to find.
+;
+;   * the loop-end check, by freeing DX to be the counter. DX only held the
+;     high half of the step, which is zero for exactly the same notes, so
+;     "adc si,0" replaces it and costs no memory at all.
+;
+;  Four accesses instead of six. Notes above the mixing rate keep the general
+;  loop, which still checks both.
+;
+;  The accumulator is cleared once per chunk with rep stosw rather than having
+;  the first channel store into it. A block move has no per-word instruction
+;  fetch, which on this bus is worth more than the read it saves -- and it puts
+;  every channel on one code path instead of two.
+; ----------------------------------------------------------------------------
 mixchunk:
-        mov  byte [anymix], 0
-        mov  word [curch], 0
-.chan:
-        mov  bp, [curch]
-
-        ; muted?
-        mov  ax, bp
-        shr  ax, 1
-        mov  cl, al
-        mov  al, 1
-        shl  al, cl
-        test byte [chmask], al
-        jz   .nextch
-
-        mov  bx, bp
-        mov  ax, [ch_seg+bx]
-        test ax, ax
-        jz   .nextch                    ; nothing playing here
-        mov  es, ax
-        mov  ax, [ch_len+bx]
-        test ax, ax
-        jz   .nextch
-        mov  [chlen], ax
-
-        ; where this chunk starts and ends in the accumulator
-        mov  ax, [filled]
-        add  ax, ax
-        add  ax, accum
-        mov  di, ax
-        mov  ax, [chunklen]
-        add  ax, ax
-        add  ax, di
-        mov  [accend], ax
-
-        ; volume table row -- CL is the shift, so this must happen before CX
-        ; becomes the step
-        mov  al, [ch_vol+bp]
-        xor  ah, ah
-        shl  ax, 8
-        add  ax, voltab
-        mov  [tabptr], ax
-
-        ; load everything that BP indexes BEFORE BP stops being the index
-        mov  cx, [ch_step_l+bp]
-        mov  dx, [ch_step_h+bp]
-        mov  si, [ch_pos_h+bp]
-        mov  bp, [ch_pos_l+bp]
-        mov  bx, [tabptr]
-
-        ; THE FIRST LIVE CHANNEL WRITES; THE REST ADD.
-        ;
-        ; add [di],ax is a word read-modify-write: four bus cycles on an
-        ; eight-bit bus, every sample of every channel. The first channel has
-        ; nothing to add to, so it stores instead -- and once it does, the
-        ; accumulator no longer needs clearing beforehand either. That removes
-        ; a 2048-word rep stosw per half as well.
-        cmp  byte [anymix], 0
-        jne  .addloop
-        mov  byte [anymix], 1
-
-.movsmp:
-        cmp  si, [chlen]
-        jae  .wrapm
-.gom:
-        mov  al, [es:si]
-        xlat
-        cbw
-        mov  [di], ax
-        inc  di
-        inc  di
-        add  bp, cx
-        adc  si, dx
-        cmp  di, [accend]
-        jb   .movsmp
-        jmp  .chdone
-.wrapm:
-        call wrapchk
-        jnc  .gom
-        ; This channel STORES rather than adds, so if it stops part way through
-        ; the chunk the rest was never written -- and the blanket clear that
-        ; used to cover that is gone. Silence the remainder here, or the tail
-        ; of the chunk replays whatever the previous pass left, and every later
-        ; channel adds on top of it.
-        push es
-        push ds
-        pop  es
-        mov  cx, [accend]
-        sub  cx, di
-        shr  cx, 1
-        jcxz .wm_done
-        xor  ax, ax
-        rep  stosw
-.wm_done:
-        pop  es
-        jmp  .chdone
-
-.addloop:
-.smp:
-        cmp  si, [chlen]
-        jae  .wrap
-.go:
-        mov  al, [es:si]
-        xlat                            ; AL = voltab[row + sample]
-        cbw
-        add  [di], ax
-        inc  di
-        inc  di
-        add  bp, cx                     ; fraction, then carry into the integer
-        adc  si, dx
-        cmp  di, [accend]
-        jb   .smp
-        jmp  .chdone
-.wrap:
-        call wrapchk
-        jc   .chdone
-        jmp  .go
-
-.chdone:
-        mov  bx, [curch]
-        mov  [ch_pos_h+bx], si
-        mov  [ch_pos_l+bx], bp
-.nextch:
-        add  word [curch], 2
-        cmp  word [curch], 8
-        jb   .chan
-        ; nothing was live: the chunk was never written, so silence it
-        cmp  byte [anymix], 0
-        jne  .done
+        ; clear this chunk's slice of the accumulator
         push es
         push ds
         pop  es
@@ -1059,7 +962,118 @@ mixchunk:
         xor  ax, ax
         rep  stosw
         pop  es
-.done:
+
+        mov  word [curch], 0
+.chan:
+        mov  bp, [curch]
+
+        mov  ax, bp
+        shr  ax, 1
+        mov  cl, al
+        mov  al, 1
+        shl  al, cl
+        test byte [chmask], al
+        jz   .nextch
+
+        mov  bx, bp
+        mov  ax, [ch_seg+bx]
+        test ax, ax
+        jz   .nextch
+        mov  es, ax
+        mov  ax, [ch_len+bx]
+        test ax, ax
+        jz   .nextch
+        mov  [chlen], ax
+
+        mov  ax, [filled]
+        add  ax, ax
+        add  ax, accum
+        mov  di, ax
+        mov  ax, [chunklen]
+        add  ax, ax
+        add  ax, di
+        mov  [accend], ax
+
+        mov  al, [ch_vol+bp]
+        xor  ah, ah
+        shl  ax, 8
+        add  ax, voltab
+        mov  [tabptr], ax
+
+        mov  cx, [ch_step_l+bp]
+        mov  dx, [ch_step_h+bp]
+        mov  si, [ch_pos_h+bp]
+        mov  bp, [ch_pos_l+bp]
+        mov  bx, [tabptr]
+
+        test dx, dx
+        jnz  .slow                      ; note above the mixing rate
+
+; ---- fast path: step < 1 byte per sample -----------------------------------
+.frun:
+        mov  ax, [chlen]
+        sub  ax, si
+        jbe  .fwrap                     ; at or past the end already
+        push ax
+        mov  ax, [accend]
+        sub  ax, di
+        shr  ax, 1                      ; samples left in the chunk
+        mov  dx, ax
+        pop  ax
+        test dx, dx
+        jz   .chdone
+        cmp  ax, dx
+        jae  .fgo                       ; the sample outlasts the chunk
+        mov  dx, ax                     ; else it runs out first
+.fgo:
+.fast:
+        mov  al, [es:si]
+        xlat
+        cbw
+        add  [di], ax
+        inc  di
+        inc  di
+        add  bp, cx
+        adc  si, 0
+        dec  dx
+        jnz  .fast
+        cmp  di, [accend]
+        jb   .frun
+        jmp  .chdone
+.fwrap:
+        call wrapchk
+        jc   .chdone
+        jmp  .frun
+
+; ---- general path: the position advances a whole byte or more --------------
+.slow:
+        cmp  si, [chlen]
+        jae  .swrap
+.sgo:
+        mov  al, [es:si]
+        xlat
+        cbw
+        add  [di], ax
+        inc  di
+        inc  di
+        add  bp, cx
+        adc  si, dx
+        cmp  di, [accend]
+        jb   .slow
+        jmp  .chdone
+.swrap:
+        call wrapchk
+        jc   .chdone
+        jmp  .sgo
+
+.chdone:
+        mov  bx, [curch]
+        mov  [ch_pos_h+bx], si
+        mov  [ch_pos_l+bx], bp
+.nextch:
+        add  word [curch], 2
+        cmp  word [curch], 8
+        jb   .chan
         ret
 
 ; ----------------------------------------------------------------------------
@@ -1695,7 +1709,6 @@ tabptr    dw 0
 curch     dw 0
 chlen     dw 0
 accend    dw 0
-anymix    db 0
 tmp_lo    dw 0
 tmp_cnt   dw 0
 
