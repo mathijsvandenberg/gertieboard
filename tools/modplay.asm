@@ -942,8 +942,12 @@ polltest:
         jb   .pok
         add  ax, BUFLEN
 .pok:
+        mov  [prevcnt], bx              ; BEFORE the repaint, not after: this
+                                        ; is the value the next gap is measured
+                                        ; from, and it must not depend on what
+                                        ; any display code does to registers
         cmp  ax, [maxgap]
-        jbe  .pnomax
+        jbe  .pnomax2
         mov  [maxgap], ax
         ; only repaint when it changes, so the display cannot be the cause
         mov  di, linebuf
@@ -952,10 +956,7 @@ polltest:
         mov  ax, [maxgap]
         call vputdec
         call vblit
-        mov  ax, [maxgap]
-.pnomax:
-        mov  [prevcnt], bx
-
+.pnomax2:
         push es
         mov  ax, BDASEG
         mov  es, ax
@@ -1641,6 +1642,10 @@ vputdec:                                ; AX = value, DI = buffer pos
 
 vblit:                                  ; DI = end of text in linebuf
         push es
+        push ax
+        push bx
+        push cx
+        push si
         push ds
         pop  es
         mov  cx, di
@@ -1665,6 +1670,10 @@ vblit:                                  ; DI = end of text in linebuf
 .bl:    lodsb
         stosw
         loop .bl
+        pop  si
+        pop  cx
+        pop  bx
+        pop  ax
         pop  es
         ret
 
