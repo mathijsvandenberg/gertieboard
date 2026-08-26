@@ -46,8 +46,10 @@ READP   equ SB+0x0A
 WRITEP  equ SB+0x0C
 RSTATP  equ SB+0x0E
 
-MIXRATE equ 11025
-TCONST  equ 256 - (1000000 / MIXRATE)
+; The mixing rate is chosen at run time, because the mixer's cost scales
+; exactly with it and this machine is close to the edge at four channels.
+; -r8 / -r11 / -r22 pick 8000, 11025 or 22050 Hz.
+DEFRATE equ 11025
 
 ; ---- buffer geometry -------------------------------------------------------
 HALF    equ 2048                ; samples per half, ~186 ms at 11025
@@ -155,6 +157,10 @@ scanopts:
         lodsb
         cmp  al, 13
         je   .done
+        cmp  al, 'r'
+        je   .rate
+        cmp  al, 'R'
+        je   .rate
         cmp  al, '1'
         jb   .s
         cmp  al, '4'
@@ -164,6 +170,22 @@ scanopts:
         mov  al, 1
         shl  al, cl                     ; 8086: shift by CL, not by immediate
         mov  [chmask], al
+        jmp  .s
+.rate:
+        lodsb
+        cmp  al, '8'
+        jne  .r11
+        mov  word [mixrate], 8000
+        jmp  .s
+.r11:
+        cmp  al, '2'
+        jne  .r1
+        mov  word [mixrate], 22050
+        jmp  .s
+.r1:
+        cmp  al, '1'
+        jne  .s
+        mov  word [mixrate], 11025
         jmp  .s
 .done:
         ret
@@ -648,7 +670,12 @@ sbinit:
         call dspwr
         mov  al, 0x40                   ; time constant
         call dspwr
-        mov  al, TCONST
+        ; tc = 256 - 1000000/rate, worked out here rather than by the
+        ; assembler now that the rate is not known until the command line is
+        mov  dx, 0x000F
+        mov  ax, 0x4240                 ; 1000000
+        div  word [mixrate]
+        neg  al                         ; 256 - al, modulo 256
         call dspwr
         mov  al, 0x48                   ; auto-init block length
         call dspwr
@@ -688,6 +715,12 @@ play:
         mov  byte [tickno], 0
         mov  word [tickcnt], 0
         mov  byte [lasthalf], 0xFF
+        mov  dx, msg_rate
+        call puts
+        mov  ax, [mixrate]
+        call putdec
+        mov  dx, msg_hz
+        call puts
         mov  dx, msg_chan
         call puts
         mov  al, [chmask]
@@ -777,14 +810,8 @@ play:
 ; ----------------------------------------------------------------------------
 fillhalf:
         push es
-        ; clear the 16-bit accumulator
-        push ds
-        pop  es
-        mov  di, accum
-        mov  cx, HALF
-        xor  ax, ax
-        rep  stosw
-
+        ; No clear here any more: the first live channel of each chunk STORES
+        ; rather than adds, and a chunk with no live channel silences itself.
         mov  word [filled], 0
 .chunk:
         ; how many samples until the next tick?
@@ -849,7 +876,27 @@ fillhalf:
 ;  curch and the two loop bounds are memory compares -- six accesses a sample
 ;  instead of twelve.
 ; ----------------------------------------------------------------------------
+; wrapchk -- SI has reached the end of the sample. Loop it, or stop the
+; channel and return carry set. Shared by both inner loops so the looping rule
+; lives in exactly one place.
+wrapchk:
+        push bx
+        mov  bx, [curch]
+        mov  ax, [ch_replen+bx]
+        cmp  ax, 2
+        jbe  .stopit
+        mov  si, [ch_rep+bx]
+        pop  bx
+        clc
+        ret
+.stopit:
+        mov  word [ch_seg+bx], 0
+        pop  bx
+        stc
+        ret
+
 mixchunk:
+        mov  byte [anymix], 0
         mov  word [curch], 0
 .chan:
         mov  bp, [curch]
@@ -897,6 +944,39 @@ mixchunk:
         mov  si, [ch_pos_h+bp]
         mov  bp, [ch_pos_l+bp]
         mov  bx, [tabptr]
+
+        ; THE FIRST LIVE CHANNEL WRITES; THE REST ADD.
+        ;
+        ; add [di],ax is a word read-modify-write: four bus cycles on an
+        ; eight-bit bus, every sample of every channel. The first channel has
+        ; nothing to add to, so it stores instead -- and once it does, the
+        ; accumulator no longer needs clearing beforehand either. That removes
+        ; a 2048-word rep stosw per half as well.
+        cmp  byte [anymix], 0
+        jne  .addloop
+        mov  byte [anymix], 1
+
+.movsmp:
+        cmp  si, [chlen]
+        jae  .wrapm
+.gom:
+        mov  al, [es:si]
+        xlat
+        cbw
+        mov  [di], ax
+        inc  di
+        inc  di
+        add  bp, cx
+        adc  si, dx
+        cmp  di, [accend]
+        jb   .movsmp
+        jmp  .chdone
+.wrapm:
+        call wrapchk
+        jc   .chdone
+        jmp  .gom
+
+.addloop:
 .smp:
         cmp  si, [chlen]
         jae  .wrap
@@ -912,21 +992,10 @@ mixchunk:
         cmp  di, [accend]
         jb   .smp
         jmp  .chdone
-
 .wrap:
-        ; past the end: loop if the sample repeats, otherwise stop it
-        push bx
-        mov  bx, [curch]
-        mov  ax, [ch_replen+bx]
-        cmp  ax, 2
-        jbe  .stopch
-        mov  si, [ch_rep+bx]
-        pop  bx
+        call wrapchk
+        jc   .chdone
         jmp  .go
-.stopch:
-        mov  word [ch_seg+bx], 0
-        pop  bx
-        jmp  .chdone
 
 .chdone:
         mov  bx, [curch]
@@ -936,6 +1005,21 @@ mixchunk:
         add  word [curch], 2
         cmp  word [curch], 8
         jb   .chan
+        ; nothing was live: the chunk was never written, so silence it
+        cmp  byte [anymix], 0
+        jne  .done
+        push es
+        push ds
+        pop  es
+        mov  ax, [filled]
+        add  ax, ax
+        add  ax, accum
+        mov  di, ax
+        mov  cx, [chunklen]
+        xor  ax, ax
+        rep  stosw
+        pop  es
+.done:
         ret
 
 ; ----------------------------------------------------------------------------
@@ -1119,7 +1203,7 @@ setstep:
         mov  ax, PALLO
         div  bx                         ; AX = frequency
         xor  dx, dx
-        mov  bx, MIXRATE
+        mov  bx, [mixrate]
         div  bx                         ; AX = integer part, DX = remainder
         mov  [ch_step_h+bp], ax
         mov  ax, 0
@@ -1259,8 +1343,9 @@ setbpm:
         xor  ah, ah
         add  ax, ax
         mov  bx, ax                     ; bpm * 2
-        mov  dx, (MIXRATE*5) >> 16
-        mov  ax, (MIXRATE*5) & 0xFFFF
+        mov  ax, [mixrate]
+        mov  cx, 5
+        mul  cx                         ; DX:AX = rate * 5
         div  bx
         mov  [samptick], ax
         ret
@@ -1411,6 +1496,7 @@ bpm       db 125
 tickno    db 0
 tickcnt   dw 0
 samptick  dw 220
+mixrate   dw DEFRATE
 paused    db 0
 posdirty  db 0
 nunder    dw 0
@@ -1429,6 +1515,7 @@ tabptr    dw 0
 curch     dw 0
 chlen     dw 0
 accend    dw 0
+anymix    db 0
 tmp_lo    dw 0
 tmp_cnt   dw 0
 
@@ -1458,7 +1545,7 @@ ch_eff    times 4 dw 0
 ch_par    times 4 dw 0
 
 msg_hdr     db 'MODPLAY - ProTracker 4-channel, Sound Blaster at 220h',13,10,'$'
-msg_usage   db 'usage: modplay file.mod [-1|-2|-3|-4 to play one channel]',13,10,'$'
+msg_usage   db 'usage: modplay file.mod [-1..-4 one channel] [-r8|-r11|-r22 rate]',13,10,'$'
 msg_e_open  db 'cannot open that file - check the name and that it is on the disk',13,10,'$'
 msg_e_short db 'file is too short to be a MOD - the header is 1084 bytes',13,10,'$'
 msg_e_sig   db 'not a 4-channel MOD - no M.K., 4CHN or FLT4 signature at 1080',13,10,'$'
@@ -1475,6 +1562,8 @@ msg_smp     db 'samples  : $'
 msg_smp2    db ' whole, $'
 msg_smp3    db ' shortened, $'
 msg_smp4    db ' skipped',13,10,'$'
+msg_rate    db 'mixing   : $'
+msg_hz      db ' Hz',13,10,'$'
 msg_chan    db 'channels : mask $'
 msg_playing db 'playing - SPACE pauses, S shows stats, ESC quits',13,10,'$'
 msg_bye     db 13,10,'stopped.',13,10,'$'
