@@ -52,7 +52,11 @@ RSTATP  equ SB+0x0E
 DEFRATE equ 11025
 
 ; ---- buffer geometry -------------------------------------------------------
-HALF    equ 2048                ; samples per half, ~186 ms at 11025
+; 1024 samples a half. This was raised to 2048 on a guess that the mixer was
+; short of time; the guess was wrong. A fill measures 63000 PIT counts, 52.7 ms,
+; against a 186 ms half at 11025 Hz -- 28% of the window. At 1024 the ratio is
+; identical and the latency halves, from 372 ms of buffered audio to 186.
+HALF    equ 1024
 BUFLEN  equ HALF*2
 
 ; ---- Amiga PAL clock / 2, for period -> frequency --------------------------
