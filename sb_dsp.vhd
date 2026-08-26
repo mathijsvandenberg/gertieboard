@@ -146,6 +146,7 @@ ARCHITECTURE behavior OF sb_dsp IS
   -- ---- sample clock, CLK48 --------------------------------------------------
   SIGNAL div     : unsigned(13 DOWNTO 0) := (OTHERS => '0');
   SIGNAL div_top : unsigned(13 DOWNTO 0);
+  SIGNAL tcn     : unsigned(8 DOWNTO 0);
   SIGNAL smp_tgl : std_logic := '0';
   SIGNAL smp_s   : std_logic_vector(2 DOWNTO 0) := "000";
   SIGNAL smp_p   : std_logic := '0';
@@ -176,7 +177,13 @@ BEGIN
   IRQ <= irq_r;
 
   -- 48 * (256 - tconst), as shifts: 32x + 16x.
-  div_top <= (resize(256 - tconst, 14) sll 5) + (resize(256 - tconst, 14) sll 4);
+  --
+  -- NINE BITS for the subtraction. In eight, 256 - tconst is computed modulo
+  -- 256, so a tconst of 0 -- which means the slowest rate, not the fastest --
+  -- gives 0 and a divider of 0, and the sample clock free-runs at 48 MHz. The
+  -- one value that should be safest was the one that broke it.
+  tcn     <= to_unsigned(256, 9) - resize(tconst, 9);
+  div_top <= (resize(tcn, 14) sll 5) + (resize(tcn, 14) sll 4);
 
   -- ==========================================================================
   --  CPU side: registers, the command machine, and the DMA handshake
@@ -274,10 +281,18 @@ BEGIN
                     playing <= '1';
                   WHEN x"48" =>            -- block length for auto-init
                     blk_len <= unsigned(DATAIN & p1);
+                  -- ONE-PARAMETER COMMANDS TAKE THEIR VALUE FROM DATAIN.
+                  -- p1 is only written when pcnt = 2, which never happens for
+                  -- these, so reading it here got whatever a previous
+                  -- two-parameter command had left behind. tconst therefore
+                  -- stayed 0 and the sample clock ran at 48 MHz: the DMA
+                  -- emptied its buffer in under a millisecond, which is a
+                  -- click rather than a tone, and turns a module into
+                  -- volume-enveloped white noise.
                   WHEN x"40" =>            -- time constant
-                    tconst <= unsigned(p1);
+                    tconst <= unsigned(DATAIN);
                   WHEN x"E0" =>            -- identify
-                    rd_a <= NOT p1;
+                    rd_a <= NOT DATAIN;
                     rd_n <= 1;
                   WHEN OTHERS => NULL;
                 END CASE;
