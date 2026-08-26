@@ -214,6 +214,22 @@ start:
         pop  cx
         ; Done when the count reaches zero. A real 8237 wraps past it to FFFF
         ; and this model stops at 0, so accept either rather than assuming.
+        ; sample what the DAC is actually receiving, spread across the run
+        push bx
+        mov  bx, [snapn]
+        cmp  bx, 8
+        jae  .nosnap
+        mov  ax, cx
+        and  ax, 0x0FFF
+        jnz  .nosnap
+        mov  dx, SB+0x0F
+        in   al, dx
+        mov  si, snaps
+        add  si, bx
+        mov  [si], al
+        inc  word [snapn]
+.nosnap:
+        pop  bx
         cmp  bx, 0
         je   .played
         cmp  bx, 0xFFFF
@@ -233,6 +249,25 @@ start:
         jmp  .fail
 .played:
         mov  dx, msg_ok
+        call puts
+        ; What did the DAC actually get? The tone buffer is 40h and C0h only,
+        ; so anything else here means the bytes never arrived, however cleanly
+        ; the transfer reported itself.
+        mov  dx, msg_snap
+        call puts
+        mov  si, snaps
+        mov  cx, [snapn]
+        test cx, cx
+        jz   .nodump
+.dump:
+        lodsb
+        call puthex
+        mov  dl, ' '
+        mov  ah, 2
+        int  0x21
+        loop .dump
+.nodump:
+        mov  dx, msg_crlf
         call puts
         jmp  .quiet
 
@@ -390,6 +425,8 @@ putdec:
 
 ; ---- data ------------------------------------------------------------------
 mode    db 0
+snapn   dw 0
+snaps   times 8 db 0
 rstval  db 0
 vmaj    db 0
 physlo  dw 0
@@ -408,5 +445,6 @@ msg_crlf  db 13,10,'$'
 msg_nordy db ' NO RESPONSE - the DSP never raised the ready bit',13,10,'$'
 msg_notaa db ' not AA - something answered, but it is not a DSP',13,10,'$'
 msg_stuck db ' DMA DID NOT MOVE, count still $'
+msg_snap  db 'DAC got  : $'
 msg_fin   db 13,10,'done.',13,10,'$'
 msg_fail  db 13,10,'FAILED.',13,10,'$'

@@ -341,7 +341,12 @@ BEGIN
   END PROCESS;
 
   -- Shared tri-state read bus: drive only when addressed and only during a read
-  DATAOUT <= rd_a                                  WHEN (io_hit='1' AND RD='0' AND io_reg=x"A") ELSE
+  -- 2xF is not a Sound Blaster register. It reads back the last byte the DMA
+  -- actually delivered, because "the transfer completed" and "the right bytes
+  -- arrived" are different claims and nothing else in this path distinguishes
+  -- them. A tool can compare what it reads here against the buffer it queued.
+  DATAOUT <= dac_hold                              WHEN (io_hit='1' AND RD='0' AND io_reg=x"F") ELSE
+             rd_a                                  WHEN (io_hit='1' AND RD='0' AND io_reg=x"A") ELSE
              x"00"                                 WHEN (io_hit='1' AND RD='0' AND io_reg=x"C") ELSE
              (7 => '1', OTHERS => '0')             WHEN (io_hit='1' AND RD='0' AND io_reg=x"E"
                                                          AND rd_n /= 0) ELSE
