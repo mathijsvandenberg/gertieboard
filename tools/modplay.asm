@@ -905,44 +905,6 @@ fillhalf:
 ; ----------------------------------------------------------------------------
 ;  mixchunk -- add [chunklen] samples of every live channel into the accumulator
 ;
-;  THE INNER LOOP LIVES IN REGISTERS. The first version reloaded the table
-;  pointer, both halves of the step and the fractional position from memory on
-;  every single sample -- about twelve memory accesses each, on a V20 whose bus
-;  is eight bits wide, so every word costs two cycles. One channel kept up and
-;  four did not, which is exactly what that arithmetic predicts.
-;
-;  Held across the loop:
-;     ES:SI  the sample, SI being the integer part of the position
-;     BP     the fractional part
-;     CX:DX  the 16.16 step, low and high
-;     BX     the volume table row, because XLAT demands BX
-;     DI     the accumulator
-;
-;  That is every register the 8086 has, so the channel index lives in memory as
-;  curch and the two loop bounds are memory compares -- six accesses a sample
-;  instead of twelve.
-; ----------------------------------------------------------------------------
-; wrapchk -- SI has reached the end of the sample. Loop it, or stop the
-; channel and return carry set.
-wrapchk:
-        push bx
-        mov  bx, [curch]
-        mov  ax, [ch_replen+bx]
-        cmp  ax, 2
-        jbe  .stopit
-        mov  si, [ch_rep+bx]
-        pop  bx
-        clc
-        ret
-.stopit:
-        mov  word [ch_seg+bx], 0
-        pop  bx
-        stc
-        ret
-
-; ----------------------------------------------------------------------------
-;  mixchunk -- add [chunklen] samples of every live channel into the accumulator
-;
 ;  MEASURED: about 134 cycles per sample per channel, which is five times what
 ;  the instruction count suggests. The difference is memory. Every access in
 ;  here crosses the V20's eight-bit bus to SDRAM, so what matters is the NUMBER
@@ -971,6 +933,77 @@ wrapchk:
 ;  fetch, which on this bus is worth more than the read it saves -- and it puts
 ;  every channel on one code path instead of two.
 ; ----------------------------------------------------------------------------
+; wrapchk -- SI has reached the end of the sample. Loop it, or stop the
+; channel and return carry set. Shared by both inner loops, so the looping rule
+; lives in exactly one place.
+wrapchk:
+        push bx
+        mov  bx, [curch]
+        mov  ax, [ch_replen+bx]
+        cmp  ax, 2
+        jbe  .stopit
+        mov  si, [ch_rep+bx]
+        pop  bx
+        clc
+        ret
+.stopit:
+        mov  word [ch_seg+bx], 0
+        pop  bx
+        stc
+        ret
+
+; ----------------------------------------------------------------------------
+;  skipch -- advance a silent channel's position without mixing it.
+;
+;  A channel at volume zero contributes nothing and costs exactly as much as one
+;  at full volume: every sample still read, still scaled through a table of
+;  zeros, still added. This walks the position instead, with no sample read, no
+;  table lookup and no accumulator traffic -- the four memory accesses a sample
+;  that dominate the mixer become none.
+;
+;  The position still has to advance, and the sample still has to loop or stop,
+;  or the channel jumps when its volume comes back up. BP = channel index.
+; ----------------------------------------------------------------------------
+skipch:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov  cx, [ch_step_l+bp]
+        mov  dx, [ch_step_h+bp]
+        mov  si, [ch_pos_h+bp]
+        mov  bx, [ch_pos_l+bp]
+        mov  ax, [chunklen]
+.sk:
+        add  bx, cx
+        adc  si, dx
+        cmp  si, [chlen]
+        jb   .skn
+        push ax
+        mov  ax, [ch_replen+bp]
+        cmp  ax, 2
+        jbe  .skstop
+        mov  si, [ch_rep+bp]
+        pop  ax
+        jmp  .skn
+.skstop:
+        pop  ax
+        mov  word [ch_seg+bp], 0
+        jmp  .skdone
+.skn:
+        dec  ax
+        jnz  .sk
+.skdone:
+        mov  [ch_pos_h+bp], si
+        mov  [ch_pos_l+bp], bx
+        pop  si
+        pop  dx
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+
 mixchunk:
         ; clear this chunk's slice of the accumulator
         push es
@@ -1006,6 +1039,18 @@ mixchunk:
         test ax, ax
         jz   .nextch
         mov  [chlen], ax
+
+        ; A channel at volume zero contributes nothing but costs exactly as
+        ; much as one at full volume -- every sample still read, scaled through
+        ; a table of zeros and added. Skipping it is free, and it is worth most
+        ; in precisely the sustained quiet sections where the mixer is already
+        ; closest to its deadline. The position must still advance, or the
+        ; channel jumps when it fades back in.
+        cmp  word [ch_vol+bp], 0
+        jne  .audible
+        call skipch
+        jmp  .nextch
+.audible:
 
         mov  ax, [filled]
         add  ax, ax
