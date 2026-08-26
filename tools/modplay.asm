@@ -550,16 +550,22 @@ buildvol:
         pop  es
         mov  di, voltab
         xor  bx, bx                     ; volume level 0..63
-        mov  cl, 6                      ; shift count, constant for the whole
-                                        ; build -- CX cannot also be the loop
-                                        ; counter, which is what DX is for
+        mov  cl, 8                      ; s*v/256, not s*v/64: the >>2 that used
+                                        ; to happen after summing is folded in
+                                        ; here instead. Identical arithmetic --
+                                        ; (a+b+c+d)/4 against a/4+b/4+c/4+d/4 --
+                                        ; so no range is lost: one channel only
+                                        ; ever reached +/-31 of the output
+                                        ; either way. CX is the shift, DX the
+                                        ; loop counter.
 .vloop:
         xor  dx, dx                     ; sample value 0..255
 .sloop2:
         mov  al, dl
         imul bl                         ; AL is read as SIGNED, which is what a
                                         ; MOD sample is. AX = sample * vol.
-        sar  ax, cl                     ; / 64
+        sar  ax, cl                     ; / 256 -> +/-31, four of which fit a
+                                        ; signed byte with room for the bias
         stosb
         inc  dx
         cmp  dx, 256
@@ -1002,7 +1008,13 @@ fillhalf:
         jb   .chunk
 .mixdone:
 
-        ; ---- accumulator -> 8-bit unsigned, into the free half ----
+        ; ---- hand the finished bytes to the DMA buffer ----
+        ; The accumulator already holds finished 8-bit samples: the volume
+        ; table carries the /4 and the chunk was primed with the mid-scale
+        ; bias, so there is nothing left to convert. What used to be a word
+        ; read, two shifts, an add and a byte write per sample is one block
+        ; move -- and a block move has no per-sample instruction fetch, which
+        ; on this bus is most of what it cost.
         mov  es, [dmaseg]
         mov  di, [dmaoff]
         cmp  byte [lasthalf], 1
@@ -1011,13 +1023,7 @@ fillhalf:
 .firsthalf:
         mov  si, accum
         mov  cx, HALF
-.conv:
-        lodsw
-        sar  ax, 1
-        sar  ax, 1                      ; /4: four channels of +/-128
-        add  ax, 128
-        stosb
-        loop .conv
+        rep  movsb
         pop  es
         ret
 
@@ -1127,17 +1133,21 @@ skipch:
         ret
 
 mixchunk:
-        ; clear this chunk's slice of the accumulator
+        ; Prime this chunk with the MID-SCALE BIAS rather than zero. The
+        ; accumulator is bytes now and holds the finished sample, so the whole
+        ; separate conversion pass -- a word read, two shifts, an add and a
+        ; byte write for every sample -- disappears. That pass cost as much as
+        ; a whole mixing channel and ran whether one channel played or four,
+        ; which is why one channel measured 35-61% and four only 82%.
         push es
         push ds
         pop  es
         mov  ax, [filled]
-        add  ax, ax
         add  ax, accum
         mov  di, ax
         mov  cx, [chunklen]
-        xor  ax, ax
-        rep  stosw
+        mov  al, 128
+        rep  stosb
         pop  es
 
         mov  word [curch], 0
@@ -1175,11 +1185,9 @@ mixchunk:
 .audible:
 
         mov  ax, [filled]
-        add  ax, ax
         add  ax, accum
         mov  di, ax
         mov  ax, [chunklen]
-        add  ax, ax
         add  ax, di
         mov  [accend], ax
 
@@ -1205,8 +1213,7 @@ mixchunk:
         jbe  .fwrap                     ; at or past the end already
         push ax
         mov  ax, [accend]
-        sub  ax, di
-        shr  ax, 1                      ; samples left in the chunk
+        sub  ax, di                     ; samples left in the chunk (bytes now)
         mov  dx, ax
         pop  ax
         test dx, dx
@@ -1218,9 +1225,7 @@ mixchunk:
 .fast:
         mov  al, [es:si]
         xlat
-        cbw
-        add  [di], ax
-        inc  di
+        add  [di], al                   ; byte, and already biased and scaled
         inc  di
         add  bp, cx
         adc  si, 0
@@ -1241,9 +1246,7 @@ mixchunk:
 .sgo:
         mov  al, [es:si]
         xlat
-        cbw
-        add  [di], ax
-        inc  di
+        add  [di], al
         inc  di
         add  bp, cx
         adc  si, dx
@@ -2050,5 +2053,5 @@ bufbase:
 VOLROWS   equ 65
 voltab    equ bufbase                          ; VOLROWS x 256, 256-aligned
 hdr       equ bufbase + VOLROWS*256            ; the whole 1084-byte MOD header
-accum     equ bufbase + VOLROWS*256 + 1084     ; HALF 16-bit mixing slots
-stacktop  equ bufbase + VOLROWS*256 + 1084 + HALF*2 + 512
+accum     equ bufbase + VOLROWS*256 + 1084     ; HALF finished 8-bit samples
+stacktop  equ bufbase + VOLROWS*256 + 1084 + HALF + 512
