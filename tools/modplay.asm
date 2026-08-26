@@ -751,25 +751,30 @@ play:
         mov  [lasthalf], al
         mov  byte [posdirty], 1         ; a fill always refreshes the line, so
         call fillhalf                   ; the stats appear even between rows
-        ; Did the DMA reach the half we were writing before we finished? If the
-        ; half indicator has already flipped, the mix did not keep up and the
-        ; DMA played stale data -- which sounds like the same fragment being
-        ; repeated, not like a click.
-        xor  al, al
-        out  0x0C, al
-        in   al, 0x03
-        mov  bl, al
-        in   al, 0x03
-        mov  bh, al
-        xor  al, al
-        cmp  bx, HALF
-        jb   .u_snd
-        mov  al, 1
-.u_snd:
-        cmp  al, [lasthalf]
-        je   .nofill
-        inc  word [nunder]
 .nofill:
+        ; HOW FAR DID THE DMA MOVE SINCE THE LAST LOOK?
+        ;
+        ; The previous counter asked whether the DMA had crossed into the half
+        ; being written, and counted it as a failure. But crossing into that
+        ; half is what is SUPPOSED to happen -- it is the buffer being played.
+        ; So it counted normal operation, which is why a lower mixing rate
+        ; scored worse despite doing less work per second.
+        ;
+        ; The 8237's count is monotonic between reloads, so the distance it
+        ; moved between two polls is exactly how much audio went out. More than
+        ; a half in one gap means a boundary passed unseen and a half went out
+        ; unwritten. That is an underrun and nothing else is.
+        mov  ax, [prevcnt]
+        sub  ax, bx                     ; counts DOWN, so this is the distance
+        cmp  ax, BUFLEN
+        jb   .gap_ok
+        add  ax, BUFLEN                 ; it wrapped past zero
+.gap_ok:
+        cmp  ax, HALF
+        jbe  .gap_fine
+        inc  word [nunder]
+.gap_fine:
+        mov  [prevcnt], bx
 
         ; ---- status, safely outside the mix ----
         cmp  byte [posdirty], 0
@@ -973,8 +978,24 @@ mixchunk:
         jmp  .chdone
 .wrapm:
         call wrapchk
-        jc   .chdone
-        jmp  .gom
+        jnc  .gom
+        ; This channel STORES rather than adds, so if it stops part way through
+        ; the chunk the rest was never written -- and the blanket clear that
+        ; used to cover that is gone. Silence the remainder here, or the tail
+        ; of the chunk replays whatever the previous pass left, and every later
+        ; channel adds on top of it.
+        push es
+        push ds
+        pop  es
+        mov  cx, [accend]
+        sub  cx, di
+        shr  cx, 1
+        jcxz .wm_done
+        xor  ax, ax
+        rep  stosw
+.wm_done:
+        pop  es
+        jmp  .chdone
 
 .addloop:
 .smp:
@@ -1500,6 +1521,7 @@ mixrate   dw DEFRATE
 paused    db 0
 posdirty  db 0
 nunder    dw 0
+prevcnt   dw 0
 chmask    db 0x0F
 lasthalf  db 0xFF
 filled    dw 0
@@ -1572,7 +1594,7 @@ msg_cr      db 13,'$'
 msg_p       db 'pos $'
 msg_slash   db '/$'
 msg_r       db '  row $'
-msg_und     db '  late $'
+msg_und     db '  underrun $'
 msg_sp      db '    $'
 
 ; ---- buffers, placed by hand and NOT emitted ---------------------------
