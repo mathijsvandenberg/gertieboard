@@ -162,6 +162,8 @@ scanopts:
         lodsb
         cmp  al, 13
         je   .done
+        cmp  al, 't'
+        je   .tmode
         cmp  al, 'r'
         je   .rate
         cmp  al, 'R'
@@ -175,6 +177,9 @@ scanopts:
         mov  al, 1
         shl  al, cl                     ; 8086: shift by CL, not by immediate
         mov  [chmask], al
+        jmp  .s
+.tmode:
+        mov  byte [testmode], 1
         jmp  .s
 .rate:
         lodsb
@@ -733,6 +738,10 @@ play:
         call puthexb
         mov  dx, msg_crlf
         call puts
+        cmp  byte [testmode], 0
+        je   .normal
+        jmp  polltest
+.normal:
         mov  dx, msg_playing
         call puts
         ; the line the status will own, taken once from the cursor
@@ -884,6 +893,80 @@ play:
         call puts
         jmp  .loop
 .quit:
+        ret
+
+; ----------------------------------------------------------------------------
+;  polltest -- -t. Fill the buffer ONCE, then do nothing but read the DMA
+;  counter and record the largest gap between consecutive reads.
+;
+;  No mixing, no sequencer, no display, no keyboard. If a 1794-sample gap still
+;  appears in a loop this empty, nothing this program does can be causing it and
+;  the stall is an interrupt or something in the machine -- which is what the
+;  gap being unchanged by a 20% CPU speed reduction already suggests, since any
+;  work of ours would have grown with it.
+;
+;  ESC ends it. The count is shown as it goes.
+; ----------------------------------------------------------------------------
+polltest:
+        mov  dx, msg_test
+        call puts
+        mov  ah, 0x03
+        xor  bh, bh
+        int  0x10
+        mov  [vidrow], dh
+
+        ; one bufferful of a plain tone, so there is something to hear
+        push es
+        mov  es, [dmaseg]
+        mov  di, [dmaoff]
+        mov  cx, BUFLEN
+        xor  bx, bx
+.pfill:
+        mov  al, 0x50
+        test bl, 0x08
+        jz   .plo
+        mov  al, 0xB0
+.plo:   stosb
+        inc  bx
+        loop .pfill
+        pop  es
+
+        mov  word [maxgap], 0
+        call dmacnt
+        mov  [prevcnt], bx
+.ploop:
+        call dmacnt
+        mov  ax, [prevcnt]
+        sub  ax, bx
+        cmp  ax, BUFLEN
+        jb   .pok
+        add  ax, BUFLEN
+.pok:
+        cmp  ax, [maxgap]
+        jbe  .pnomax
+        mov  [maxgap], ax
+        ; only repaint when it changes, so the display cannot be the cause
+        mov  di, linebuf
+        mov  dx, msg_gap
+        call vputs
+        mov  ax, [maxgap]
+        call vputdec
+        call vblit
+        mov  ax, [maxgap]
+.pnomax:
+        mov  [prevcnt], bx
+
+        push es
+        mov  ax, BDASEG
+        mov  es, ax
+        mov  ax, [es:0x1A]
+        cmp  ax, [es:0x1C]
+        pop  es
+        je   .ploop
+        mov  ah, 0
+        int  0x16
+        cmp  al, 27
+        jne  .ploop
         ret
 
 ; ----------------------------------------------------------------------------
@@ -1839,6 +1922,7 @@ samptick  dw 220
 mixrate   dw DEFRATE
 paused    db 0
 posdirty  db 0
+testmode  db 0
 nunder    dw 0
 prevcnt   dw 0
 t0        dw 0
@@ -1915,6 +1999,7 @@ msg_smp4    db ' skipped',13,10,'$'
 msg_rate    db 'mixing   : $'
 msg_hz      db ' Hz',13,10,'$'
 msg_chan    db 'channels : mask $'
+msg_test    db 'poll test - no mixing at all. ESC quits.',13,10,'$'
 msg_playing db 'playing - SPACE pauses, S shows stats, ESC quits',13,10,'$'
 msg_bye     db 13,10,'stopped.',13,10,'$'
 msg_crlf    db 13,10,'$'
