@@ -833,16 +833,28 @@ play:
 .nopaint:
 
         ; ---- keys ----
+        ; NOT INT 16h AH=1, which measured 24% of the CPU on this machine. It
+        ; is called thousands of times a second in this loop, and whatever it
+        ; does beyond looking at the buffer it does every time.
+        ;
+        ; The buffer's head and tail are in the BDA at 40:1A and 40:1C, and
+        ; they are equal exactly when it is empty. Two memory reads instead of
+        ; a BIOS call, and INT 16h is only entered when there is actually a key
+        ; to collect.
         call tickrd
         mov  [tk0], ax
-        mov  ah, 1
-        int  0x16
+        push es
+        mov  ax, BDASEG
+        mov  es, ax
+        mov  ax, [es:0x1A]
+        cmp  ax, [es:0x1C]
+        pop  es
         pushf
         call tickrd
         sub  ax, [tk0]
         add  [keytk], ax
         popf
-        jz   .loop
+        je   .loop                      ; head = tail: nothing waiting
         mov  ah, 0
         int  0x16
         cmp  al, 27
