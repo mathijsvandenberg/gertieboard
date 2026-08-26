@@ -80,6 +80,7 @@ start:
         mov  dx, msg_hdr
         call puts
 
+        call scanopts
         call getname
         jc   .usage
         call loadmod
@@ -126,6 +127,41 @@ start:
 .die:
         mov  ax, 0x4C01
         int  0x21
+
+; ============================================================================
+;  scanopts -- -1 .. -4 play ONE channel and mute the rest.
+;
+;  Four channels of wrong are much harder to read than one. If a module sounds
+;  like noise, playing each channel alone says whether every channel is wrong
+;  (the mixer or the buffer) or one is (that channel's trigger or effect), and
+;  those are different faults with different fixes.
+;
+;  A dash prefix, so a filename with a digit in it is never taken for an option.
+; ============================================================================
+scanopts:
+        mov  byte [chmask], 0x0F
+        mov  si, 0x81
+.s:
+        lodsb
+        cmp  al, 13
+        je   .done
+        cmp  al, '-'
+        jne  .s
+        lodsb
+        cmp  al, 13
+        je   .done
+        cmp  al, '1'
+        jb   .s
+        cmp  al, '4'
+        ja   .s
+        sub  al, '1'
+        mov  cl, al
+        mov  al, 1
+        shl  al, cl                     ; 8086: shift by CL, not by immediate
+        mov  [chmask], al
+        jmp  .s
+.done:
+        ret
 
 ; ============================================================================
 ;  Command line -> fname (ASCIIZ)
@@ -646,6 +682,13 @@ play:
         mov  byte [tickno], 0
         mov  word [tickcnt], 0
         mov  byte [lasthalf], 0xFF
+        mov  dx, msg_chan
+        call puts
+        mov  al, [chmask]
+        xor  ah, ah
+        call puthexb
+        mov  dx, msg_crlf
+        call puts
         mov  dx, msg_playing
         call puts
 
@@ -748,6 +791,14 @@ fillhalf:
 mixchunk:
         xor  bp, bp                     ; channel index * 2
 .chan:
+        ; muted?
+        mov  ax, bp
+        shr  ax, 1                      ; channel number
+        mov  cl, al
+        mov  al, 1
+        shl  al, cl
+        test byte [chmask], al
+        jz   .nextch
         mov  bx, bp
         mov  ax, [ch_seg+bx]
         test ax, ax
@@ -1204,6 +1255,36 @@ puts:
         pop  ax
         ret
 
+puthexb:
+        push ax
+        push dx
+        push cx
+        mov  cx, 2
+        mov  dl, al
+.hb:    mov  al, dl
+        push cx
+        mov  cl, 4
+        shr  al, cl
+        pop  cx
+        cmp  cx, 2
+        je   .hi
+        mov  al, dl
+        and  al, 0x0F
+.hi:    add  al, '0'
+        cmp  al, '9'
+        jbe  .em2
+        add  al, 7
+.em2:   push dx
+        mov  dl, al
+        mov  ah, 2
+        int  0x21
+        pop  dx
+        loop .hb
+        pop  cx
+        pop  dx
+        pop  ax
+        ret
+
 putdec:
         push ax
         push bx
@@ -1259,6 +1340,7 @@ tickno    db 0
 tickcnt   dw 0
 samptick  dw 220
 paused    db 0
+chmask    db 0x0F
 lasthalf  db 0xFF
 filled    dw 0
 chunklen  dw 0
@@ -1299,7 +1381,7 @@ ch_eff    times 4 dw 0
 ch_par    times 4 dw 0
 
 msg_hdr     db 'MODPLAY - ProTracker 4-channel, Sound Blaster at 220h',13,10,'$'
-msg_usage   db 'usage: modplay file.mod',13,10,'$'
+msg_usage   db 'usage: modplay file.mod [-1|-2|-3|-4 to play one channel]',13,10,'$'
 msg_e_open  db 'cannot open that file - check the name and that it is on the disk',13,10,'$'
 msg_e_short db 'file is too short to be a MOD - the header is 1084 bytes',13,10,'$'
 msg_e_sig   db 'not a 4-channel MOD - no M.K., 4CHN or FLT4 signature at 1080',13,10,'$'
@@ -1316,6 +1398,7 @@ msg_smp     db 'samples  : $'
 msg_smp2    db ' whole, $'
 msg_smp3    db ' shortened, $'
 msg_smp4    db ' skipped',13,10,'$'
+msg_chan    db 'channels : mask $'
 msg_playing db 'playing - SPACE pauses, ESC quits',13,10,'$'
 msg_bye     db 13,10,'stopped.',13,10,'$'
 msg_crlf    db 13,10,'$'

@@ -120,8 +120,14 @@ start:
         mov  cx, BUFLEN
         xor  bx, bx
 .fill:
+        ; TOGGLE ON A LOW BIT OF THE INDEX. This tested bh -- the HIGH byte --
+        ; which is bx bit 12, so the wave flipped once every 4096 samples: half
+        ; the buffer at 40h and half at C0h, a 1.3 Hz square wave that is DC
+        ; with two clicks at the ends. It was inaudible by construction, and
+        ; looked exactly like a DMA that was not working.
+        ;   bit 3 -> period 16 samples -> 11025/16 = ~689 Hz
         mov  al, 0x40
-        test bh, 0x10                   ; ~430 Hz at 11 kHz
+        test bl, 0x08
         jz   .lo
         mov  al, 0xC0
 .lo:    stosb
