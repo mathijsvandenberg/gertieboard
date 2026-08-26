@@ -770,7 +770,15 @@ mixchunk:
         mov  si, [ch_pos_h+bp]
         mov  ax, [ch_pos_l+bp]
         mov  [tmp_lo], ax
-        mov  di, accum
+        ; START WHERE THE LAST CHUNK STOPPED. A half-buffer is mixed in several
+        ; chunks -- one per sequencer tick, about five of them -- and this used
+        ; to restart at accum each time. Every chunk overwrote the first, the
+        ; rest of the buffer kept whatever was left from the pass before, and
+        ; the conversion below read all HALF samples of it regardless.
+        mov  ax, [filled]
+        add  ax, ax                     ; 16-bit accumulator slots
+        add  ax, accum
+        mov  di, ax
         mov  ax, [chunklen]
         mov  [tmp_cnt], ax
 .smp:
@@ -1266,8 +1274,12 @@ tmp_lo    dw 0
 tmp_cnt   dw 0
 
 s_len     times 31 dw 0
-s_fine    times 31 db 0
-s_vol     times 31 db 0
+; WORD arrays, every one of them, because bx and bp step by 2 when they walk
+; samples and channels. As db these overlapped: sample 30's volume landed 60
+; bytes in, inside s_rep, and channel 2's volume read ch_eff. The music played
+; but every channel had someone else's volume and someone else's effect.
+s_fine    times 31 dw 0
+s_vol     times 31 dw 0
 s_rep     times 31 dw 0
 s_replen  times 31 dw 0
 s_seg     times 31 dw 0
@@ -1281,10 +1293,10 @@ ch_step_l times 4 dw 0
 ch_len    times 4 dw 0
 ch_rep    times 4 dw 0
 ch_replen times 4 dw 0
-ch_vol    times 4 db 0
+ch_vol    times 4 dw 0
 ch_period times 4 dw 0
-ch_eff    times 4 db 0
-ch_par    times 4 db 0
+ch_eff    times 4 dw 0
+ch_par    times 4 dw 0
 
 msg_hdr     db 'MODPLAY - ProTracker 4-channel, Sound Blaster at 220h',13,10,'$'
 msg_usage   db 'usage: modplay file.mod',13,10,'$'
