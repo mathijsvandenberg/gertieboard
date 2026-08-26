@@ -65,9 +65,22 @@ ARCHITECTURE rtl OF resetsync IS
   CONSTANT TICK_N : integer := CLK_HZ / 1000;
 
   -- THREE flops, not two. The extra one costs nothing and this input is a bare
-  -- pin with a human on the end of it -- the one place in the design where the
-  -- source is genuinely asynchronous to everything.
+  -- pin with a human on the end of it.
   SIGNAL sync    : std_logic_vector(2 DOWNTO 0) := "111";
+
+  -- LOCKED GETS THE SAME TREATMENT, and used not to.
+  --
+  -- The line above once called BTN_N "the one place in the design where the
+  -- source is genuinely asynchronous to everything". That was wrong, and
+  -- LOCKED was standing next to it: a PLL's lock output is asynchronous to the
+  -- clock it is describing, and Altera document that it CHATTERS during lock
+  -- acquisition rather than rising once and staying there.
+  --
+  -- Both of those matter more when the board is cold, because lock time and
+  -- the chatter that goes with it move with temperature -- which is the shape
+  -- of a machine that stalls partway through POST on a cold morning and then
+  -- carries on once the PLL has settled.
+  SIGNAL lk      : std_logic_vector(2 DOWNTO 0) := "000";
   SIGNAL stable  : std_logic := '1';                       -- debounced level
   SIGNAL presc   : integer RANGE 0 TO TICK_N-1 := 0;
   SIGNAL tick    : std_logic := '0';                       -- one CLK per ms
@@ -79,12 +92,23 @@ ARCHITECTURE rtl OF resetsync IS
 
 BEGIN
 
-  RESET_N <= '0' WHEN (hold /= 0) OR (LOCKED = '0') ELSE '1';
+  -- ONLY hold. LOCKED used to appear here as well, which put an unfiltered
+  -- asynchronous input on the system reset combinationally -- one chattering
+  -- edge became one reset pulse, straight past the debounce and the stretch
+  -- sitting a few lines below whose entire purpose is to stop exactly that.
+  --
+  -- It does not need to be here. LOCKED low reloads hold in the process below,
+  -- and hold starts at HOLD_MS so reset is already asserted before the clock
+  -- is running at all. Reset now releases only once LOCKED has been high
+  -- CONTINUOUSLY for the whole 200 ms stretch, because any dip reloads the
+  -- counter. The chatter is filtered by machinery that was already here.
+  RESET_N <= '0' WHEN (hold /= 0) ELSE '1';
 
   PROCESS (CLK)
   BEGIN
     IF rising_edge(CLK) THEN
       sync <= sync(1 DOWNTO 0) & BTN_N;
+      lk   <= lk(1 DOWNTO 0) & LOCKED;
 
       tick <= '0';
       IF presc = TICK_N-1 THEN
@@ -115,7 +139,7 @@ BEGIN
       -- is. So reset is asserted for as long as the button is held AND for
       -- HOLD_MS after it is let go, and a brief press is indistinguishable
       -- from a long one.
-      IF (stable = '0') OR (CAD_RST = '1') OR (LOCKED = '0') THEN
+      IF (stable = '0') OR (CAD_RST = '1') OR (lk(2) = '0') THEN
         hold <= HOLD_MS;
       ELSIF (hold /= 0) AND (tick = '1') THEN
         hold <= hold - 1;
