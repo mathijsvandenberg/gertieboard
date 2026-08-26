@@ -750,7 +750,17 @@ play:
         je   .nofill
         mov  [lasthalf], al
         mov  byte [posdirty], 1         ; a fill always refreshes the line, so
-        call fillhalf                   ; the stats appear even between rows
+        call pitrd                      ; how long does a fill REALLY take?
+        mov  [t0], ax
+        call fillhalf
+        call pitrd
+        mov  bx, [t0]
+        sub  bx, ax                     ; PIT counts down at 1.193 MHz
+        cmp  bx, [tmax]
+        jbe  .nomax
+        mov  [tmax], bx
+.nomax:
+        call dmacnt                     ; refresh BX for the gap test below
 .nofill:
         ; HOW FAR DID THE DMA MOVE SINCE THE LAST LOOK?
         ;
@@ -1396,8 +1406,69 @@ showpos:
         call puts
         mov  ax, [nunder]
         call putdec
+        mov  dx, msg_fill
+        call puts
+        mov  ax, [tmax]
+        call putdec
         mov  dx, msg_sp
         call puts
+        ret
+
+; ============================================================================
+;  pitrd -- PIT channel 0, latched. 1.193182 MHz, counting down. AX = count.
+; ============================================================================
+pitrd:
+        push dx
+        xor  al, al
+        out  0x43, al                   ; latch counter 0
+        in   al, 0x40
+        mov  dl, al
+        in   al, 0x40
+        mov  dh, al
+        mov  ax, dx
+        pop  dx
+        ret
+
+; ============================================================================
+;  dmacnt -- the 8237's channel-1 count, read until two agree closely.
+;
+;  The engine decrements this while we read it, and the two halves come from
+;  separate IN instructions -- so a read can catch the low byte from before an
+;  update and the high byte from after, producing a value wildly away from
+;  either. As a progress measure that is invisible; as the basis of an underrun
+;  test it invents underruns that never happened.
+;
+;  Returns BX.
+; ============================================================================
+dmacnt:
+        push ax
+        push cx
+        push dx
+        mov  cx, 8
+.try:
+        xor  al, al
+        out  0x0C, al
+        in   al, 0x03
+        mov  bl, al
+        in   al, 0x03
+        mov  bh, al
+        ; read again; if the two are within a sane distance the pair is good
+        xor  al, al
+        out  0x0C, al
+        in   al, 0x03
+        mov  dl, al
+        in   al, 0x03
+        mov  dh, al
+        mov  ax, bx
+        sub  ax, dx                     ; counts down, so this is small and >= 0
+        cmp  ax, 256
+        jb   .good
+        loop .try
+.good:
+        mov  bx, dx
+        pop  dx
+        pop  cx
+        pop  ax
         ret
 
 ; ============================================================================
@@ -1522,6 +1593,8 @@ paused    db 0
 posdirty  db 0
 nunder    dw 0
 prevcnt   dw 0
+t0        dw 0
+tmax      dw 0
 chmask    db 0x0F
 lasthalf  db 0xFF
 filled    dw 0
@@ -1595,6 +1668,7 @@ msg_p       db 'pos $'
 msg_slash   db '/$'
 msg_r       db '  row $'
 msg_und     db '  underrun $'
+msg_fill    db '  fill $'
 msg_sp      db '    $'
 
 ; ---- buffers, placed by hand and NOT emitted ---------------------------
