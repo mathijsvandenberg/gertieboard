@@ -95,7 +95,7 @@ start:
         call puts
         jmp  .die
 .loadfail:
-        mov  dx, msg_loadf
+        mov  dx, [errmsg]
         call puts
         jmp  .die
 .nodma:
@@ -155,7 +155,11 @@ loadmod:
         mov  dx, fname
         mov  ax, 0x3D00
         int  0x21
-        jc   .bad
+        jnc  .opened
+        mov  word [errmsg], msg_e_open
+        stc
+        ret
+.opened:
         mov  [fh], ax
 
         ; ---- 1084-byte header ----
@@ -164,9 +168,14 @@ loadmod:
         mov  dx, hdr
         mov  ah, 0x3F
         int  0x21
-        jc   .bad
+        jc   .short
         cmp  ax, 1084
-        jne  .bad
+        je   .hdrok
+.short:
+        mov  word [errmsg], msg_e_short
+        stc
+        ret
+.hdrok:
 
         ; signature must be M.K. (or 4CHN/FLT4 -- all 4-channel)
         mov  ax, [hdr+1080]
@@ -176,7 +185,9 @@ loadmod:
         je   .sigok
         cmp  ax, 'FL'
         je   .sigok
-        jmp  .bad
+        mov  word [errmsg], msg_e_sig
+        stc
+        ret
 .sigok:
 
         ; ---- 31 sample headers, 30 bytes each from offset 20 ----
@@ -344,6 +355,7 @@ loadmod:
         clc
         ret
 .bad:
+        mov  word [errmsg], msg_e_mem
         stc
         ret
 
@@ -414,6 +426,7 @@ allocdma:
         clc
         ret
 .bad:
+        mov  word [errmsg], msg_e_mem
         stc
         ret
 
@@ -1097,6 +1110,7 @@ putdec:
 ; ============================================================================
 fname     times 80 db 0
 fh        dw 0
+errmsg    dw 0
 patseg    dw 0
 dmaseg    dw 0
 dmaphys   dw 0
@@ -1150,7 +1164,10 @@ ch_par    times 4 db 0
 
 msg_hdr     db 'MODPLAY - ProTracker 4-channel, Sound Blaster at 220h',13,10,'$'
 msg_usage   db 'usage: modplay file.mod',13,10,'$'
-msg_loadf   db 'cannot load that file - missing, or not a 4-channel MOD',13,10,'$'
+msg_e_open  db 'cannot open that file - check the name and that it is on the disk',13,10,'$'
+msg_e_short db 'file is too short to be a MOD - the header is 1084 bytes',13,10,'$'
+msg_e_sig   db 'not a 4-channel MOD - no M.K., 4CHN or FLT4 signature at 1080',13,10,'$'
+msg_e_mem   db 'out of memory loading patterns or samples',13,10,'$'
 msg_nomem   db 'not enough memory for the DMA buffer',13,10,'$'
 msg_nosb    db 'no Sound Blaster answered at 220h',13,10,'$'
 msg_title   db 'title    : $'

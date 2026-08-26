@@ -178,6 +178,25 @@ BEGIN
         io_wr_prev <= IO_WR;
 
         -- =============================================================
+        -- READS TOGGLE THE BYTE POINTER TOO, which they did not until now.
+        --
+        -- On a real 8237 the byte-pointer flip-flop is advanced by reading an
+        -- address or count register as well as by writing one -- that is how
+        -- software gets the low byte and then the high byte from a single
+        -- port. Toggling it only on writes meant two consecutive reads of the
+        -- same port both returned the LOW byte, and the high half of a count
+        -- was unreachable.
+        --
+        -- Nothing noticed because the BIOS floppy driver only ever WRITES
+        -- these registers. Anything that watches a transfer's progress reads
+        -- them -- which is exactly what a sound player does to find out which
+        -- half of its buffer is safe to fill.
+        IF (io_rd_prev = '0' AND IO_RD = '1' AND cs = '1'
+            AND IO_ADDR(3) = '0') THEN
+          bp_ff <= NOT bp_ff;
+        END IF;
+
+        -- =============================================================
         -- Latch writes on the RISING edge of /IOW (end of write strobe,
         -- data has been stable on the bus throughout T3).
         -- =============================================================

@@ -212,7 +212,11 @@ start:
         in   al, 0x03
         mov  bh, al
         pop  cx
-        cmp  bx, 0xFFFF                 ; terminal count wraps to FFFF
+        ; Done when the count reaches zero. A real 8237 wraps past it to FFFF
+        ; and this model stops at 0, so accept either rather than assuming.
+        cmp  bx, 0
+        je   .played
+        cmp  bx, 0xFFFF
         je   .played
         loop .wait
 
@@ -242,8 +246,11 @@ start:
 .dloop:
         mov  al, 0x10
         call dspwr
+        ; Toggle on a LOW bit of the counter. Using CH toggled once every 512
+        ; samples, which at this loop's rate is about 33 Hz -- individual pops,
+        ; not a tone, and it sounded exactly like a fault in the hardware.
         mov  al, 0x40
-        test ch, 0x02
+        test cl, 0x08                   ; ~1 kHz
         jz   .dlo
         mov  al, 0xC0
 .dlo:   call dspwr
