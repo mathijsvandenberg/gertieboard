@@ -117,12 +117,17 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_cpu_wdata            : std_logic_vector(7 downto 0);
   SIGNAL n_cpu_wr               : std_logic;
   SIGNAL n_ctrl                 : std_logic_vector(7 downto 0);
-  SIGNAL n_dack                 : std_logic;
   SIGNAL n_dma_addr             : std_logic_vector(15 downto 0);
   SIGNAL n_dma_dout             : std_logic_vector(7 downto 0);
   SIGNAL n_dma_memr             : std_logic;
   SIGNAL n_dma_memw             : std_logic;
-  SIGNAL n_drq                  : std_logic;
+  SIGNAL n_drq                  : std_logic;                     -- FDC -> ch2
+  SIGNAL n_drq_v                : std_logic_vector(3 DOWNTO 0);  -- to the 8237
+  SIGNAL n_dack_v               : std_logic_vector(3 DOWNTO 0);  -- from the 8237
+  SIGNAL n_sb_drq               : std_logic;                     -- SB DSP -> ch1
+  SIGNAL n_sb_irq               : std_logic;                     -- SB DSP -> IR5
+  SIGNAL n_sb_pcm               : std_logic_vector(15 DOWNTO 0); -- FM + DAC
+  SIGNAL n_sb_pcm_stb           : std_logic;
   SIGNAL n_fl_cs                : std_logic;
   SIGNAL n_fl_do                : std_logic;
   SIGNAL n_fl_miso              : std_logic;
@@ -372,10 +377,10 @@ BEGIN
       IO_RD                => n_io_rd,
       IO_WR                => n_io_wr,
       DATAIN               => n_cpu_wdata,
-      DREQ                 => n_drq,
+      DREQ                 => n_drq_v,
       HLDA                 => n_cpu_hlda,
       RAM_READY            => n_ready,
-      DACK                 => n_dack,
+      DACK                 => n_dack_v,
       HRQ                  => n_hrq,
       DMA_ADDR             => n_dma_addr,
       DMA_MEMR             => n_dma_memr,
@@ -398,6 +403,7 @@ BEGIN
       IRQ0                 => n_out0,
       IRQ1                 => n_irq1,
       IRQ2                 => n_irq2,
+      IRQ5                 => n_sb_irq,
       IRQ6                 => n_irq,
       DATAOUT              => n_periph_rdata,
       INT                  => n_int
@@ -781,7 +787,7 @@ BEGIN
       RD                   => n_io_rd,
       WR                   => n_io_wr,
       DATAIN               => n_cpu_wdata,
-      DACK                 => n_dack,
+      DACK                 => n_dack_v(2),
       TC                   => n_tc,
       DMA_DIN              => n_periph_rdata,
       UART_RX              => n_uart_rxd,
@@ -790,6 +796,34 @@ BEGIN
       DRQ                  => n_drq,
       DMA_DOUT             => n_dma_dout,
       UART_TX              => n_uart_tx
+    );
+
+  -- Sound Blaster DSP: A220 I5 D1, the addresses the real card used and the
+  -- ones every game defaults to. It sits IN the PCM path rather than beside it,
+  -- taking the OPL2's stream in and returning FM plus digitised audio summed --
+  -- so the USB streamer still sees exactly one source and needs no mixer.
+  sb1 : ENTITY work.sb_dsp
+    GENERIC MAP (
+      IO_BASE              => x"0220"
+    )
+    PORT MAP (
+      CLK                  => n_cpuclk,
+      RESET                => n_rst_out,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAIN               => n_cpu_wdata,
+      DATAOUT              => n_periph_rdata,
+      DRQ                  => n_sb_drq,
+      DACK                 => n_dack_v(1),
+      TC                   => n_tc,
+      DMA_DIN              => n_periph_rdata,
+      IRQ                  => n_sb_irq,
+      CLK48                => n_clk48,
+      PCM_IN               => n_opl_pcm,
+      PCM_STB_IN           => n_opl_pcm_stb,
+      PCM                  => n_sb_pcm,
+      PCM_STB              => n_sb_pcm_stb
     );
 
   -- 48 MHz for the USB SIE. This replaces the dead `pll2` the schematic
@@ -851,8 +885,8 @@ BEGIN
       IRQ                  => n_irq2,
       USB_DP               => USB1_DP,
       USB_DM               => USB1_DM,
-      AUD_PCM              => n_opl_pcm,
-      AUD_STB              => n_opl_pcm_stb,
+      AUD_PCM              => n_sb_pcm,
+      AUD_STB              => n_sb_pcm_stb,
       AUD_EN               => n_aud_en,
       AUD_ADDR             => n_aud_addr,
       AUD_ENDP             => n_aud_endp,
@@ -974,6 +1008,11 @@ BEGIN
   SEG_E <= n_seg_e;
   SEG_F <= n_seg_f;
   SEG_G <= n_seg_g;
+  -- DMA requests, one bit per channel. ch1 is the Sound Blaster DSP asking for
+  -- its next sample, ch2 the floppy -- the two assignments the real machine
+  -- made, and what every game's SET BLASTER line already says.
+  n_drq_v <= (2 => n_drq, 1 => n_sb_drq, OTHERS => '0');
+
   n_cpu_hlda <= CPU_HLDA;
   CPU_HLD <= n_hrq;
   CPU_NMI <= n_cpu_nmi;

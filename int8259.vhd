@@ -43,6 +43,7 @@ ENTITY int8259 IS
 		  IRQ0    : IN  std_logic;
 		  IRQ1    : IN  std_logic;
         IRQ2    : IN  std_logic;
+        IRQ5    : IN  std_logic := '0';   -- Sound Blaster DSP
         IRQ6    : IN  std_logic;		  
         DATAOUT : OUT std_logic_vector(7 DOWNTO 0);   -- 'Z' when not driving
         INT     : OUT std_logic);                     -- to CPU INTR (active HIGH)
@@ -103,7 +104,7 @@ BEGIN
   IRQ(2) <= IRQ2;
   IRQ(3) <= '0';
   IRQ(4) <= '0';
-  IRQ(5) <= '0';
+  IRQ(5) <= IRQ5;
   IRQ(6) <= IRQ6;
   IRQ(7) <= '0';	
   cs <= '1' WHEN ADDR(15 DOWNTO 1) = "000000000010000" ELSE '0';   -- 0x20 / 0x21

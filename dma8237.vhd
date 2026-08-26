@@ -40,8 +40,13 @@ ENTITY dma8237 IS
         DATAOUT     : INOUT std_logic_vector(7 DOWNTO 0);    -- 'Z' when not addressed
 
         -- DMA bus-master interface (single floppy channel = ch2)
-        DREQ        : IN    std_logic;                       -- FDC request (active high) -> ch2
-        DACK        : OUT   std_logic;                       -- ack to FDC (active high)  <- ch2
+        -- One line per channel now, rather than a single pair hardwired to the
+        -- floppy's ch2. The register model always modelled four channels; only
+        -- the hardware handshake was singular, so adding a second device meant
+        -- widening this rather than inventing a parallel path beside it.
+        --   ch1 = Sound Blaster DSP    ch2 = floppy
+        DREQ        : IN    std_logic_vector(3 DOWNTO 0);    -- requests (active high)
+        DACK        : OUT   std_logic_vector(3 DOWNTO 0);    -- acks     (active high)
         HRQ         : OUT   std_logic;                       -- -> V20 HOLD
         HLDA        : IN    std_logic;                       -- <- V20 HLDA
         DMA_ADDR    : OUT   std_logic_vector(15 DOWNTO 0);   -- -> busdecode
@@ -94,7 +99,7 @@ ARCHITECTURE behavior OF dma8237 IS
   SIGNAL ach     : integer RANGE 0 TO 3 := 0;
   SIGNAL last_b  : std_logic := '0';
   SIGNAL req_eff : std_logic_vector(3 DOWNTO 0);
-  SIGNAL hw_dreq : std_logic_vector(3 DOWNTO 0);   -- single DREQ mapped to ch2
+  SIGNAL hw_dreq : std_logic_vector(3 DOWNTO 0);   -- per-channel hardware requests
 
 BEGIN
 
@@ -105,7 +110,7 @@ BEGIN
   status_reg <= request_reg & tc_status;
 
   -- effective requests: hardware DREQ (ch2 only) or software request, unmasked
-  hw_dreq <= (2 => DREQ, OTHERS => '0');
+  hw_dreq <= DREQ;
   req_eff <= (hw_dreq OR request_reg) AND NOT mask_reg;
 
   -- ---------------- Read data mux -----------------------------------------
@@ -158,7 +163,7 @@ BEGIN
         io_wr_prev  <= '1';
         dst         <= D_IDLE;
         HRQ         <= '0';
-        DACK        <= '0';
+        DACK        <= (OTHERS => '0');
         TC          <= '0';
         DMA_MEMR    <= '1';
         DMA_MEMW    <= '1';
@@ -270,7 +275,7 @@ BEGIN
 
           WHEN D_IDLE =>
             HRQ      <= '0';
-            DACK     <= '0';
+            DACK     <= (OTHERS => '0');
             TC       <= '0';
             DMA_MEMR <= '1'; DMA_MEMW <= '1';
             DMA_IOR  <= '1'; DMA_IOW  <= '1';
@@ -288,7 +293,7 @@ BEGIN
             HRQ <= '1';
             IF HLDA = '1' THEN
               DMA_ADDR  <= cur_addr(ach);
-              IF ach = 2 THEN DACK <= '1'; END IF;   -- only the floppy has a device
+              DACK(ach) <= '1';                      -- whichever channel won
               IF cur_cnt(ach) = x"0000" THEN last_b <= '1'; ELSE last_b <= '0'; END IF;
               IF mode_reg(ach)(3 DOWNTO 2) = "01" THEN   -- device -> memory (floppy read)
                 DMA_IOR <= '0'; DMA_MEMW <= '0';
@@ -326,7 +331,7 @@ BEGIN
             END IF;
 
           WHEN D_FIN =>
-            DACK <= '0';
+            DACK <= (OTHERS => '0');
             HRQ  <= '0';            -- release the bus (single mode); TC held until idle
             dst  <= D_IDLE;
 
