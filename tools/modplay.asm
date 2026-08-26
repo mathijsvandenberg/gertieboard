@@ -811,6 +811,17 @@ play:
         jb   .gap_ok
         add  ax, BUFLEN                 ; it wrapped past zero
 .gap_ok:
+        ; Record the LARGEST gap as well as counting them. One channel at 37%
+        ; busy still reports underruns, and a mixer that fits three times over
+        ; cannot be missing deadlines -- so the count alone cannot say whether
+        ; these are one long stall or many gaps barely over the line. A maximum
+        ; separates them: just above HALF means the threshold is being grazed
+        ; by ordinary jitter, while several times HALF means the loop really
+        ; does stop for that long and the mixer was never the problem.
+        cmp  ax, [maxgap]
+        jbe  .nogmax
+        mov  [maxgap], ax
+.nogmax:
         cmp  ax, HALF
         jbe  .gap_fine
         inc  word [nunder]
@@ -1571,6 +1582,10 @@ showpos:
         call vputs
         mov  ax, [nunder]
         call vputdec
+        mov  dx, msg_gap
+        call vputs
+        mov  ax, [maxgap]
+        call vputdec
         mov  dx, msg_fill
         call vputs
         push es
@@ -1776,6 +1791,7 @@ t0        dw 0
 tk0       dw 0
 tkstart   dw 0
 busytk    dw 0
+maxgap    dw 0
 tmax      dw 0
 vidrow    db 0
 linebuf   times 80 db ' '
@@ -1851,6 +1867,7 @@ msg_p       db 'pos $'
 msg_slash   db '/$'
 msg_r       db '  row $'
 msg_und     db '  underrun $'
+msg_gap     db '  gap $'
 msg_fill    db '  busy $'
 msg_pct     db '%$'
 msg_sp      db '    $'
