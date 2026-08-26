@@ -841,19 +841,16 @@ play:
         ; they are equal exactly when it is empty. Two memory reads instead of
         ; a BIOS call, and INT 16h is only entered when there is actually a key
         ; to collect.
-        call tickrd
-        mov  [tk0], ax
+        ; NOT TIMED ANY MORE. Wrapping two memory reads in two tickrd calls --
+        ; thousands of times a second -- measured the instrumentation and
+        ; nothing else: key stayed at 20% after the INT 16h it was blaming had
+        ; already been removed.
         push es
         mov  ax, BDASEG
         mov  es, ax
         mov  ax, [es:0x1A]
         cmp  ax, [es:0x1C]
         pop  es
-        pushf
-        call tickrd
-        sub  ax, [tk0]
-        add  [keytk], ax
-        popf
         je   .loop                      ; head = tail: nothing waiting
         mov  ah, 0
         int  0x16
@@ -869,6 +866,17 @@ play:
         cmp  al, 'S'
         jne  .loop
 .stats:
+        ; Clear the counters. maxgap never decays, so one transient at startup
+        ; sits there for the rest of the song and looks identical to a fault
+        ; that is still happening. Pressing S twice a few seconds apart says
+        ; which: a number that comes back was earned, one that stays at zero
+        ; was a one-off before the loop settled.
+        mov  word [maxgap], 0
+        mov  word [nunder], 0
+        mov  word [busytk], 0
+        mov  word [disptk], 0
+        call tickrd
+        mov  [tkstart], ax
         mov  dx, msg_crlf
         call puts
         call showpos
@@ -1634,15 +1642,6 @@ showpos:
         div  bx
         call vputdec
         pop  bx
-        mov  dx, msg_pct
-        call vputs
-        mov  dx, msg_key
-        call vputs
-        mov  ax, [keytk]
-        mov  cx, 100
-        mul  cx
-        div  bx
-        call vputdec
         mov  dx, msg_pct
         call vputs
 .nopct:
