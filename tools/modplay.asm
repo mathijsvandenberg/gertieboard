@@ -503,9 +503,11 @@ loadmod:
         ret
 
 ; ============================================================================
-;  buildvol -- voltab[v*256 + s] = s * v / 64, signed
+;  buildvol -- voltab[v*256 + s] = s * v / 64, signed, for v = 0..64
 ;
-;  16 KB, built once. Everything the mixer does to a sample is this table.
+;  65 rows because MOD volume is inclusive of 64. Everything the mixer does to
+;  a sample is this table, so a missing row is not a rounding error -- it is a
+;  read into whatever the linker put next.
 ; ============================================================================
 buildvol:
         push ds
@@ -527,7 +529,7 @@ buildvol:
         cmp  dx, 256
         jb   .sloop2
         inc  bx
-        cmp  bx, 64
+        cmp  bx, VOLROWS
         jb   .vloop
         ret
 
@@ -1462,7 +1464,14 @@ msg_sp      db '    $'
 
           align 256
 bufbase:
-voltab    equ bufbase                          ; 64 rows x 256, 256-aligned
-hdr       equ bufbase + 16384                  ; the whole 1084-byte MOD header
-accum     equ bufbase + 16384 + 1084           ; HALF 16-bit mixing slots
-stacktop  equ bufbase + 16384 + 1084 + HALF*2 + 512
+; SIXTY-FIVE rows, not 64. MOD volume runs 0 to 64 INCLUSIVE, and 64 is the
+; maximum and what most samples carry. With 64 rows a full-volume note indexed
+; one row past the end of the table and was scaled through whatever followed
+; it -- which was hdr, so every loud note was multiplied by the MOD file's own
+; header. Quiet notes sounded right, loud ones came out as noise on top of the
+; music.
+VOLROWS   equ 65
+voltab    equ bufbase                          ; VOLROWS x 256, 256-aligned
+hdr       equ bufbase + VOLROWS*256            ; the whole 1084-byte MOD header
+accum     equ bufbase + VOLROWS*256 + 1084     ; HALF 16-bit mixing slots
+stacktop  equ bufbase + VOLROWS*256 + 1084 + HALF*2 + 512
