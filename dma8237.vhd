@@ -25,6 +25,7 @@ LIBRARY IEEE;
 USE  IEEE.STD_LOGIC_1164.all;
 USE  IEEE.STD_LOGIC_ARITH.all;
 USE  IEEE.STD_LOGIC_UNSIGNED.all;
+USE  IEEE.NUMERIC_STD.ALL;
 
 
 ENTITY dma8237 IS
@@ -48,6 +49,10 @@ ENTITY dma8237 IS
         DREQ        : IN    std_logic_vector(3 DOWNTO 0);    -- requests (active high)
         DACK        : OUT   std_logic_vector(3 DOWNTO 0);    -- acks     (active high)
         HRQ         : OUT   std_logic;                       -- -> V20 HOLD
+        -- Which channel currently owns the bus. busdecode needs it to pick the
+        -- right page register: there is one per channel and they are not
+        -- interchangeable.
+        DMA_CH      : OUT   std_logic_vector(1 DOWNTO 0);
         HLDA        : IN    std_logic;                       -- <- V20 HLDA
         DMA_ADDR    : OUT   std_logic_vector(15 DOWNTO 0);   -- -> busdecode
         DMA_MEMR    : OUT   std_logic;                       -- active LOW -> busdecode
@@ -111,6 +116,7 @@ BEGIN
 
   -- effective requests: hardware DREQ (ch2 only) or software request, unmasked
   hw_dreq <= DREQ;
+  DMA_CH  <= std_logic_vector(to_unsigned(ach, 2));
   req_eff <= (hw_dreq OR request_reg) AND NOT mask_reg;
 
   -- ---------------- Read data mux -----------------------------------------

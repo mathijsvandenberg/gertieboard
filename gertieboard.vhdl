@@ -126,6 +126,7 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_dack_v               : std_logic_vector(3 DOWNTO 0);  -- from the 8237
   SIGNAL n_sb_drq               : std_logic;                     -- SB DSP -> ch1
   SIGNAL n_dma_iow              : std_logic;                     -- 8237 /IOW to devices
+  SIGNAL n_dma_ch               : std_logic_vector(1 downto 0);  -- channel owning the bus
   SIGNAL n_sb_irq               : std_logic;                     -- SB DSP -> IR5
   SIGNAL n_sb_pcm               : std_logic_vector(15 DOWNTO 0); -- FM + DAC
   SIGNAL n_sb_pcm_stb           : std_logic;
@@ -383,6 +384,7 @@ BEGIN
       RAM_READY            => n_ready,
       DACK                 => n_dack_v,
       HRQ                  => n_hrq,
+      DMA_CH               => n_dma_ch,
       DMA_ADDR             => n_dma_addr,
       DMA_MEMR             => n_dma_memr,
       DMA_MEMW             => n_dma_memw,
@@ -413,6 +415,7 @@ BEGIN
   busdecode1 : ENTITY work.busdecode
     PORT MAP (
       CLK                  => n_cpuclk,
+      DMA_CH               => n_dma_ch,
       A                    => n_cpu_a,
       RD                   => n_cpu_rd,
       WR                   => n_cpu_wr,

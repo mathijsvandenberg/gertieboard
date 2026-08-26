@@ -51,6 +51,7 @@ ENTITY busdecode IS
 
 		  -- DMA arbitration (from 8237 / FDC)
 		  HLDA			: IN std_logic;                         -- bus granted to DMA
+		  DMA_CH		: IN std_logic_vector(1 DOWNTO 0) := "10";  -- which channel owns it
 		  DMA_ADDR		: IN std_logic_vector(15 DOWNTO 0);     -- 8237 current address
 		  DMA_MEMR		: IN std_logic;                         -- active LOW
 		  DMA_MEMW		: IN std_logic;                         -- active LOW
@@ -75,8 +76,18 @@ SIGNAL MEMADDR2 : boolean;
 SIGNAL maddr_l  : STD_LOGIC_VECTOR(19 DOWNTO 0);
 SIGNAL ioaddr_l : STD_LOGIC_VECTOR(15 DOWNTO 0);
 
--- DMA page register (channel 2 = port 0x81)
-SIGNAL dma_page : STD_LOGIC_VECTOR(3 DOWNTO 0) := (OTHERS => '0');
+-- DMA PAGE REGISTERS, ONE PER CHANNEL. Four nibbles in one vector, which is
+-- also how the timing constraints refer to them.
+--
+-- This used to be a single register loaded only from port 0x81, channel 2's,
+-- because the floppy was the only device doing DMA. A second device on another
+-- channel then reads from whatever page the floppy driver last set: the
+-- transfer completes, the count reaches zero, and the bytes come from a random
+-- 64 KB of memory. The Sound Blaster read a different wrong page on every boot.
+--
+--   0x87 = ch0    0x83 = ch1    0x81 = ch2    0x82 = ch3
+SIGNAL dma_page : STD_LOGIC_VECTOR(15 DOWNTO 0) := (OTHERS => '0');
+SIGNAL page_sel : STD_LOGIC_VECTOR(3 DOWNTO 0) := (OTHERS => '0');
 SIGNAL wr_prev  : STD_LOGIC := '1';
 
 -- Boot ROM overlay: active for a memory read in 0xFFF00..0xFFFFF while ROM_EN=1
@@ -123,14 +134,33 @@ BEGIN
 
 		-- DMA page register: I/O write to 0x81 (ch2). ADDR holds the latched
 		-- I/O address; AD carries the data byte during the data phase.
-		IF (wr_prev = '0' AND WR = '1' AND IOM = '1' AND ADDR(15 DOWNTO 0) = x"0081") THEN
-			dma_page <= AD(3 DOWNTO 0);
+		-- The page for whichever channel owns the bus, REGISTERED. As a
+		-- combinational mux it sat in the memory address path, which is
+		-- constrained, and cost 1.1 ns of slack. It does not need to be live:
+		-- the 8237 fixes the channel in D_IDLE and does not touch memory until
+		-- D_MEM, so a value one clock behind DMA_CH is already settled by the
+		-- time the address matters.
+		CASE DMA_CH IS
+			WHEN "00"   => page_sel <= dma_page(3 DOWNTO 0);
+			WHEN "01"   => page_sel <= dma_page(7 DOWNTO 4);
+			WHEN "10"   => page_sel <= dma_page(11 DOWNTO 8);
+			WHEN OTHERS => page_sel <= dma_page(15 DOWNTO 12);
+		END CASE;
+
+		IF (wr_prev = '0' AND WR = '1' AND IOM = '1') THEN
+			CASE ADDR(15 DOWNTO 0) IS
+				WHEN x"0087" => dma_page(3 DOWNTO 0)   <= AD(3 DOWNTO 0);
+				WHEN x"0083" => dma_page(7 DOWNTO 4)   <= AD(3 DOWNTO 0);
+				WHEN x"0081" => dma_page(11 DOWNTO 8)  <= AD(3 DOWNTO 0);
+				WHEN x"0082" => dma_page(15 DOWNTO 12) <= AD(3 DOWNTO 0);
+				WHEN OTHERS  => NULL;
+			END CASE;
 		END IF;
 	END IF;
 	END PROCESS;
 
 	-- ---- Address / strobe outputs: CPU normally, 8237 during HLDA ----
-	MEM_ADDR <= (dma_page & DMA_ADDR) WHEN HLDA = '1' ELSE maddr_l;
+	MEM_ADDR <= (page_sel & DMA_ADDR) WHEN HLDA = '1' ELSE maddr_l;
 	IO_ADDR  <= ioaddr_l;
 
 	IO_RD <=  NOT(NOT RD AND IOM);
