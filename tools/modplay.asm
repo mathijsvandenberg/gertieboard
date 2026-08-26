@@ -813,31 +813,61 @@ fillhalf:
         ret
 
 ; ----------------------------------------------------------------------------
-;  mixchunk -- add [chunklen] samples of all four channels into the accumulator
+;  mixchunk -- add [chunklen] samples of every live channel into the accumulator
+;
+;  THE INNER LOOP LIVES IN REGISTERS. The first version reloaded the table
+;  pointer, both halves of the step and the fractional position from memory on
+;  every single sample -- about twelve memory accesses each, on a V20 whose bus
+;  is eight bits wide, so every word costs two cycles. One channel kept up and
+;  four did not, which is exactly what that arithmetic predicts.
+;
+;  Held across the loop:
+;     ES:SI  the sample, SI being the integer part of the position
+;     BP     the fractional part
+;     CX:DX  the 16.16 step, low and high
+;     BX     the volume table row, because XLAT demands BX
+;     DI     the accumulator
+;
+;  That is every register the 8086 has, so the channel index lives in memory as
+;  curch and the two loop bounds are memory compares -- six accesses a sample
+;  instead of twelve.
 ; ----------------------------------------------------------------------------
 mixchunk:
-        xor  bp, bp                     ; channel index * 2
+        mov  word [curch], 0
 .chan:
+        mov  bp, [curch]
+
         ; muted?
         mov  ax, bp
-        shr  ax, 1                      ; channel number
+        shr  ax, 1
         mov  cl, al
         mov  al, 1
         shl  al, cl
         test byte [chmask], al
         jz   .nextch
+
         mov  bx, bp
         mov  ax, [ch_seg+bx]
         test ax, ax
         jz   .nextch                    ; nothing playing here
-        mov  cx, [ch_len+bx]
-        test cx, cx
-        jz   .nextch
-
-        push bp
         mov  es, ax
+        mov  ax, [ch_len+bx]
+        test ax, ax
+        jz   .nextch
+        mov  [chlen], ax
 
-        ; voltab row for this channel's volume
+        ; where this chunk starts and ends in the accumulator
+        mov  ax, [filled]
+        add  ax, ax
+        add  ax, accum
+        mov  di, ax
+        mov  ax, [chunklen]
+        add  ax, ax
+        add  ax, di
+        mov  [accend], ax
+
+        ; volume table row -- CL is the shift, so this must happen before CX
+        ; becomes the step
         mov  al, [ch_vol+bp]
         xor  ah, ah
         mov  cl, 8
@@ -845,58 +875,50 @@ mixchunk:
         add  ax, voltab
         mov  [tabptr], ax
 
+        ; load everything that BP indexes BEFORE BP stops being the index
+        mov  cx, [ch_step_l+bp]
+        mov  dx, [ch_step_h+bp]
         mov  si, [ch_pos_h+bp]
-        mov  ax, [ch_pos_l+bp]
-        mov  [tmp_lo], ax
-        ; START WHERE THE LAST CHUNK STOPPED. A half-buffer is mixed in several
-        ; chunks -- one per sequencer tick, about five of them -- and this used
-        ; to restart at accum each time. Every chunk overwrote the first, the
-        ; rest of the buffer kept whatever was left from the pass before, and
-        ; the conversion below read all HALF samples of it regardless.
-        mov  ax, [filled]
-        add  ax, ax                     ; 16-bit accumulator slots
-        add  ax, accum
-        mov  di, ax
-        mov  ax, [chunklen]
-        mov  [tmp_cnt], ax
-.smp:
-        cmp  si, [ch_len+bp]
-        jb   .inrange
-        ; past the end: loop if the sample has a repeat, else stop it
-        mov  ax, [ch_replen+bp]
-        cmp  ax, 2
-        jbe  .stop
-        mov  ax, [ch_rep+bp]
-        mov  si, ax
-        jmp  .inrange
-.stop:
-        mov  word [ch_seg+bp], 0
-        jmp  .chdone
-.inrange:
-        mov  al, [es:si]
+        mov  bp, [ch_pos_l+bp]
         mov  bx, [tabptr]
-        xlat                            ; DS:BX + AL
+.smp:
+        cmp  si, [chlen]
+        jae  .wrap
+.go:
+        mov  al, [es:si]
+        xlat                            ; AL = voltab[row + sample]
         cbw
         add  [di], ax
         inc  di
         inc  di
+        add  bp, cx                     ; fraction, then carry into the integer
+        adc  si, dx
+        cmp  di, [accend]
+        jb   .smp
+        jmp  .chdone
 
-        mov  ax, [tmp_lo]
-        add  ax, [ch_step_l+bp]
-        mov  [tmp_lo], ax
-        mov  ax, [ch_step_h+bp]
-        adc  si, ax
+.wrap:
+        ; past the end: loop if the sample repeats, otherwise stop it
+        push bx
+        mov  bx, [curch]
+        mov  ax, [ch_replen+bx]
+        cmp  ax, 2
+        jbe  .stopch
+        mov  si, [ch_rep+bx]
+        pop  bx
+        jmp  .go
+.stopch:
+        mov  word [ch_seg+bx], 0
+        pop  bx
+        jmp  .chdone
 
-        dec  word [tmp_cnt]
-        jnz  .smp
 .chdone:
-        mov  [ch_pos_h+bp], si
-        mov  ax, [tmp_lo]
-        mov  [ch_pos_l+bp], ax
-        pop  bp
+        mov  bx, [curch]
+        mov  [ch_pos_h+bx], si
+        mov  [ch_pos_l+bx], bp
 .nextch:
-        add  bp, 2
-        cmp  bp, 8
+        add  word [curch], 2
+        cmp  word [curch], 8
         jb   .chan
         ret
 
@@ -1390,6 +1412,9 @@ brk       db 0
 brkflag   db 0
 jmpto     db 0xFF
 tabptr    dw 0
+curch     dw 0
+chlen     dw 0
+accend    dw 0
 tmp_lo    dw 0
 tmp_cnt   dw 0
 
