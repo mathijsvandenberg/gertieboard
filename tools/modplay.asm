@@ -50,6 +50,7 @@ RSTATP  equ SB+0x0E
 ; exactly with it and this machine is close to the edge at four channels.
 ; -r8 / -r11 / -r22 pick 8000, 11025 or 22050 Hz.
 DEFRATE equ 11025
+BDASEG  equ 0x0040               ; BIOS data area; 40:6C is the 18.2 Hz tick
 
 ; ---- buffer geometry -------------------------------------------------------
 ; 1024 samples a half. This was raised to 2048 on a guess that the mixer was
@@ -739,6 +740,12 @@ play:
         xor  bh, bh
         int  0x10
         mov  [vidrow], dh
+        push es
+        mov  ax, BDASEG
+        mov  es, ax
+        mov  ax, [es:0x6C]
+        mov  [tkstart], ax
+        pop  es
 
 .loop:
         ; ---- which half is the DMA reading? ----
@@ -759,16 +766,31 @@ play:
         je   .nofill
         mov  [lasthalf], al
         mov  byte [posdirty], 1         ; a fill always refreshes the line, so
-        call pitrd                      ; how long does a fill REALLY take?
-        mov  [t0], ax
+        ; TIME THE FILL AGAINST THE BIOS TICK, NOT THE PIT.
+        ;
+        ; DOS runs PIT channel 0 in mode 3, where it decrements by TWO, so it
+        ; wraps every 27.5 ms. A fill longer than that produced a delta with no
+        ; meaning, and the maximum then stuck near 65535 -- which is what "it
+        ; expands to 65503" was: a saturated counter, not a slower fill.
+        ;
+        ; 40:6C counts at 18.2 Hz and does not wrap for hours. One tick is too
+        ; coarse to time a single fill, but summing across many gives the total
+        ; time spent filling, and against elapsed time that is the utilisation
+        ; -- which is the number that actually decides whether this keeps up.
+        push es
+        mov  ax, BDASEG
+        mov  es, ax
+        mov  ax, [es:0x6C]
+        mov  [tk0], ax
+        pop  es
         call fillhalf
-        call pitrd
-        mov  bx, [t0]
-        sub  bx, ax                     ; PIT counts down at 1.193 MHz
-        cmp  bx, [tmax]
-        jbe  .nomax
-        mov  [tmax], bx
-.nomax:
+        push es
+        mov  ax, BDASEG
+        mov  es, ax
+        mov  ax, [es:0x6C]
+        sub  ax, [tk0]
+        add  [busytk], ax
+        pop  es
         call dmacnt                     ; refresh BX for the gap test below
 .nofill:
         ; HOW FAR DID THE DMA MOVE SINCE THE LAST LOOK?
@@ -1506,8 +1528,23 @@ showpos:
         call vputdec
         mov  dx, msg_fill
         call vputs
-        mov  ax, [tmax]
+        push es
+        mov  ax, BDASEG
+        mov  es, ax
+        mov  ax, [es:0x6C]
+        pop  es
+        sub  ax, [tkstart]              ; elapsed ticks
+        mov  bx, ax
+        test bx, bx
+        jz   .nopct
+        mov  ax, [busytk]
+        mov  cx, 100
+        mul  cx
+        div  bx
         call vputdec
+        mov  dx, msg_pct
+        call vputs
+.nopct:
         call vblit
         ret
 
@@ -1691,6 +1728,9 @@ posdirty  db 0
 nunder    dw 0
 prevcnt   dw 0
 t0        dw 0
+tk0       dw 0
+tkstart   dw 0
+busytk    dw 0
 tmax      dw 0
 vidrow    db 0
 linebuf   times 80 db ' '
@@ -1766,7 +1806,8 @@ msg_p       db 'pos $'
 msg_slash   db '/$'
 msg_r       db '  row $'
 msg_und     db '  underrun $'
-msg_fill    db '  fill $'
+msg_fill    db '  busy $'
+msg_pct     db '%$'
 msg_sp      db '    $'
 
 ; ---- buffers, placed by hand and NOT emitted ---------------------------
