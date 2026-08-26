@@ -957,10 +957,13 @@ wrapchk:
         mov  ax, [ch_replen+bx]
         cmp  ax, 2
         jbe  .stopit
-        mov  si, [ch_rep+bx]
-        pop  bx
-        clc
-        ret
+        mov  ax, [ch_rep+bx]
+        cmp  ax, [chlen]
+        jae  .stopit                    ; loop point at or past the end: that
+        mov  si, ax                     ; would send .frun back here for ever,
+        pop  bx                         ; spinning until the chunk happened to
+        clc                             ; end -- a stall, not a hang, and only
+        ret                             ; on the samples shaped that way
 .stopit:
         mov  word [ch_seg+bx], 0
         pop  bx
@@ -1539,7 +1542,7 @@ vblit:                                  ; DI = end of text in linebuf
         pop  es
         mov  cx, di
         sub  cx, linebuf
-.pad:   cmp  cx, 60                     ; clear the tail of the previous line
+.pad:   cmp  cx, 78                     ; clear the tail of the previous line
         jae  .padded
         mov  byte [di], ' '
         inc  di
@@ -1554,7 +1557,7 @@ vblit:                                  ; DI = end of text in linebuf
         mul  bx
         mov  di, ax
         mov  si, linebuf
-        mov  cx, 60
+        mov  cx, 78
         mov  ah, 0x07
 .bl:    lodsb
         stosw
