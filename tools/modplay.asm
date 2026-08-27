@@ -1046,17 +1046,24 @@ polltest:
 ;  ticks have to come from a real clock.
 ;
 ;  PIT channel 0, polled and NOT reprogrammed -- DOS owns that timer and every
-;  clock-dependent thing in the machine hangs off it. Mode 3 decrements it by
-;  TWO, so it spans 32768 clocks and wraps every 27.5 ms; a tick at 125 BPM is
-;  20 ms, comfortably inside one span provided the loop looks more than twice
-;  per wrap, which it does with nothing else to do.
+;  clock-dependent thing in the machine hangs off it.
 ;
-;    counter units a second = 1193182 * 2 = 2386364
-;    units a tick           = 2386364 * 2.5 / bpm = 5965910 / bpm
+;  THE RATE IS THIS MACHINE'S, NOT A REAL PC'S. timer8253 counts from CNT_TICK
+;  at 1.1905 MHz and decrements by ONE in every mode. A real 8253 in mode 3
+;  steps by two, and assuming that made the divisor 2.005 times too large --
+;  ticks fired half as often and the music played at half speed with the pitch
+;  perfectly correct, because pitch comes from the voice engine and has nothing
+;  to do with this.
 ;
-;  That exceeds 16 bits below about 91 BPM, so the accumulator and the target
-;  are both 32-bit. Clamping instead would have made slow modules play fast,
-;  and slow modules are exactly where a tracker puts its quiet passages.
+;    counter units a second = 1190500
+;    units a tick           = 1190500 * 2.5 / bpm = 2976250 / bpm
+;
+;  The counter spans 65536 units, so it wraps every 55 ms against a 20 ms tick
+;  -- one span is nearly three ticks, so the loop only has to look about once a
+;  tick to never miss a wrap.
+;
+;  2976250/bpm exceeds 16 bits below about 45 BPM, so the accumulator and the
+;  target are both 32-bit. Clamping would have made slow modules play fast.
 ; ----------------------------------------------------------------------------
 playhw:
         mov  byte [pos], 0
@@ -1179,13 +1186,13 @@ hwbpm:
         jnz  .ok
         mov  bx, 125
 .ok:
-        ; 5965910 = 0x005B0A96, divided in two steps because the quotient does
+        ; 2976250 = 0x002D69FA, divided in two steps because the quotient does
         ; not fit in sixteen bits at low tempos
-        mov  ax, 0x005B
+        mov  ax, 0x002D
         xor  dx, dx
         div  bx
         mov  [ptk_h], ax
-        mov  ax, 0x0A96
+        mov  ax, 0x69FA
         div  bx                         ; DX still holds the remainder
         mov  [ptk_l], ax
         pop  dx
