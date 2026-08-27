@@ -131,6 +131,9 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_sb_pcm               : std_logic_vector(15 DOWNTO 0); -- FM + DAC
   SIGNAL n_vo_pcm               : std_logic_vector(15 DOWNTO 0); -- + the voices
   SIGNAL n_vo_pcm_stb           : std_logic;
+  SIGNAL n_vo_sd_req            : std_logic;                     -- voices -> arbiter
+  SIGNAL n_vo_sd_a              : std_logic_vector(23 downto 0);
+  SIGNAL n_vo_sd_ack            : std_logic;
   SIGNAL n_sb_pcm_stb           : std_logic;
   SIGNAL n_fl_cs                : std_logic;
   SIGNAL n_fl_do                : std_logic;
@@ -677,6 +680,9 @@ BEGIN
       -- itself when memmap.USE_SDRAM_RAM is FALSE, so with REQ low the port is
       -- invisible to the arbiter and the build is the two-client one again --
       -- the revert needs no edit here.
+      R3_REQ               => n_vo_sd_req,
+      R3_A                 => n_vo_sd_a,
+      R3_ACK               => n_vo_sd_ack,
       R2_REQ               => n_cr_req,
       R2_LOCK              => n_cr_lock,
       R2_WE                => n_cr_we,
@@ -850,6 +856,11 @@ BEGIN
       WR                   => n_io_wr,
       DATAIN               => n_cpu_wdata,
       DATAOUT              => n_periph_rdata,
+      CLKMEM               => n_c3,
+      SD_REQ               => n_vo_sd_req,
+      SD_A                 => n_vo_sd_a,
+      SD_ACK               => n_vo_sd_ack,
+      SD_D                 => n_sd_dout,
       CLK48                => n_clk48,
       PCM_IN               => n_sb_pcm,
       PCM_STB_IN           => n_sb_pcm_stb,

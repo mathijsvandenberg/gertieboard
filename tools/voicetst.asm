@@ -1,10 +1,14 @@
 ; voicetst.asm -- prove the hardware voice engine at 0x300.
 ;
-; Stage one: the engine's sample source is a sawtooth taken from its own phase
-; accumulator, not memory. So a voice keyed with a given step sounds a tone at
-; that pitch, and this can exercise the registers, the pitch arithmetic, the
-; clock crossing, the volume multiply and the summing without the memory
-; controller being involved at all.
+; The voices fetch their samples from ordinary memory, so this builds a 256-byte
+; TRIANGLE in its own segment and points the voices at it. A triangle rather
+; than a sawtooth deliberately: the engine's stage-one placeholder was a
+; sawtooth from the phase accumulator, and a tone that still sounds like one
+; would not prove the fetch is doing anything.
+;
+; A 256-byte wave played at rate R sounds at R/256, so 440 Hz needs the voice
+; stepping at 2.35 bytes per output sample -- which also exercises the integer
+; part of the step, and with it the address arithmetic and the loop wrap.
 ;
 ;   voicetst      probe, then play eight voices as a chord
 ;   voicetst -1   one voice only, to hear a single clean tone
@@ -71,6 +75,49 @@ start:
         jmp  .scan
 .scanned:
 
+        ; ---- build the waveform, and work out where it is ----
+        ; Physical address = segment*16 + offset, which is exactly what the
+        ; engine wants: the samples stay where they were put, with no upload.
+        ; SIGNED, so the ramp starts at -128 and not at 0. Building it unsigned
+        ; puts a wrap in the middle of the rise, which is a sawtooth with a
+        ; discontinuity -- and would have sounded near enough like the stage-one
+        ; placeholder to be mistaken for it.
+        mov  di, wave
+        mov  cx, 128
+        mov  al, 0x80                   ; -128
+.up:    mov  [di], al
+        inc  di
+        add  al, 2
+        loop .up
+        mov  cx, 128
+.dn:    mov  [di], al
+        inc  di
+        sub  al, 2
+        loop .dn
+
+        mov  ax, cs
+        mov  bx, ax
+        mov  cl, 12
+        shr  bx, cl                     ; physical bits 19:16
+        mov  cl, 4
+        shl  ax, cl                     ; segment*16, low 16 bits
+        add  ax, wave
+        adc  bx, 0
+        mov  [phys_lo], ax
+        mov  [phys_hi], bl
+
+        mov  dx, msg_at
+        call puts
+        mov  al, [phys_hi]
+        call puthex
+        mov  ax, [phys_lo]
+        mov  al, ah
+        call puthex
+        mov  ax, [phys_lo]
+        call puthex
+        mov  dx, msg_crlf
+        call puts
+
         ; ---- key them ----
         mov  dx, msg_play
         call puts
@@ -84,32 +131,37 @@ start:
         mov  al, bl
         out  dx, al
 
-        ; the sawtooth runs from the phase, so start/end/loop only have to be
-        ; a range it will not leave: the step below advances the integer part
-        ; once every few hundred ticks.
         mov  dx, VSTART
-        xor  al, al
+        mov  ax, [phys_lo]
         out  dx, al
         inc  dx
+        mov  al, ah
         out  dx, al
         inc  dx
+        mov  al, [phys_hi]
         out  dx, al
 
-        mov  dx, VEND                   ; 0xFFFFF
-        mov  al, 0xFF
+        mov  dx, VEND                   ; start + 256
+        mov  ax, [phys_lo]
+        add  ax, 256
+        mov  cl, [phys_hi]
+        adc  cl, 0
         out  dx, al
         inc  dx
+        mov  al, ah
         out  dx, al
         inc  dx
-        mov  al, 0x0F
+        mov  al, cl
         out  dx, al
 
-        mov  dx, VLOOP
-        xor  al, al
+        mov  dx, VLOOP                  ; loops back to the start
+        mov  ax, [phys_lo]
         out  dx, al
         inc  dx
+        mov  al, ah
         out  dx, al
         inc  dx
+        mov  al, [phys_hi]
         out  dx, al
 
         mov  dx, VVOL                   ; quieter with more voices sounding, so
@@ -131,8 +183,10 @@ start:
         mov  al, ah
         out  dx, al                     ; fraction high
         inc  dx
-        xor  al, al
-        out  dx, al                     ; integer part: none of these reach 1.0
+        mov  si, ints
+        add  si, bx
+        mov  al, [si]
+        out  dx, al                     ; integer part
 
         mov  dx, VCTL                   ; RUN | LOOP | KEYON
         mov  al, 0x07
@@ -246,7 +300,13 @@ nplay   db 0
 
 ; step = frequency * 65536 / 48000. A major scale, so eight voices sounding
 ; together are recognisable as eight rather than as a noise.
-steps   dw 601, 674, 756, 801, 900, 1010, 1134, 1201
+; step = f * 256 / 48000, in 8.16. A 256-byte wave sounds at rate/256, so these
+; are the same major scale as before but now with a real integer part -- which
+; is what exercises the address arithmetic rather than just the fraction.
+steps   dw 0x59B7, 0x0F5C, 0xF2E8, 0xB0A4, 0x82C1, 0x6FD6, 0x8E3C, 0xB36E
+ints    db 2, 3, 2, 3, 3, 3, 4, 4
+phys_lo dw 0
+phys_hi db 0
 
 msg_hdr    db 'VOICETST - hardware voice engine at 300h',13,10,13,10,'$'
 msg_probe  db 'signature : $'
@@ -256,5 +316,7 @@ msg_play   db 'keying    : $'
 msg_act    db 13,10,'ACTIVE    : $'
 msg_any    db 'sounding - press a key to stop',13,10,'$'
 msg_done   db 'stopped.',13,10,'$'
+wave       times 256 db 0
 msg_absent db 13,10,'no voice engine here - this bitstream does not have one',13,10,'$'
+msg_at     db 'wave at   : $'
 msg_crlf   db 13,10,'$'

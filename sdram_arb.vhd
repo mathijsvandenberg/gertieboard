@@ -4,6 +4,7 @@
 --   client 0   ega_mem, the display prefetch and the CPU's path to EGA memory
 --   client 2   the CPU's conventional memory
 --   client 1   sdram_io, the diagnostic window SDRAMTST drives
+--   client 3   the voice engine, fetching sample bytes
 --
 -- A plain mux would not do. sdram_ctrl requires REQ to be held until ACK, so if
 -- the selection could change part way through an access the address would move
@@ -21,6 +22,17 @@
 --   2  the CPU         a late answer is a slower machine. busdecode holds READY
 --                      and the processor simply stalls -- correct, just slower.
 --   1  the diagnostic  nothing waits on it but a test program, deliberately run.
+--   3  the voices      a late byte is inaudible. Each voice fetches the byte it
+--                      will need NEXT, not the one it needs now, so it has a
+--                      whole 48 kHz period -- some twenty microseconds, or a
+--                      thousand of these clocks -- to be served. Audio breaks
+--                      when a fetch never arrives, not when it arrives late,
+--                      which is why this can sit at the bottom.
+--
+-- Eight voices at 48 kHz is 384,000 reads a second against several million the
+-- controller can do, so this cannot starve anything above it either. It is the
+-- one client whose deadline is measured in whole clock periods rather than in
+-- clocks.
 --
 -- The display cannot starve the CPU: a row fetch is ~17.6 us of every 63.5, so
 -- roughly seventy per cent of the memory is idle from the display's point of
@@ -79,6 +91,12 @@ ENTITY sdram_arb IS
         R2_BE  : IN  std_logic_vector(1 DOWNTO 0);
         R2_ACK : OUT std_logic;
 
+        -- client 3 (lowest: the voice engine). Read-only in practice, so there
+        -- is no WE port and no write-ordering hazard with anyone above it.
+        R3_REQ : IN  std_logic := '0';
+        R3_A   : IN  std_logic_vector(23 DOWNTO 0) := (OTHERS => '0');
+        R3_ACK : OUT std_logic;
+
         -- to sdram_ctrl
         S_REQ  : OUT std_logic;
         S_WE   : OUT std_logic;
@@ -92,7 +110,7 @@ ARCHITECTURE behavior OF sdram_arb IS
   -- Who holds the grant. Named rather than encoded: this used to be a single
   -- "sel1" bit, which said which of two clients had it and could not be
   -- extended without every expression in the file having to be re-read.
-  TYPE owner_t IS (OWN_R0, OWN_R1, OWN_R2);
+  TYPE owner_t IS (OWN_R0, OWN_R1, OWN_R2, OWN_R3);
   SIGNAL owner : owner_t := OWN_R0;
   SIGNAL busy  : std_logic := '0';
 BEGIN
@@ -103,17 +121,26 @@ BEGIN
   S_REQ <= '0'     WHEN busy = '0'      ELSE
            R0_REQ  WHEN owner = OWN_R0  ELSE
            R2_REQ  WHEN owner = OWN_R2  ELSE
-           R1_REQ;
+           R1_REQ  WHEN owner = OWN_R1  ELSE
+           R3_REQ;
 
-  S_WE  <= R0_WE   WHEN owner = OWN_R0 ELSE R2_WE  WHEN owner = OWN_R2 ELSE R1_WE;
-  S_A   <= R0_A    WHEN owner = OWN_R0 ELSE R2_A   WHEN owner = OWN_R2 ELSE R1_A;
-  S_D   <= R0_D    WHEN owner = OWN_R0 ELSE R2_D   WHEN owner = OWN_R2 ELSE R1_D;
-  S_BE  <= R0_BE   WHEN owner = OWN_R0 ELSE R2_BE  WHEN owner = OWN_R2 ELSE R1_BE;
+  -- The voice client reads only, so it drives WE low and its data and byte
+  -- enables are don't-care: a read returns the whole word and the voice picks
+  -- the half it wanted.
+  S_WE  <= R0_WE   WHEN owner = OWN_R0 ELSE R2_WE  WHEN owner = OWN_R2 ELSE
+           R1_WE   WHEN owner = OWN_R1 ELSE '0';
+  S_A   <= R0_A    WHEN owner = OWN_R0 ELSE R2_A   WHEN owner = OWN_R2 ELSE
+           R1_A    WHEN owner = OWN_R1 ELSE R3_A;
+  S_D   <= R0_D    WHEN owner = OWN_R0 ELSE R2_D   WHEN owner = OWN_R2 ELSE
+           R1_D;
+  S_BE  <= R0_BE   WHEN owner = OWN_R0 ELSE R2_BE  WHEN owner = OWN_R2 ELSE
+           R1_BE   WHEN owner = OWN_R1 ELSE "11";
 
   -- The acknowledgement goes only to whoever asked.
   R0_ACK <= S_ACK WHEN (busy = '1' AND owner = OWN_R0) ELSE '0';
   R1_ACK <= S_ACK WHEN (busy = '1' AND owner = OWN_R1) ELSE '0';
   R2_ACK <= S_ACK WHEN (busy = '1' AND owner = OWN_R2) ELSE '0';
+  R3_ACK <= S_ACK WHEN (busy = '1' AND owner = OWN_R3) ELSE '0';
 
   PROCESS (CLK)
   BEGIN
@@ -129,9 +156,13 @@ BEGIN
           owner <= OWN_R2; busy <= '1';
         ELSIF R1_REQ = '1' THEN
           owner <= OWN_R1; busy <= '1';
+        ELSIF R3_REQ = '1' THEN
+          owner <= OWN_R3; busy <= '1';
         END IF;
       ELSIF S_ACK = '1' THEN
         -- Reconsider only between TRANSACTIONS, not between accesses.
+        -- The voice client has no LOCK: one byte is one access, so there is
+        -- never a half-finished transaction of its to protect.
         IF (owner = OWN_R0 AND R0_LOCK = '1') OR
            (owner = OWN_R1 AND R1_LOCK = '1') OR
            (owner = OWN_R2 AND R2_LOCK = '1') THEN
