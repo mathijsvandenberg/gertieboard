@@ -1254,7 +1254,12 @@ mixchunk:
 .fstore:
         mov  al, [es:si]
         xlat
-        stosb                           ; write only: no read, no clear pass
+        ; NOT stosb. That writes to ES:DI, and ES is the SAMPLE segment here --
+        ; it wrote into the sample data and never touched the accumulator at
+        ; all. mov [di],al goes through DS, where the accumulator lives, and
+        ; still saves the read that add would have cost.
+        mov  [di], al
+        inc  di
         add  bp, cx
         adc  si, 0
         dec  dx
@@ -1290,7 +1295,8 @@ mixchunk:
 .sstore:
         mov  al, [es:si]
         xlat
-        stosb
+        mov  [di], al                   ; DS:DI, not ES:DI -- see .fstore
+        inc  di
         add  bp, cx
         adc  si, dx
         cmp  di, [accend]
