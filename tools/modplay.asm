@@ -556,14 +556,6 @@ loadmod:
 buildvol:
         push ds
         pop  es
-        ; TWO tables, built together. voltab is the signed value; voltab2 is
-        ; the same value with the mid-scale bias already added.
-        ;
-        ; The bias has to be applied somewhere. Putting it in a table lets the
-        ; FIRST channel of a chunk STORE its result instead of adding to a
-        ; cleared buffer -- which removes the read half of a read-modify-write
-        ; on every sample of that channel, and removes the clear pass entirely.
-        ; Two writes per sample become one.
         mov  di, voltab
         xor  bx, bx                     ; volume level 0..63
         mov  cl, 8                      ; s*v/256, not s*v/64: the >>2 that used
@@ -583,11 +575,6 @@ buildvol:
         sar  ax, cl                     ; / 256 -> +/-31, four of which fit a
                                         ; signed byte with room for the bias
         stosb
-        push di                         ; same value, biased, in the twin table
-        add  di, VOLROWS*256 - 1
-        add  al, 128
-        mov  [di], al
-        pop  di
         inc  dx
         cmp  dx, 256
         jb   .sloop2
@@ -1154,10 +1141,23 @@ skipch:
         ret
 
 mixchunk:
-        ; NO CLEAR. The first live channel stores through the biased table, so
-        ; there is nothing to prime. A chunk with no live channel at all fills
-        ; itself with the bias at the end instead.
-        mov  byte [anymix], 0
+        ; Prime this chunk with the MID-SCALE BIAS rather than zero. The
+        ; accumulator is bytes now and holds the finished sample, so the whole
+        ; separate conversion pass -- a word read, two shifts, an add and a
+        ; byte write for every sample -- disappears. That pass cost as much as
+        ; a whole mixing channel and ran whether one channel played or four,
+        ; which is why one channel measured 35-61% and four only 82%.
+        push es
+        push ds
+        pop  es
+        mov  ax, [filled]
+        add  ax, accum
+        mov  di, ax
+        mov  cx, [chunklen]
+        mov  al, 128
+        rep  stosb
+        pop  es
+
         mov  word [curch], 0
 .chan:
         mov  bp, [curch]
@@ -1202,16 +1202,7 @@ mixchunk:
         mov  al, [ch_vol+bp]
         xor  ah, ah
         shl  ax, 8
-        cmp  byte [anymix], 0
-        jne  .adding
-        add  ax, voltab2                ; first channel: biased table, stores
-        mov  byte [anymix], 1
-        mov  byte [storing], 1
-        jmp  .tabset
-.adding:
         add  ax, voltab
-        mov  byte [storing], 0
-.tabset:
         mov  [tabptr], ax
 
         mov  cx, [ch_step_l+bp]
@@ -1239,50 +1230,28 @@ mixchunk:
         jae  .fgo                       ; the sample outlasts the chunk
         mov  dx, ax                     ; else it runs out first
 .fgo:
-        cmp  byte [storing], 0
-        jne  .fstore
 .fast:
         mov  al, [es:si]
         xlat
-        add  [di], al                   ; read-modify-write
+        add  [di], al                   ; byte, and already biased and scaled
         inc  di
         add  bp, cx
         adc  si, 0
         dec  dx
         jnz  .fast
-        jmp  .fdone
-.fstore:
-        mov  al, [es:si]
-        xlat
-        ; NOT stosb. That writes to ES:DI, and ES is the SAMPLE segment here --
-        ; it wrote into the sample data and never touched the accumulator at
-        ; all. mov [di],al goes through DS, where the accumulator lives, and
-        ; still saves the read that add would have cost.
-        mov  [di], al
-        inc  di
-        add  bp, cx
-        adc  si, 0
-        dec  dx
-        jnz  .fstore
-.fdone:
         cmp  di, [accend]
         jb   .frun
         jmp  .chdone
 .fwrap:
         call wrapchk
-        jnc  .frun
-        jmp  .tailfill
+        jc   .chdone
+        jmp  .frun
 
 ; ---- general path: the position advances a whole byte or more --------------
-;  A storing variant is needed here too. With the clear pass gone, a first
-;  channel that lands on this path -- any note above the mixing rate -- would
-;  otherwise ADD onto whatever the previous pass left in the buffer.
 .slow:
         cmp  si, [chlen]
         jae  .swrap
 .sgo:
-        cmp  byte [storing], 0
-        jne  .sstore
         mov  al, [es:si]
         xlat
         add  [di], al
@@ -1292,37 +1261,10 @@ mixchunk:
         cmp  di, [accend]
         jb   .slow
         jmp  .chdone
-.sstore:
-        mov  al, [es:si]
-        xlat
-        mov  [di], al                   ; DS:DI, not ES:DI -- see .fstore
-        inc  di
-        add  bp, cx
-        adc  si, dx
-        cmp  di, [accend]
-        jb   .slow
-        jmp  .chdone
 .swrap:
         call wrapchk
-        jnc  .sgo
-        jmp  .tailfill
-
-.tailfill:
-        ; A storing channel that stopped part way through owns the rest of this
-        ; chunk and never wrote it. Nothing else will: the channels after it
-        ; ADD, so they would sum onto the previous pass's audio.
-        cmp  byte [storing], 0
-        je   .chdone
-        push es
-        push ds
-        pop  es
-        mov  cx, [accend]
-        sub  cx, di
-        jcxz .tf_done
-        mov  al, 128
-        rep  stosb
-.tf_done:
-        pop  es
+        jc   .chdone
+        jmp  .sgo
 
 .chdone:
         mov  bx, [curch]
@@ -2025,8 +1967,6 @@ brk       db 0
 brkflag   db 0
 jmpto     db 0xFF
 tabptr    dw 0
-storing   db 0
-anymix    db 0
 curch     dw 0
 chlen     dw 0
 accend    dw 0
@@ -2120,7 +2060,6 @@ bufbase:
 ; music.
 VOLROWS   equ 65
 voltab    equ bufbase                          ; VOLROWS x 256, 256-aligned
-voltab2   equ bufbase + VOLROWS*256            ; the same, biased by 128
-hdr       equ bufbase + VOLROWS*512            ; the whole 1084-byte MOD header
-accum     equ bufbase + VOLROWS*512 + 1084     ; HALF finished 8-bit samples
-stacktop  equ bufbase + VOLROWS*512 + 1084 + HALF + 512
+hdr       equ bufbase + VOLROWS*256            ; the whole 1084-byte MOD header
+accum     equ bufbase + VOLROWS*256 + 1084     ; HALF finished 8-bit samples
+stacktop  equ bufbase + VOLROWS*256 + 1084 + HALF + 512
