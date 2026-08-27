@@ -68,6 +68,16 @@ BDASEG  equ 0x0040               ; BIOS data area; 40:6C is the 18.2 Hz tick
 HALF    equ 2048
 BUFLEN  equ HALF*2
 
+; ---- the hardware voice engine --------------------------------------------
+VB      equ 0x300
+VCTL    equ VB+1
+VVOL    equ VB+2
+VSTART  equ VB+3
+VEND    equ VB+6
+VLOOP   equ VB+9
+VSTEP   equ VB+0x0C
+HWRATE  equ 48000              ; the engine's output rate, fixed by CLK48
+
 ; ---- Amiga PAL clock / 2, for period -> frequency --------------------------
 PALHI   equ 0x0036
 PALLO   equ 0x1F0F              ; 0x00361F0F = 3546895
@@ -101,10 +111,16 @@ start:
         call puts
 
         call scanopts
+        call hwprobe
         call getname
         jc   .usage
         call loadmod
         jc   .loadfail
+        cmp  byte [hwmode], 0
+        je   .software
+        call playhw                     ; nothing to allocate and no DSP to set
+        jmp  .stopped
+.software:
         call buildvol
         call allocdma
         jc   .nodma
@@ -112,8 +128,12 @@ start:
         jc   .nosb
 
         call play
+.stopped:
 
+        cmp  byte [hwmode], 0
+        jne  .nosbstop
         call sbstop
+.nosbstop:
         mov  dx, msg_bye
         call puts
         mov  ax, 0x4C00
@@ -170,6 +190,8 @@ scanopts:
         lodsb
         cmp  al, 13
         je   .done
+        cmp  al, 's'
+        je   .swonly
         cmp  al, 't'
         je   .tmode
         cmp  al, 'r'
@@ -185,6 +207,9 @@ scanopts:
         mov  al, 1
         shl  al, cl                     ; 8086: shift by CL, not by immediate
         mov  [chmask], al
+        jmp  .s
+.swonly:
+        mov  byte [forcesw], 1
         jmp  .s
 .tmode:
         mov  byte [testmode], 1
@@ -206,6 +231,35 @@ scanopts:
         mov  word [mixrate], 11025
         jmp  .s
 .done:
+        ret
+
+; ============================================================================
+;  hwprobe -- is a voice engine present?
+;
+;  A positive signature, not "did something answer". An absent engine reads FF
+;  from an open bus or 00 from a decoded-but-empty one, and neither spells GV.
+;  Probing by response alone is what nearly wrote a BIOS image onto a diskette:
+;  the floppy path answers AH=08 for ANY drive number with carry clear.
+; ============================================================================
+hwprobe:
+        mov  byte [hwmode], 0
+        cmp  byte [forcesw], 0
+        jne  .no
+        mov  dx, VB
+        in   al, dx
+        cmp  al, 'G'
+        jne  .no
+        mov  dx, VB+1
+        in   al, dx
+        cmp  al, 'V'
+        jne  .no
+        mov  dx, VB+2
+        in   al, dx
+        mov  [hwvoices], al
+        cmp  al, 4                      ; a module needs four
+        jb   .no
+        mov  byte [hwmode], 1
+.no:
         ret
 
 ; ============================================================================
@@ -985,6 +1039,161 @@ polltest:
         ret
 
 ; ----------------------------------------------------------------------------
+;  playhw -- the main loop when the voice engine is doing the mixing.
+;
+;  SOFTWARE MIXING IS SELF-CLOCKING: the sequencer advances by samples MIXED,
+;  so tempo comes free. With the mixing gone there is nothing to count, and
+;  ticks have to come from a real clock.
+;
+;  PIT channel 0, polled and NOT reprogrammed -- DOS owns that timer and every
+;  clock-dependent thing in the machine hangs off it. Mode 3 decrements it by
+;  TWO, so it spans 32768 clocks and wraps every 27.5 ms; a tick at 125 BPM is
+;  20 ms, comfortably inside one span provided the loop looks more than twice
+;  per wrap, which it does with nothing else to do.
+;
+;    counter units a second = 1193182 * 2 = 2386364
+;    units a tick           = 2386364 * 2.5 / bpm = 5965910 / bpm
+;
+;  That exceeds 16 bits below about 91 BPM, so the accumulator and the target
+;  are both 32-bit. Clamping instead would have made slow modules play fast,
+;  and slow modules are exactly where a tracker puts its quiet passages.
+; ----------------------------------------------------------------------------
+playhw:
+        mov  byte [pos], 0
+        mov  byte [row], 0
+        mov  byte [speed], 6
+        mov  byte [tickno], 0
+        call hwbpm
+
+        mov  dx, msg_hwplay
+        call puts
+        mov  ah, 0x03
+        xor  bh, bh
+        int  0x10
+        mov  [vidrow], dh
+
+        call pitrd
+        mov  [pitprev], ax
+        mov  word [pacc_l], 0
+        mov  word [pacc_h], 0
+        ; showpos divides by elapsed ticks, so it needs a start even though
+        ; busy is meaningless here -- there is no mixing left to be busy with
+        call tickrd
+        mov  [tkstart], ax
+        mov  word [busytk], 0
+.hloop:
+        call pitrd
+        mov  bx, [pitprev]
+        sub  bx, ax                     ; counts down, so this is the distance
+        mov  [pitprev], ax
+        add  [pacc_l], bx
+        adc  word [pacc_h], 0
+
+.hcheck:
+        mov  ax, [pacc_h]
+        cmp  ax, [ptk_h]
+        ja   .hfire
+        jb   .hnotyet
+        mov  ax, [pacc_l]
+        cmp  ax, [ptk_l]
+        jb   .hnotyet
+.hfire:
+        mov  ax, [ptk_l]
+        sub  [pacc_l], ax
+        mov  ax, [ptk_h]
+        sbb  [pacc_h], ax
+        call dotickhw
+        jmp  .hcheck                    ; a long stall owes several ticks
+.hnotyet:
+
+        cmp  byte [posdirty], 0
+        je   .hnopaint
+        mov  byte [posdirty], 0
+        call showpos
+.hnopaint:
+
+        push es
+        mov  ax, BDASEG
+        mov  es, ax
+        mov  ax, [es:0x1A]
+        cmp  ax, [es:0x1C]
+        pop  es
+        je   .hloop
+        mov  ah, 0
+        int  0x16
+        cmp  al, 27
+        je   .hquit
+        cmp  al, ' '
+        jne  .hloop
+        xor  byte [paused], 1
+        jmp  .hloop
+.hquit:
+        ; silence every voice on the way out, or the last note of the song
+        ; keeps sounding after the program has gone
+        xor  bx, bx
+.hoff:
+        mov  dx, VB
+        mov  al, bl
+        out  dx, al
+        mov  dx, VCTL
+        xor  al, al
+        out  dx, al
+        inc  bx
+        cmp  bl, 8
+        jb   .hoff
+        ret
+
+; ----------------------------------------------------------------------------
+;  dotickhw -- one sequencer tick, hardware path. Same shape as dotick without
+;              the sample accounting, which does not exist here.
+; ----------------------------------------------------------------------------
+dotickhw:
+        cmp  byte [paused], 0
+        jne  .ret
+        mov  al, [tickno]
+        test al, al
+        jnz  .fx
+        call dorow
+        inc  byte [tickno]
+        ret
+.fx:
+        call doeffects
+        inc  byte [tickno]
+        mov  al, [tickno]
+        cmp  al, [speed]
+        jb   .ret
+        mov  byte [tickno], 0
+.ret:
+        ret
+
+; ----------------------------------------------------------------------------
+;  hwbpm -- PIT counter units per tick = 5965910 / bpm, as a 32-bit value.
+; ----------------------------------------------------------------------------
+hwbpm:
+        push ax
+        push bx
+        push dx
+        mov  bl, [bpm]
+        xor  bh, bh
+        test bx, bx
+        jnz  .ok
+        mov  bx, 125
+.ok:
+        ; 5965910 = 0x005B0A96, divided in two steps because the quotient does
+        ; not fit in sixteen bits at low tempos
+        mov  ax, 0x005B
+        xor  dx, dx
+        div  bx
+        mov  [ptk_h], ax
+        mov  ax, 0x0A96
+        div  bx                         ; DX still holds the remainder
+        mov  [ptk_l], ax
+        pop  dx
+        pop  bx
+        pop  ax
+        ret
+
+; ----------------------------------------------------------------------------
 ;  fillhalf -- mix one half-buffer, running the sequencer as it goes
 ; ----------------------------------------------------------------------------
 fillhalf:
@@ -1432,9 +1641,164 @@ trigger:
         mov  [ch_seg+bp], ax
         mov  word [ch_pos_h+bp], 0
         mov  word [ch_pos_l+bp], 0
+        cmp  byte [hwmode], 0
+        je   .swstep
+        call hwtrig
+        jmp  .noper
+.swstep:
         call setstep
 .noper:
         pop  bp
+        ret
+
+; ----------------------------------------------------------------------------
+;  hwvoice -- select the voice for channel BP (bp is the channel index * 2)
+; ----------------------------------------------------------------------------
+hwvoice:
+        push ax
+        push dx
+        mov  ax, bp
+        shr  ax, 1
+        mov  dx, VB
+        out  dx, al
+        pop  dx
+        pop  ax
+        ret
+
+; ----------------------------------------------------------------------------
+;  hwaddr3 -- write a 20-bit address to the three ports at DX. AX = low 16,
+;             BL = bits 19:16.
+; ----------------------------------------------------------------------------
+hwaddr3:
+        out  dx, al
+        inc  dx
+        push ax
+        mov  al, ah
+        out  dx, al
+        pop  ax
+        inc  dx
+        push ax
+        mov  al, bl
+        out  dx, al
+        pop  ax
+        ret
+
+; ----------------------------------------------------------------------------
+;  hwtrig -- start channel BP's current sample on its voice.
+;
+;  The sample stays where DOS loaded it; the engine takes a PHYSICAL address,
+;  which for a segment-aligned block is simply segment*16. No upload, and no
+;  second copy of forty kilobytes.
+; ----------------------------------------------------------------------------
+hwtrig:
+        push ax
+        push bx
+        push cx
+        push dx
+        call hwvoice
+
+        mov  ax, [ch_smpseg+bp]
+        test ax, ax
+        jz   .off                       ; no sample: leave the voice silent
+        mov  bx, ax
+        mov  cl, 12
+        shr  bx, cl                     ; physical bits 19:16
+        mov  cl, 4
+        shl  ax, cl                     ; segment*16
+        mov  [hwbase], ax
+        mov  [hwbaseh], bl
+
+        mov  dx, VSTART
+        call hwaddr3
+
+        mov  ax, [hwbase]               ; END = start + length
+        add  ax, [ch_len+bp]
+        mov  bl, [hwbaseh]
+        adc  bl, 0
+        mov  dx, VEND
+        call hwaddr3
+
+        mov  ax, [hwbase]               ; LOOP = start + repeat offset
+        add  ax, [ch_rep+bp]
+        mov  bl, [hwbaseh]
+        adc  bl, 0
+        mov  dx, VLOOP
+        call hwaddr3
+
+        call hwstep
+        call hwvol
+
+        mov  dx, VCTL
+        mov  al, 0x05                   ; RUN | KEYON
+        cmp  word [ch_replen+bp], 2
+        jbe  .go                        ; replen <= 2 means one-shot
+        or   al, 0x02                   ; RUN | LOOP | KEYON
+.go:
+        out  dx, al
+        jmp  .out
+.off:
+        mov  dx, VCTL
+        xor  al, al
+        out  dx, al
+.out:
+        pop  dx
+        pop  cx
+        pop  bx
+        pop  ax
+        ret
+
+; ----------------------------------------------------------------------------
+;  hwstep -- period -> the engine's 8.16 step, for channel BP.
+;
+;    rate = 3546895 / period
+;    step = rate / 48000
+;
+;  The integer part is always zero for a MOD: the highest note is about 31 kHz
+;  against a 48 kHz output, so a voice never advances a whole byte per sample.
+;  It is written anyway, because writing the high byte is what commits the step
+;  in the engine.
+; ----------------------------------------------------------------------------
+hwstep:
+        push ax
+        push bx
+        push dx
+        mov  bx, [ch_period+bp]
+        cmp  bx, 108
+        jae  .ok
+        mov  bx, 108
+.ok:
+        mov  dx, PALHI
+        mov  ax, PALLO
+        div  bx                         ; AX = rate
+        mov  dx, ax
+        xor  ax, ax                     ; DX:AX = rate << 16
+        mov  bx, HWRATE
+        div  bx                         ; AX = rate*65536/48000
+        mov  dx, VSTEP
+        out  dx, al
+        inc  dx
+        mov  al, ah
+        out  dx, al
+        inc  dx
+        xor  al, al
+        out  dx, al                     ; integer part, and the commit
+        pop  dx
+        pop  bx
+        pop  ax
+        ret
+
+; ----------------------------------------------------------------------------
+;  hwvol -- channel BP's volume to its voice
+; ----------------------------------------------------------------------------
+hwvol:
+        push ax
+        push dx
+        call hwvoice
+        mov  al, [ch_vol+bp]
+        mov  dx, VVOL
+        out  dx, al
+        pop  dx
+        pop  ax
         ret
 
 ; ----------------------------------------------------------------------------
@@ -1482,6 +1846,9 @@ rowfx:
         mov  ah, 64
 .cok:
         mov  [ch_vol+bp], ah
+        cmp  byte [hwmode], 0
+        je   .n_c
+        call hwvol
 .n_c:
         cmp  al, 0x0F                   ; Fxx speed / tempo
         jne  .n_f
@@ -1494,6 +1861,9 @@ rowfx:
 .bpm:
         mov  [bpm], ah
         call setbpm
+        cmp  byte [hwmode], 0
+        je   .n_f
+        call hwbpm
 .n_f:
         cmp  al, 0x0B                   ; Bxx position jump
         jne  .n_b
@@ -1545,6 +1915,12 @@ doeffects:
         mov  ax, 113
 .p1ok:
         mov  [ch_period+bp], ax
+        cmp  byte [hwmode], 0
+        je   .sw1
+        call hwvoice
+        call hwstep
+        jmp  .next
+.sw1:
         call setstep
         jmp  .next
 .n_1:
@@ -1559,6 +1935,12 @@ doeffects:
         mov  ax, 856
 .p2ok:
         mov  [ch_period+bp], ax
+        cmp  byte [hwmode], 0
+        je   .sw2
+        call hwvoice
+        call hwstep
+        jmp  .next
+.sw2:
         call setstep
         jmp  .next
 .n_2:
@@ -1583,6 +1965,9 @@ doeffects:
         xor  ch, ch
 .vset:
         mov  [ch_vol+bp], ch
+        cmp  byte [hwmode], 0
+        je   .next
+        call hwvol
 .next:
         add  bp, 2
         cmp  bp, 8
@@ -1942,6 +2327,18 @@ samptick  dw 220
 mixrate   dw DEFRATE
 paused    db 0
 posdirty  db 0
+hwmode    db 0
+forcesw   db 0
+hwvoices  db 0
+hwbase    dw 0
+hwbaseh   db 0
+pittick   dw 0
+pitacc    dw 0
+pitprev   dw 0
+pacc_l    dw 0
+pacc_h    dw 0
+ptk_l     dw 0
+ptk_h     dw 0
 testmode  db 0
 nunder    dw 0
 prevcnt   dw 0
@@ -2020,6 +2417,7 @@ msg_rate    db 'mixing   : $'
 msg_hz      db ' Hz',13,10,'$'
 msg_chan    db 'channels : mask $'
 msg_test    db 'poll test - no mixing at all. ESC quits.',13,10,'$'
+msg_hwplay  db 'playing on the VOICE ENGINE - SPACE pauses, ESC quits',13,10,'$'
 msg_playing db 'playing - SPACE pauses, S shows stats, ESC quits',13,10,'$'
 msg_bye     db 13,10,'stopped.',13,10,'$'
 msg_crlf    db 13,10,'$'
