@@ -1,4 +1,4 @@
-; voicetst.asm -- prove the hardware voice engine at 0x300.
+; voicetst.asm -- prove the GertieDSP at 0x300.
 ;
 ; The voices fetch their samples from ordinary memory, so this builds a 256-byte
 ; TRIANGLE in its own segment and points the voices at it. A triangle rather
@@ -308,7 +308,7 @@ ints    db 2, 3, 2, 3, 3, 3, 4, 4
 phys_lo dw 0
 phys_hi db 0
 
-msg_hdr    db 'VOICETST - hardware voice engine at 300h',13,10,13,10,'$'
+msg_hdr    db 'VOICETST - GertieDSP at 300h',13,10,13,10,'$'
 msg_probe  db 'signature : $'
 msg_found  db '  found - $'
 msg_voices db ' voices',13,10,'$'
@@ -317,6 +317,6 @@ msg_act    db 13,10,'ACTIVE    : $'
 msg_any    db 'sounding - press a key to stop',13,10,'$'
 msg_done   db 'stopped.',13,10,'$'
 wave       times 256 db 0
-msg_absent db 13,10,'no voice engine here - this bitstream does not have one',13,10,'$'
+msg_absent db 13,10,'no GertieDSP here - this bitstream does not have one',13,10,'$'
 msg_at     db 'wave at   : $'
 msg_crlf   db 13,10,'$'

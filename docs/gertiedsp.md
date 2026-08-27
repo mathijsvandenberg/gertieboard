@@ -1,4 +1,4 @@
-# The voice engine — hardware sample playback
+# The GertieDSP — hardware sample playback
 
 Eight sample-playback voices in fabric, mixing without the CPU. This is the
 Paula/Ultrasound idea rather than the Sound Blaster one: the CPU says *what to
@@ -31,7 +31,7 @@ samples live in card RAM, timers, its own interrupt scheme, and volume-ramp
 hardware across 32 voices. Emulating an upload path for samples that are
 already sitting in SDRAM would be work spent to arrive back where we started.
 
-So: the shape of a voice engine, with a register set chosen to be easy to drive
+So: the shape of a voice engine, under its own name, with a register set chosen to be easy to drive
 from 8086 assembly, and no claim to be any real chip.
 
 ## Register map
@@ -172,7 +172,7 @@ That is a few dozen I/O writes every 20 ms against 44,100 sample operations a
 second. The `busy` figure should become unmeasurable, and eight voices should
 cost no more than four.
 
-MODPLAY probes for 'GV' at startup and uses the voices when it finds them,
+MODPLAY probes for 'GV' at startup and uses the GertieDSP when it finds it,
 falling back to the software mixer when it does not. Both paths stay in the
 binary: the same executable plays a module on a board with this bitstream and
 on one without, and `-s` forces the software path so the two can be compared on
@@ -203,7 +203,7 @@ reversible if the fetch rate or the fitter says otherwise.
 
 ## Order of work
 
-1. `voices.vhd` with the register file and phase accumulators, fetching from a
+1. `gertiedsp.vhd` with the register file and phase accumulators, fetching from a
    stub that returns a fixed value. Proves the register interface and the
    pitch arithmetic with no arbiter involvement at all.
 2. The `sdram_arb` read port, with one voice reading real samples.

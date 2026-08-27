@@ -1,7 +1,7 @@
 --------------------------------------------------------------------------------
--- voices.vhd  --  hardware sample-playback voices at I/O 0x300
+-- gertiedsp.vhd  --  the GertieDSP: hardware sample playback at I/O 0x300
 --
--- See docs/sound-engine.md. Eight voices, each with a start/end/loop address,
+-- See docs/gertiedsp.md. Eight voices, each with a start/end/loop address,
 -- a 16.16 phase increment and a volume, mixed in fabric at 48 kHz and summed
 -- into the PCM stream the USB audio path already carries.
 --
@@ -47,7 +47,7 @@ LIBRARY IEEE;
 USE  IEEE.STD_LOGIC_1164.ALL;
 USE  IEEE.NUMERIC_STD.ALL;
 
-ENTITY voices IS
+ENTITY gertiedsp IS
   GENERIC(
         IO_BASE : std_logic_vector(15 DOWNTO 0) := x"0300";
         NVOICE  : integer := 8);
@@ -74,9 +74,9 @@ ENTITY voices IS
         PCM_STB_IN : IN    std_logic := '0';
         PCM        : OUT   std_logic_vector(15 DOWNTO 0);
         PCM_STB    : OUT   std_logic);
-END voices;
+END gertiedsp;
 
-ARCHITECTURE behavior OF voices IS
+ARCHITECTURE behavior OF gertiedsp IS
 
   TYPE u20_arr IS ARRAY(0 TO NVOICE-1) OF unsigned(19 DOWNTO 0);
   TYPE u24_arr IS ARRAY(0 TO NVOICE-1) OF unsigned(23 DOWNTO 0);

@@ -129,9 +129,9 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_dma_ch               : std_logic_vector(1 downto 0);  -- channel owning the bus
   SIGNAL n_sb_irq               : std_logic;                     -- SB DSP -> IR5
   SIGNAL n_sb_pcm               : std_logic_vector(15 DOWNTO 0); -- FM + DAC
-  SIGNAL n_vo_pcm               : std_logic_vector(15 DOWNTO 0); -- + the voices
+  SIGNAL n_vo_pcm               : std_logic_vector(15 DOWNTO 0); -- + the GertieDSP
   SIGNAL n_vo_pcm_stb           : std_logic;
-  SIGNAL n_vo_sd_req            : std_logic;                     -- voices -> arbiter
+  SIGNAL n_vo_sd_req            : std_logic;                     -- GertieDSP -> arbiter
   SIGNAL n_vo_sd_a              : std_logic_vector(23 downto 0);
   SIGNAL n_vo_sd_ack            : std_logic;
   SIGNAL n_sb_pcm_stb           : std_logic;
@@ -839,11 +839,11 @@ BEGIN
       PCM_STB              => n_sb_pcm_stb
     );
 
-  -- The voice engine. Third and last stage of the PCM pipeline: the OPL2 hands
+  -- The GertieDSP. Third and last stage of the PCM pipeline: the OPL2 hands
   -- its stream to the Sound Blaster, which adds its DAC, which hands it here.
   -- Each stage sums into what it was given, so there is no mixer module and
   -- usb_host still sees exactly one source.
-  vo1 : ENTITY work.voices
+  vo1 : ENTITY work.gertiedsp
     GENERIC MAP (
       IO_BASE              => x"0300",
       NVOICE               => 8

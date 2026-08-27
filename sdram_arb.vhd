@@ -4,7 +4,7 @@
 --   client 0   ega_mem, the display prefetch and the CPU's path to EGA memory
 --   client 2   the CPU's conventional memory
 --   client 1   sdram_io, the diagnostic window SDRAMTST drives
---   client 3   the voice engine, fetching sample bytes
+--   client 3   the GertieDSP, fetching sample bytes
 --
 -- A plain mux would not do. sdram_ctrl requires REQ to be held until ACK, so if
 -- the selection could change part way through an access the address would move
@@ -22,7 +22,7 @@
 --   2  the CPU         a late answer is a slower machine. busdecode holds READY
 --                      and the processor simply stalls -- correct, just slower.
 --   1  the diagnostic  nothing waits on it but a test program, deliberately run.
---   3  the voices      a late byte is inaudible. Each voice fetches the byte it
+--   3  the GertieDSP   a late byte is inaudible. Each voice fetches the byte it
 --                      will need NEXT, not the one it needs now, so it has a
 --                      whole 48 kHz period -- some twenty microseconds, or a
 --                      thousand of these clocks -- to be served. Audio breaks
@@ -91,7 +91,7 @@ ENTITY sdram_arb IS
         R2_BE  : IN  std_logic_vector(1 DOWNTO 0);
         R2_ACK : OUT std_logic;
 
-        -- client 3 (lowest: the voice engine). Read-only in practice, so there
+        -- client 3 (lowest: the GertieDSP). Read-only in practice, so there
         -- is no WE port and no write-ordering hazard with anyone above it.
         R3_REQ : IN  std_logic := '0';
         R3_A   : IN  std_logic_vector(23 DOWNTO 0) := (OTHERS => '0');
@@ -124,7 +124,7 @@ BEGIN
            R1_REQ  WHEN owner = OWN_R1  ELSE
            R3_REQ;
 
-  -- The voice client reads only, so it drives WE low and its data and byte
+  -- The GertieDSP reads only, so it drives WE low and its data and byte
   -- enables are don't-care: a read returns the whole word and the voice picks
   -- the half it wanted.
   S_WE  <= R0_WE   WHEN owner = OWN_R0 ELSE R2_WE  WHEN owner = OWN_R2 ELSE
@@ -161,7 +161,7 @@ BEGIN
         END IF;
       ELSIF S_ACK = '1' THEN
         -- Reconsider only between TRANSACTIONS, not between accesses.
-        -- The voice client has no LOCK: one byte is one access, so there is
+        -- The GertieDSP has no LOCK: one byte is one access, so there is
         -- never a half-finished transaction of its to protect.
         IF (owner = OWN_R0 AND R0_LOCK = '1') OR
            (owner = OWN_R1 AND R1_LOCK = '1') OR

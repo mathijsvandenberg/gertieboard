@@ -68,7 +68,7 @@ BDASEG  equ 0x0040               ; BIOS data area; 40:6C is the 18.2 Hz tick
 HALF    equ 2048
 BUFLEN  equ HALF*2
 
-; ---- the hardware voice engine --------------------------------------------
+; ---- the GertieDSP ---------------------------------------------------------
 VB      equ 0x300
 VCTL    equ VB+1
 VVOL    equ VB+2
@@ -234,7 +234,7 @@ scanopts:
         ret
 
 ; ============================================================================
-;  hwprobe -- is a voice engine present?
+;  hwprobe -- is a GertieDSP present?
 ;
 ;  A positive signature, not "did something answer". An absent engine reads FF
 ;  from an open bus or 00 from a decoded-but-empty one, and neither spells GV.
@@ -1039,7 +1039,7 @@ polltest:
         ret
 
 ; ----------------------------------------------------------------------------
-;  playhw -- the main loop when the voice engine is doing the mixing.
+;  playhw -- the main loop when the GertieDSP is doing the mixing.
 ;
 ;  SOFTWARE MIXING IS SELF-CLOCKING: the sequencer advances by samples MIXED,
 ;  so tempo comes free. With the mixing gone there is nothing to count, and
@@ -1052,7 +1052,7 @@ polltest:
 ;  at 1.1905 MHz and decrements by ONE in every mode. A real 8253 in mode 3
 ;  steps by two, and assuming that made the divisor 2.005 times too large --
 ;  ticks fired half as often and the music played at half speed with the pitch
-;  perfectly correct, because pitch comes from the voice engine and has nothing
+;  perfectly correct, because pitch comes from the GertieDSP and has nothing
 ;  to do with this.
 ;
 ;    counter units a second = 1190500
@@ -2403,7 +2403,7 @@ ch_eff    times 4 dw 0
 ch_par    times 4 dw 0
 
 msg_hdr     db 'MODPLAY - ProTracker 4-channel, Sound Blaster at 220h',13,10,'$'
-msg_usage   db 'usage: modplay file.mod [-1..-4 one channel] [-r8|-r11|-r22 rate]',13,10,'$'
+msg_usage   db 'usage: modplay file.mod [-1..-4 one channel] [-r8|-r11|-r22 rate] [-s software mixer]',13,10,'$'
 msg_e_open  db 'cannot open that file - check the name and that it is on the disk',13,10,'$'
 msg_e_short db 'file is too short to be a MOD - the header is 1084 bytes',13,10,'$'
 msg_e_sig   db 'not a 4-channel MOD - no M.K., 4CHN or FLT4 signature at 1080',13,10,'$'
@@ -2424,7 +2424,7 @@ msg_rate    db 'mixing   : $'
 msg_hz      db ' Hz',13,10,'$'
 msg_chan    db 'channels : mask $'
 msg_test    db 'poll test - no mixing at all. ESC quits.',13,10,'$'
-msg_hwplay  db 'playing on the VOICE ENGINE - SPACE pauses, ESC quits',13,10,'$'
+msg_hwplay  db 'playing on the GertieDSP - SPACE pauses, ESC quits',13,10,'$'
 msg_playing db 'playing - SPACE pauses, S shows stats, ESC quits',13,10,'$'
 msg_bye     db 13,10,'stopped.',13,10,'$'
 msg_crlf    db 13,10,'$'

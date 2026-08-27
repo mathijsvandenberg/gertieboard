@@ -288,7 +288,7 @@ set_global_assignment -name VHDL_FILE mem_hybrid.vhd
 set_global_assignment -name VHDL_FILE com1_stub.vhd
 set_global_assignment -name VHDL_FILE opl2_lite.vhd
 set_global_assignment -name VHDL_FILE sb_dsp.vhd
-set_global_assignment -name VHDL_FILE voices.vhd
+set_global_assignment -name VHDL_FILE gertiedsp.vhd
 set_global_assignment -name VHDL_FILE usb_audio.vhd
 set_global_assignment -name VHDL_FILE crtc6845.vhd
 set_global_assignment -name VHDL_FILE ega_regs.vhd
