@@ -53,11 +53,19 @@ DEFRATE equ 11025
 BDASEG  equ 0x0040               ; BIOS data area; 40:6C is the 18.2 Hz tick
 
 ; ---- buffer geometry -------------------------------------------------------
-; 1024 samples a half. This was raised to 2048 on a guess that the mixer was
-; short of time; the guess was wrong. A fill measures 63000 PIT counts, 52.7 ms,
-; against a 186 ms half at 11025 Hz -- 28% of the window. At 1024 the ratio is
-; identical and the latency halves, from 372 ms of buffered audio to 186.
-HALF    equ 1024
+; 2048 samples a half, 186 ms at 11025 Hz.
+;
+; The ratio of work to window is the same at any size, so this does nothing for
+; a sustained shortfall. It is for TRANSIENTS, and the fault is transient:
+; percussion plays cleanly because one-shot samples end and their channels stop,
+; while the melody keeps four looping samples alive at once and every loop wrap
+; re-enters the run setup. A bigger half rides over a spike that a smaller one
+; cannot, at the cost of latency -- and 372 ms of latency is of no consequence
+; for music playing from a file.
+;
+; It was cut to 1024 on a fill-time reading that later proved to be a maximum
+; captured before four channels were live.
+HALF    equ 2048
 BUFLEN  equ HALF*2
 
 ; ---- Amiga PAL clock / 2, for period -> frequency --------------------------
