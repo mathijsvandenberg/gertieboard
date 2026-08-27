@@ -127,12 +127,54 @@ openFPGALoader -c usb-blaster -f --file-type rpd gertieboard.rpd # to the flash
 
 | Version | Date | Headline |
 |---|---|---|
+| **[v1.40](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.40)** | 2026-08-28 | A Sound Blaster, and the GertieDSP: eight hardware voices that mix without the CPU |
 | **[v1.31](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.31)** | 2026-08-23 | Flashing the BIOS no longer depends on which device owns B: |
 | **[v1.30](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.30)** | 2026-08-23 | A USB floppy as drive B:, AdLib over USB audio, and a machine that boots at 10 MHz |
 | **[v1.21](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.21)** | 2026-08-17 | Low-speed USB, and a keyboard typing into DOS |
 | **[v1.20](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.20)** | 2026-08-17 | A USB mouse in real games — and the clock fix that raised the CPU ceiling |
 | **[v1.10](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.10)** | 2026-08-13 | EGA mode 0Dh, 640 KB in SDRAM, and every off-chip interface finally timed |
 | **[v1.00](https://github.com/mathijsvandenberg/gertieboard/releases/tag/v1.00)** | 2026-07-30 | First release: a machine that boots on its own |
+
+### v1.40 — a Sound Blaster, and hardware that mixes without the CPU
+
+**Sound Blaster at A220 I5 D1**, reporting DSP 2.01 and meaning it: direct DAC,
+single-cycle and auto-init DMA, the time constant, speaker control. Nothing
+advertises a capability it does not have — a card claiming 3.xx gets asked for
+stereo and a mixer, and a game answered with silence is worse off than one that
+never asked.
+
+**The GertieDSP** — eight sample-playback voices in fabric, each with a
+start/end/loop address, a 16.16 phase increment and a volume, mixed at 48 kHz
+and summed into the same PCM stream the OPL2 and the Sound Blaster already
+share. Samples are read from wherever DOS loaded them: the engine takes a
+physical address, so there is no upload step and no second copy.
+
+Software mixing four channels measured **50–100% of the CPU** and saturated on
+dense passages, and the remaining optimisations were worth single-digit
+percentages against a shortfall of fifty. The answer was not a faster mixer but
+not mixing on the CPU at all. MODPLAY now probes for the GertieDSP and uses it
+when present, falling back to its software mixer when not — the same binary
+runs on a board either way, and `-s` forces the software path so the two can be
+compared on one module in one session.
+
+**MODPLAY**, a ProTracker player, with the essential effect set, selectable
+mixing rate and per-channel isolation.
+
+Three hardware faults fixed along the way, all with reach beyond audio:
+
+* **Per-channel DMA page registers.** There was one, loaded only from port 0x81
+  — channel 2's, because the floppy was the only device that had ever done DMA.
+  A second device on another channel read from whatever page the floppy driver
+  last set, and it was a different wrong page on every boot.
+* **DMA reads now advance the byte pointer**, as the real 8237 does. Nothing
+  had noticed because the BIOS only ever *writes* those registers; anything
+  watching a transfer's progress reads them.
+* **Two clock-domain crossings.** `RESET` reached the 48 MHz USB domain
+  unsynchronised, and the PLL's `LOCKED` output drove the system reset
+  *combinationally* — an unfiltered asynchronous input on the reset line, past
+  the debounce whose whole purpose is to stop exactly that. Both are the class
+  of fault static timing analysis cannot see, because declaring a path
+  asynchronous is an instruction not to check it.
 
 ### v1.31 — the SPI chip gets a drive number of its own
 
