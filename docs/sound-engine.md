@@ -48,6 +48,9 @@ rather than 8×16 ports because I/O space is scarce and a tracker writes a whole
 voice at once anyway — select once, write the fields, key on.
 
     0x300   VOICESEL  W   [2:0] which voice the window below refers to
+            ID0       R   0x47 'G'
+    0x301   ID1       R   0x56 'V'
+    0x302   NVOICES   R   how many voices this build has
     0x301   CTL       W   [0] RUN    1 = playing, 0 = silent
                            [1] LOOP   1 = wrap to LOOP on reaching END
                            [2] KEYON  write 1 to restart from START
@@ -68,6 +71,22 @@ voice at once anyway — select once, write the fields, key on.
                            voice: a tracker asks "which voices are free", and
                            having to select each one to ask is eight times the
                            I/O for the same answer)
+
+### Detection
+
+Reads and writes differ on the first three ports, which is ordinary for I/O and
+buys a probe that cannot be fooled:
+
+    0x300 -> 'G'    0x301 -> 'V'    0x302 -> voice count
+
+A machine without this reads 0xFF from an open bus or 0x00 from a decoded-but-
+empty one, and neither spells GV. Probing by "did something answer" is what the
+BIOS flash tool nearly did with drive 2 -- the floppy path answers AH=08 for any
+drive number with carry clear, so a positive signature is the only honest test.
+
+NVOICES is read rather than assumed so software written against eight voices
+still works if a build has four, and gains nothing to fix if a build has
+sixteen.
 
 Addresses are **physical byte addresses**, 20 bits, exactly what a real-mode
 program computes as `segment*16 + offset`. No upload step and no separate
@@ -153,8 +172,19 @@ That is a few dozen I/O writes every 20 ms against 44,100 sample operations a
 second. The `busy` figure should become unmeasurable, and eight voices should
 cost no more than four.
 
-The Sound Blaster path stays in the binary. A machine with this bitstream plays
-modules through the voices; one without still plays them through the mixer.
+MODPLAY probes for 'GV' at startup and uses the voices when it finds them,
+falling back to the software mixer when it does not. Both paths stay in the
+binary: the same executable plays a module on a board with this bitstream and
+on one without, and `-s` forces the software path so the two can be compared on
+the same module in the same session.
+
+Tick timing differs between the paths and this is easy to get wrong. In software
+mode the sequencer advances by samples MIXED, which is self-clocking. With the
+mixing gone there is nothing to count, so the hardware path derives ticks from
+PIT channel 0 -- polled, not reprogrammed, because DOS owns that timer. Mode 3
+decrements it by two, so it spans 32768 clocks and wraps every 27.5 ms, while a
+tick at 125 BPM is 20 ms: comfortably inside one span provided the loop polls
+more than twice per wrap, which it does with nothing else to do.
 
 ## Cost
 
