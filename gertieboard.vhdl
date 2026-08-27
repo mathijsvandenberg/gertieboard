@@ -129,6 +129,8 @@ ARCHITECTURE structural OF gertieboard IS
   SIGNAL n_dma_ch               : std_logic_vector(1 downto 0);  -- channel owning the bus
   SIGNAL n_sb_irq               : std_logic;                     -- SB DSP -> IR5
   SIGNAL n_sb_pcm               : std_logic_vector(15 DOWNTO 0); -- FM + DAC
+  SIGNAL n_vo_pcm               : std_logic_vector(15 DOWNTO 0); -- + the voices
+  SIGNAL n_vo_pcm_stb           : std_logic;
   SIGNAL n_sb_pcm_stb           : std_logic;
   SIGNAL n_fl_cs                : std_logic;
   SIGNAL n_fl_do                : std_logic;
@@ -831,6 +833,30 @@ BEGIN
       PCM_STB              => n_sb_pcm_stb
     );
 
+  -- The voice engine. Third and last stage of the PCM pipeline: the OPL2 hands
+  -- its stream to the Sound Blaster, which adds its DAC, which hands it here.
+  -- Each stage sums into what it was given, so there is no mixer module and
+  -- usb_host still sees exactly one source.
+  vo1 : ENTITY work.voices
+    GENERIC MAP (
+      IO_BASE              => x"0300",
+      NVOICE               => 8
+    )
+    PORT MAP (
+      CLK                  => n_cpuclk,
+      RESET                => n_rst_out,
+      ADDR                 => n_io_addr,
+      RD                   => n_io_rd,
+      WR                   => n_io_wr,
+      DATAIN               => n_cpu_wdata,
+      DATAOUT              => n_periph_rdata,
+      CLK48                => n_clk48,
+      PCM_IN               => n_sb_pcm,
+      PCM_STB_IN           => n_sb_pcm_stb,
+      PCM                  => n_vo_pcm,
+      PCM_STB              => n_vo_pcm_stb
+    );
+
   -- 48 MHz for the USB SIE. This replaces the dead `pll2` the schematic
   -- conversion left behind, which had every output OPEN.
   pll48_1 : ENTITY work.pll48
@@ -890,8 +916,8 @@ BEGIN
       IRQ                  => n_irq2,
       USB_DP               => USB1_DP,
       USB_DM               => USB1_DM,
-      AUD_PCM              => n_sb_pcm,
-      AUD_STB              => n_sb_pcm_stb,
+      AUD_PCM              => n_vo_pcm,
+      AUD_STB              => n_vo_pcm_stb,
       AUD_EN               => n_aud_en,
       AUD_ADDR             => n_aud_addr,
       AUD_ENDP             => n_aud_endp,
